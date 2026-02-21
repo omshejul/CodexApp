@@ -41,6 +41,17 @@ export class GatewayConnectionError extends Error {
   }
 }
 
+export class ApiHttpError extends Error {
+  status: number;
+  body: string;
+
+  constructor(status: number, body: string) {
+    super(body || `Request failed with ${status}`);
+    this.status = status;
+    this.body = body;
+  }
+}
+
 function isLikelyNetworkUnreachableError(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
@@ -275,7 +286,7 @@ export async function authenticatedRequest<T>(
 
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(body || `Request failed with ${response.status}`);
+    throw new ApiHttpError(response.status, body);
   }
 
   if (response.status === 204) {

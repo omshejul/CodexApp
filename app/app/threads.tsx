@@ -5,6 +5,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { MotiView } from "moti";
 import { SafeAreaView } from "react-native-safe-area-context";
 import {
+  ApiHttpError,
   clearSession,
   createThread,
   getCurrentServerBaseUrl,
@@ -205,16 +206,26 @@ export default function ThreadsScreen() {
     setShowSettingsMenu(true);
     setSettingsInfoLoading(true);
     setSettingsInfoError(null);
+    setDefaultModel(null);
+    setModelCount(0);
+    setPairedDevices([]);
     try {
-      const [serverBaseUrl, options, devices] = await Promise.all([
-        getCurrentServerBaseUrl(),
-        getGatewayOptions(),
-        getPairedDevices(),
-      ]);
+      const serverBaseUrl = await getCurrentServerBaseUrl();
       setPairedServer(serverBaseUrl);
-      setDefaultModel(options.defaultModel ?? null);
-      setModelCount(options.models.length);
-      setPairedDevices(devices.devices);
+      const [optionsResult, devicesResult] = await Promise.allSettled([getGatewayOptions(), getPairedDevices()]);
+
+      if (optionsResult.status === "fulfilled") {
+        setDefaultModel(optionsResult.value.defaultModel ?? null);
+        setModelCount(optionsResult.value.models.length);
+      } else if (!(optionsResult.reason instanceof ApiHttpError && optionsResult.reason.status === 404)) {
+        throw optionsResult.reason;
+      }
+
+      if (devicesResult.status === "fulfilled") {
+        setPairedDevices(devicesResult.value.devices);
+      } else if (!(devicesResult.reason instanceof ApiHttpError && devicesResult.reason.status === 404)) {
+        throw devicesResult.reason;
+      }
     } catch (settingsError) {
       if (settingsError instanceof ReauthRequiredError) {
         await clearSession();
