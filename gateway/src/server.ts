@@ -911,23 +911,140 @@ async function bootstrap() {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Codex Phone Pairing</title>
   <style>
-    body { font-family: ui-sans-serif, -apple-system, sans-serif; padding: 24px; color: #111827; background: #f9fafb; }
-    .card { max-width: 520px; margin: 0 auto; background: white; border-radius: 16px; padding: 20px; box-shadow: 0 10px 30px rgba(0,0,0,.08); }
-    button { background: #111827; color: white; border: 0; border-radius: 10px; padding: 10px 14px; cursor: pointer; font-weight: 600; }
-    img { width: 280px; height: 280px; display: block; margin: 12px auto; border: 8px solid #fff; box-shadow: 0 2px 10px rgba(0,0,0,.12); }
-    code { display: block; padding: 10px; background: #f3f4f6; border-radius: 8px; overflow-wrap: anywhere; }
-    .muted { color: #6b7280; font-size: 14px; }
+    :root {
+      --bg: #f3f4f6;
+      --panel: #ffffff;
+      --text: #0f172a;
+      --muted: #6b7280;
+      --line: #e5e7eb;
+      --accent: #0f172a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: radial-gradient(circle at top, #ffffff, var(--bg) 45%);
+      color: var(--text);
+      display: grid;
+      place-items: center;
+      padding: 22px;
+    }
+    .card {
+      width: 100%;
+      max-width: 520px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 22px;
+      box-shadow: 0 8px 28px rgba(15, 23, 42, 0.08);
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(1.75rem, 4.8vw, 2.2rem);
+      line-height: 1.1;
+      letter-spacing: -0.02em;
+    }
+    .muted {
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 0.98rem;
+    }
+    .actions { margin-top: 16px; }
+    button {
+      appearance: none;
+      border: 0;
+      border-radius: 10px;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 650;
+      font-size: 0.95rem;
+      line-height: 1;
+      padding: 12px 16px;
+      cursor: pointer;
+    }
+    button:hover { opacity: 0.92; }
+    .qr-wrap {
+      margin: 18px 0 14px;
+      background: #f8fafc;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 10px;
+      display: flex;
+      justify-content: center;
+    }
+    img {
+      width: min(100%, 320px);
+      max-width: 320px;
+      height: auto;
+      aspect-ratio: 1 / 1;
+      background: #fff;
+      border-radius: 8px;
+    }
+    .meta {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+      margin-top: 4px;
+    }
+    .row {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .label {
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+    .value {
+      font-size: 1.9rem;
+      line-height: 1;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+    .url-label {
+      margin: 14px 0 6px;
+      color: var(--muted);
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    code {
+      display: block;
+      border: 1px solid var(--line);
+      background: #f8fafc;
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 0.95rem;
+      overflow-wrap: anywhere;
+      white-space: pre-wrap;
+      user-select: all;
+    }
   </style>
 </head>
 <body>
   <div class="card">
     <h1>Codex Phone Pairing</h1>
     <p class="muted">Open the Codex Phone app and scan this QR code.</p>
-    <button id="regen">Generate new pairing QR</button>
-    <img id="qr" alt="pairing QR" />
-    <p><strong>Code:</strong> <span id="code"></span></p>
-    <p><strong>Expires:</strong> <span id="expires"></span></p>
-    <p class="muted">Pairing URL</p>
+    <div class="actions">
+      <button id="regen">Generate New QR</button>
+    </div>
+    <div class="qr-wrap">
+      <img id="qr" alt="Pairing QR code" />
+    </div>
+    <div class="meta">
+      <div class="row">
+        <span class="label">Code</span>
+        <span class="value" id="code"></span>
+      </div>
+      <div class="row">
+        <span class="label">Expires</span>
+        <span id="expires"></span>
+      </div>
+    </div>
+    <p class="url-label">Pairing URL</p>
     <code id="url"></code>
   </div>
   <script>

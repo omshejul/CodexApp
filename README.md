@@ -124,3 +124,7 @@ pod install --repo-update
 - Access token is JWT HS256 and short-lived (15 minutes).
 - Refresh token lifetime is 30 days and stored hashed server-side.
 - Pairing claim endpoint is rate-limited.
+
+## macOS Gateway App
+
+- Configurable menu bar app guide: `/Users/omshejul/Code/CodexApp/docs/MAC_GATEWAY_APP.md`

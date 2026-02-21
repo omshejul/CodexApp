@@ -5,6 +5,7 @@
     "version": "0.1.0",
     "orientation": "portrait",
     "scheme": "codex-phone",
+    "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "plugins": [
       "expo-router",
@@ -15,11 +16,16 @@
       "typedRoutes": true
     },
     "android": {
-      "package": "com.codex.phone"
+      "package": "com.codex.phone",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#0f172a"
+      }
     },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.codex.phone",
+      "icon": "./assets/icon.png",
       "appleTeamId": "M4K84L4TKR"
     },
     "extra": {

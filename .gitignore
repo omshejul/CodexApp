@@ -15,4 +15,7 @@ app/.expo-shared
 app/dist
 app/node_modules
 
+mac/CodexGatewayMenu/.build
+mac/CodexGatewayMenu/build
+
 *.tsbuildinfo
