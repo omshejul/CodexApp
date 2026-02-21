@@ -24,8 +24,8 @@ The app no longer depends on local `gateway/` source paths at runtime.
 - Gateway runs locally on `127.0.0.1:<port>` (default `8787`).
 - Pair page always opens locally: `http://127.0.0.1:<port>/pair`.
 - App stores writable runtime state in:
-  - `~/Library/Application Support/CodexGatewayMenu/gateway.sqlite`
-  - `~/Library/Application Support/CodexGatewayMenu/logs/`
+  - `~/Library/Application Support/CodexGateway/gateway.sqlite`
+  - `~/Library/Application Support/CodexGateway/logs/`
 - On setup/start, app configures Tailscale route:
   - `tailscale serve --service codexgateway --bg http://127.0.0.1:<port>`
   - If this CLI rejects `--service`, app falls back to: `tailscale serve --bg http://127.0.0.1:<port>`
@@ -57,8 +57,8 @@ NOTARYTOOL_PROFILE="codex-notary" \
 ```
 
 Outputs:
-- `/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.app`
-- `/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.dmg`
+- `/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGateway.app`
+- `/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGateway.dmg`
 
 ## Signed + Notarized Release
 
@@ -118,17 +118,17 @@ NOTARYTOOL_PROFILE="codex-gateway" \
 ```
 
 4. Output artifacts:
-- `/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.app`
-- `/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.dmg`
+- `/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGateway.app`
+- `/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGateway.dmg`
 
 5. Optional validation commands:
 
 ```bash
-spctl -a -t exec -vv /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.app
-spctl -a -t open -vv /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.dmg
-codesign --verify --deep --strict --verbose=2 /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.app
-xcrun stapler validate /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.app
-xcrun stapler validate /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.dmg
+spctl -a -t exec -vv /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGateway.app
+spctl -a -t open -vv /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGateway.dmg
+codesign --verify --deep --strict --verbose=2 /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGateway.app
+xcrun stapler validate /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGateway.app
+xcrun stapler validate /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGateway.dmg
 ```
 
 6. Optional notarization history check:

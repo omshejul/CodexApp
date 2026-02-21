@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 REPO_ROOT="$(cd "$ROOT_DIR/../.." && pwd)"
-APP_NAME="CodexGatewayMenu"
+APP_NAME="CodexGateway"
+APP_DISPLAY_NAME="CodexGateway"
 BUILD_DIR="$ROOT_DIR/.build/release"
 OUT_DIR="$ROOT_DIR/build"
 APP_DIR="$OUT_DIR/$APP_NAME.app"
@@ -160,19 +161,21 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key>
   <string>$APP_NAME</string>
   <key>CFBundleIdentifier</key>
-  <string>com.codex.gateway.menu</string>
+  <string>com.codex.gateway</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleName</key>
-  <string>$APP_NAME</string>
+  <string>$APP_DISPLAY_NAME</string>
+  <key>CFBundleDisplayName</key>
+  <string>$APP_DISPLAY_NAME</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.2.0</string>
+  <string>0.1.1</string>
   <key>CFBundleVersion</key>
-  <string>2</string>
+  <string>1</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSUIElement</key>
@@ -222,12 +225,56 @@ BG_PATH="$BG_PATH" python3 - <<'PY'
 import os
 from PIL import Image, ImageDraw
 
+ICON_LEFT_X = 165
+ICON_RIGHT_X = 545
+
+
+SCALE = 2
+
+
+def s(value):
+    return int(round(value * SCALE))
+
+
 bg_path = os.environ["BG_PATH"]
-img = Image.new("RGB", (720, 420), "white")
-draw = ImageDraw.Draw(img)
-draw.line((290, 210, 430, 210), fill="black", width=8)
-draw.polygon([(430, 190), (430, 230), (470, 210)], fill="black")
-img.save(bg_path)
+img = Image.new("RGBA", (s(720), s(420)), "white")
+draw = ImageDraw.Draw(img, "RGBA")
+
+# Center directional arrow inspired by common DMG layouts: short, subtle, and crisp.
+arrow_mid_x = s((ICON_LEFT_X + ICON_RIGHT_X) / 2)
+arrow_mid_y = s(205)
+chevron_size = s(20)
+shadow_offset = s(2)
+
+draw.line(
+    (
+        arrow_mid_x - chevron_size // 2 + shadow_offset,
+        arrow_mid_y - chevron_size + shadow_offset,
+        arrow_mid_x + chevron_size // 2 + shadow_offset,
+        arrow_mid_y + shadow_offset,
+        arrow_mid_x - chevron_size // 2 + shadow_offset,
+        arrow_mid_y + chevron_size + shadow_offset,
+    ),
+    fill=(255, 255, 255, 140),
+    width=s(5),
+    joint="curve",
+)
+draw.line(
+    (
+        arrow_mid_x - chevron_size // 2,
+        arrow_mid_y - chevron_size,
+        arrow_mid_x + chevron_size // 2,
+        arrow_mid_y,
+        arrow_mid_x - chevron_size // 2,
+        arrow_mid_y + chevron_size,
+    ),
+    fill=(35, 43, 58, 255),
+    width=s(5),
+    joint="curve",
+)
+
+img = img.resize((720, 420), Image.Resampling.LANCZOS)
+img.convert("RGB").save(bg_path)
 PY
 
 hdiutil create -volname "$DMG_VOLUME_NAME" -srcfolder "$DMG_STAGE" -ov -format UDRW -fs HFS+ "$DMG_RW_PATH"
@@ -251,29 +298,28 @@ then
   ln -s /Applications "$DMG_MOUNT_DIR/Applications"
 fi
 
-osascript <<EOF
-tell application "Finder"
-  tell disk (POSIX file "$DMG_MOUNT_DIR" as alias)
-    open
-    set current view of container window to icon view
-    set toolbar visible of container window to false
-    set statusbar visible of container window to false
-    set bounds of container window to {120, 120, 840, 540}
-    set viewOptions to the icon view options of container window
-    set arrangement of viewOptions to not arranged
-    set icon size of viewOptions to 128
-    set text size of viewOptions to 14
-    set shows icon preview of viewOptions to false
-    set background picture of viewOptions to POSIX file "$DMG_BG_POSIX"
-    set position of item "$APP_NAME.app" of container window to {180, 220}
-    set position of item "Applications" of container window to {560, 220}
-    close
-    open
-    update without registering applications
-    delay 1
-  end tell
-end tell
-EOF
+osascript \
+  -e 'tell application "Finder"' \
+  -e "tell disk (POSIX file \"$DMG_MOUNT_DIR\" as alias)" \
+  -e 'open' \
+  -e 'set current view of container window to icon view' \
+  -e 'set toolbar visible of container window to false' \
+  -e 'set statusbar visible of container window to false' \
+  -e 'set bounds of container window to {120, 120, 840, 540}' \
+  -e 'set viewOptions to the icon view options of container window' \
+  -e 'set arrangement of viewOptions to not arranged' \
+  -e 'set icon size of viewOptions to 128' \
+  -e 'set text size of viewOptions to 14' \
+  -e 'set shows icon preview of viewOptions to false' \
+  -e "set background picture of viewOptions to POSIX file \"$DMG_BG_POSIX\"" \
+  -e "set position of item \"$APP_NAME.app\" of container window to {165, 205}" \
+  -e 'set position of item "Applications" of container window to {545, 205}' \
+  -e 'close' \
+  -e 'open' \
+  -e 'update without registering applications' \
+  -e 'delay 1' \
+  -e 'end tell' \
+  -e 'end tell'
 
 sync
 DETACH_TARGET="${DMG_DEVICE:-$DMG_MOUNT_DIR}"

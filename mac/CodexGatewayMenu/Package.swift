@@ -2,16 +2,16 @@
 import PackageDescription
 
 let package = Package(
-  name: "CodexGatewayMenu",
+  name: "CodexGateway",
   platforms: [
     .macOS(.v13)
   ],
   products: [
-    .executable(name: "CodexGatewayMenu", targets: ["CodexGatewayMenu"])
+    .executable(name: "CodexGateway", targets: ["CodexGateway"])
   ],
   targets: [
     .executableTarget(
-      name: "CodexGatewayMenu",
+      name: "CodexGateway",
       path: "Sources/CodexGatewayMenu",
       resources: [
         .process("Resources")

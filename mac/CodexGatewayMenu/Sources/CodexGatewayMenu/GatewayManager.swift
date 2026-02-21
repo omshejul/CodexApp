@@ -37,6 +37,8 @@ final class GatewayManager: ObservableObject {
   @Published var pairedDevices: [PairedDevice] = []
   @Published var needsFullDiskAccess = false
 
+  private static let filesAndFoldersPrimeDefaultsKey = "codexgateway.files-and-folders-primed.v1"
+  private static let filesAndFoldersPrimePendingDefaultsKey = "codexgateway.files-and-folders-prime-pending.v1"
   private var process: Process?
   private var didBootstrap = false
   private var didShowFullDiskAccessPrompt = false
@@ -82,12 +84,20 @@ final class GatewayManager: ObservableObject {
     didBootstrap = true
 
     refreshFullDiskAccessStatus()
-    guard enforceFullDiskAccessRequirement() else { return }
-    refreshSetupStatus()
-    if config.autoStart {
-      Task { await start() }
+    if needsFullDiskAccess {
+      UserDefaults.standard.set(true, forKey: Self.filesAndFoldersPrimePendingDefaultsKey)
+      guard enforceFullDiskAccessRequirement() else { return }
+    } else {
+      guard ensureFilesAndFoldersAccessIfNeeded() else { return }
     }
-    Task { await refreshPairedDevices() }
+    refreshSetupStatus()
+    Task {
+      await fixSetup(autoTriggered: true)
+      if config.autoStart {
+        await start()
+      }
+      await refreshPairedDevices()
+    }
   }
 
   func refreshFullDiskAccessStatus() {
@@ -120,7 +130,7 @@ final class GatewayManager: ObservableObject {
     let alert = NSAlert()
     alert.messageText = "Allow Full Disk Access"
     alert.informativeText =
-      "Codex Gateway requires Full Disk Access to run. Enable it for this app and its helper in Privacy & Security > Full Disk Access, then relaunch the app."
+      "Codex Gateway requires Full Disk Access to run. Enable it for this app and its helper in \nPrivacy & Security > Full Disk Access, then relaunch the app."
     alert.addButton(withTitle: "Open Settings")
     alert.addButton(withTitle: "Close")
     alert.alertStyle = .informational
@@ -135,6 +145,7 @@ final class GatewayManager: ObservableObject {
   func start() async {
     guard !isRunning else { return }
     guard enforceFullDiskAccessRequirement() else { return }
+    guard ensureFilesAndFoldersAccessIfNeeded() else { return }
 
     let diagnostics = diagnoseSetup()
     conflictingPID = diagnostics.portConflictPID
@@ -242,13 +253,13 @@ final class GatewayManager: ObservableObject {
     }
   }
 
-  func fixSetup() async {
+  func fixSetup(autoTriggered: Bool = false) async {
     guard !isFixingSetup else { return }
     guard enforceFullDiskAccessRequirement() else { return }
     isFixingSetup = true
     defer { isFixingSetup = false }
 
-    appendOutput("Running setup checks...")
+    appendOutput(autoTriggered ? "Running automatic setup checks..." : "Running setup checks...")
 
     var nextConfig = normalizeConfig(config)
     nextConfig.environment["PATH"] = buildRuntimePATH(existing: nextConfig.environment["PATH"])
@@ -279,11 +290,11 @@ final class GatewayManager: ObservableObject {
     let diagnostics = diagnoseSetup()
     conflictingPID = diagnostics.portConflictPID
     if diagnostics.bundledNodeReady && diagnostics.bundledGatewayReady && diagnostics.codexReady {
-      statusMessage = "Setup complete. Click Start."
-      appendOutput("Setup complete.")
+      statusMessage = autoTriggered ? "Ready" : "Setup complete. Click Start."
+      appendOutput(autoTriggered ? "Automatic setup check complete." : "Setup complete.")
     } else {
       refreshSetupStatus()
-      appendOutput("Setup finished with remaining checks. See status above.")
+      appendOutput(autoTriggered ? "Automatic setup check finished with remaining checks." : "Setup finished with remaining checks. See status above.")
     }
   }
 
@@ -595,7 +606,11 @@ final class GatewayManager: ObservableObject {
   private func appSupportDirectory() -> URL {
     let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
       ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
-    let appDir = base.appendingPathComponent("CodexGatewayMenu", isDirectory: true)
+    let appDir = base.appendingPathComponent("CodexGateway", isDirectory: true)
+    let legacyDir = base.appendingPathComponent("CodexGatewayMenu", isDirectory: true)
+    if !FileManager.default.fileExists(atPath: appDir.path), FileManager.default.fileExists(atPath: legacyDir.path) {
+      try? FileManager.default.moveItem(at: legacyDir, to: appDir)
+    }
     try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
     return appDir
   }
@@ -609,6 +624,46 @@ final class GatewayManager: ObservableObject {
     } catch {
       return false
     }
+  }
+
+  @discardableResult
+  private func ensureFilesAndFoldersAccessIfNeeded() -> Bool {
+    let defaults = UserDefaults.standard
+    let shouldPrimeAfterRestart = defaults.bool(forKey: Self.filesAndFoldersPrimePendingDefaultsKey)
+    let alreadyPrimed = defaults.bool(forKey: Self.filesAndFoldersPrimeDefaultsKey)
+
+    // If this is the first launch after granting Full Disk Access, or if never primed,
+    // trigger Files & Folders consent before the gateway starts.
+    guard shouldPrimeAfterRestart || !alreadyPrimed else { return true }
+
+    let home = FileManager.default.homeDirectoryForCurrentUser
+    let protectedFolders = [
+      home.appendingPathComponent("Desktop", isDirectory: true),
+      home.appendingPathComponent("Documents", isDirectory: true),
+      home.appendingPathComponent("Downloads", isDirectory: true)
+    ]
+
+    var deniedFolders: [String] = []
+    for folder in protectedFolders where FileManager.default.fileExists(atPath: folder.path) {
+      do {
+        _ = try FileManager.default.contentsOfDirectory(atPath: folder.path)
+      } catch {
+        deniedFolders.append(folder.lastPathComponent)
+      }
+    }
+
+    guard deniedFolders.isEmpty else {
+      defaults.set(false, forKey: Self.filesAndFoldersPrimeDefaultsKey)
+      defaults.set(true, forKey: Self.filesAndFoldersPrimePendingDefaultsKey)
+      statusMessage = "Folder access required"
+      appendOutput("Folder access denied for: \(deniedFolders.joined(separator: ", ")). Allow access and try again.")
+      return false
+    }
+
+    defaults.set(true, forKey: Self.filesAndFoldersPrimeDefaultsKey)
+    defaults.set(false, forKey: Self.filesAndFoldersPrimePendingDefaultsKey)
+    appendOutput("Ran one-time macOS folder-access onboarding check.")
+    return true
   }
 
   private func discoverTailscaleMagicBaseURL(environment: [String: String]) -> String? {
@@ -688,7 +743,7 @@ final class GatewayManager: ObservableObject {
     process.environment = mergedEnv
 
     let tempURL = FileManager.default.temporaryDirectory
-      .appendingPathComponent("codex-gateway-menu-\(UUID().uuidString).log")
+      .appendingPathComponent("codex-gateway-\(UUID().uuidString).log")
     FileManager.default.createFile(atPath: tempURL.path, contents: nil)
     guard let fileHandle = try? FileHandle(forWritingTo: tempURL) else {
       return (1, "Process execution failed: could not open temporary log file.")

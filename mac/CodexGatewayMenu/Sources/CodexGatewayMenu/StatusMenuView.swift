@@ -2,7 +2,7 @@ import SwiftUI
 
 struct StatusMenuView: View {
   @ObservedObject var manager: GatewayManager
-  @Environment(\.openWindow) private var openWindow
+  let onOpenSettings: () -> Void
   private static let addedDateFormatter: DateFormatter = {
     let formatter = DateFormatter()
     formatter.dateStyle = .medium
@@ -63,11 +63,6 @@ struct StatusMenuView: View {
         .disabled(!manager.isRunning || manager.isFixingSetup)
       }
 
-      Button(manager.isFixingSetup ? "Fixing..." : "Fix Setup") {
-        Task { await manager.fixSetup() }
-      }
-      .disabled(manager.needsFullDiskAccess || manager.isFixingSetup || manager.isRunning)
-
       if let pid = manager.conflictingPID, !manager.isRunning {
         Button("Stop Other Process (PID \(pid))") {
           manager.stopConflictingProcess()
@@ -81,7 +76,7 @@ struct StatusMenuView: View {
 
       Button("Settings") {
         NSApp.activate(ignoringOtherApps: true)
-        openWindow(id: "settings")
+        onOpenSettings()
       }
 
       Button("Copy Logs") {
@@ -174,7 +169,6 @@ struct StatusMenuView: View {
     .padding(12)
     .frame(width: 500)
     .onAppear {
-      manager.bootstrap()
       manager.refreshFullDiskAccessStatus()
     }
   }

@@ -1447,7 +1447,7 @@ async function bootstrap() {
     const imageInputs = (parsedBody.data.images ?? [])
       .map((image) => image.imageUrl.trim())
       .filter((imageUrl) => imageUrl.length > 0)
-      .map((imageUrl) => ({ type: "image", image_url: imageUrl }));
+      .map((imageUrl) => ({ type: "image", url: imageUrl }));
     const input = [
       ...(trimmedText ? [{ type: "text", text: trimmedText, text_elements: [] }] : []),
       ...imageInputs,

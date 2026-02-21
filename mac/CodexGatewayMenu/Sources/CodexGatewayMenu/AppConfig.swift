@@ -84,6 +84,13 @@ enum ConfigStore {
   static func configURL() -> URL {
     let home = FileManager.default.homeDirectoryForCurrentUser
     return home
+      .appendingPathComponent(".codex-gateway", isDirectory: true)
+      .appendingPathComponent("config.json", isDirectory: false)
+  }
+
+  private static func legacyConfigURL() -> URL {
+    let home = FileManager.default.homeDirectoryForCurrentUser
+    return home
       .appendingPathComponent(".codex-gateway-menu", isDirectory: true)
       .appendingPathComponent("config.json", isDirectory: false)
   }
@@ -91,8 +98,16 @@ enum ConfigStore {
   static func load() throws -> AppConfig {
     let url = configURL()
     if !FileManager.default.fileExists(atPath: url.path) {
-      try save(AppConfig.default)
-      return .default
+      let legacyURL = legacyConfigURL()
+      if FileManager.default.fileExists(atPath: legacyURL.path) {
+        let legacyData = try Data(contentsOf: legacyURL)
+        let migrated = try JSONDecoder().decode(AppConfig.self, from: legacyData)
+        try save(migrated)
+        return migrated
+      } else {
+        try save(AppConfig.default)
+        return .default
+      }
     }
 
     let data = try Data(contentsOf: url)
