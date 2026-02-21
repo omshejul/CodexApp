@@ -617,6 +617,11 @@ export default function ThreadScreen() {
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [streamingAssistant, setStreamingAssistant] = useState("");
+  const [streamingTerminalOutput, setStreamingTerminalOutput] = useState("");
+  const [streamingReasoning, setStreamingReasoning] = useState("");
+  const [streamingPlan, setStreamingPlan] = useState("");
+  const [streamingFileChanges, setStreamingFileChanges] = useState("");
+  const [streamingToolProgress, setStreamingToolProgress] = useState("");
   const [isThinking, setIsThinking] = useState(false);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [selectedReasoning, setSelectedReasoning] = useState<ReasoningEffort | null>(null);
@@ -847,6 +852,121 @@ export default function ThreadScreen() {
     });
   }, []);
 
+  const flushStreamingTerminalOutput = useCallback(() => {
+    setStreamingTerminalOutput((current) => {
+      const normalized = current.trim();
+      if (!normalized) {
+        return "";
+      }
+      setTurns((existing) => [
+        ...existing,
+        {
+          id: `terminal-${Date.now()}`,
+          role: "system",
+          text: "",
+          kind: "activity",
+          activity: {
+            title: "Terminal output",
+            detail: current,
+          },
+        },
+      ]);
+      return "";
+    });
+  }, []);
+
+  const flushStreamingReasoning = useCallback(() => {
+    setStreamingReasoning((current) => {
+      const normalized = current.trim();
+      if (!normalized) {
+        return "";
+      }
+      setTurns((existing) => [
+        ...existing,
+        {
+          id: `reasoning-${Date.now()}`,
+          role: "system",
+          text: "",
+          kind: "activity",
+          activity: {
+            title: "Reasoning",
+            detail: current,
+          },
+        },
+      ]);
+      return "";
+    });
+  }, []);
+
+  const flushStreamingPlan = useCallback(() => {
+    setStreamingPlan((current) => {
+      const normalized = current.trim();
+      if (!normalized) {
+        return "";
+      }
+      setTurns((existing) => [
+        ...existing,
+        {
+          id: `plan-${Date.now()}`,
+          role: "system",
+          text: "",
+          kind: "activity",
+          activity: {
+            title: "Plan",
+            detail: current,
+          },
+        },
+      ]);
+      return "";
+    });
+  }, []);
+
+  const flushStreamingFileChanges = useCallback(() => {
+    setStreamingFileChanges((current) => {
+      const normalized = current.trim();
+      if (!normalized) {
+        return "";
+      }
+      setTurns((existing) => [
+        ...existing,
+        {
+          id: `filechanges-${Date.now()}`,
+          role: "system",
+          text: "",
+          kind: "activity",
+          activity: {
+            title: "File changes",
+            detail: current,
+          },
+        },
+      ]);
+      return "";
+    });
+  }, []);
+
+  const flushStreamingToolProgress = useCallback(() => {
+    setStreamingToolProgress((current) => {
+      const normalized = current.trim();
+      if (!normalized) {
+        return "";
+      }
+      setTurns((existing) => [
+        ...existing,
+        {
+          id: `toolprogress-${Date.now()}`,
+          role: "system",
+          text: "",
+          kind: "activity",
+          activity: {
+            title: "Tool progress",
+            detail: current,
+          },
+        },
+      ]);
+      return "";
+    });
+  }, []);
+
   useEffect(() => {
     if (!threadId) {
       return;
@@ -858,6 +978,11 @@ export default function ThreadScreen() {
     draggingRef.current = false;
     setShowScrollToBottom(false);
     setStreamingAssistant("");
+    setStreamingTerminalOutput("");
+    setStreamingReasoning("");
+    setStreamingPlan("");
+    setStreamingFileChanges("");
+    setStreamingToolProgress("");
     setIsThinking(false);
     setActiveTurnId(null);
     setHeaderTitle("Chat");
@@ -969,7 +1094,63 @@ export default function ThreadScreen() {
             return;
           }
 
-          if (method.includes("delta")) {
+          if (method.includes("commandexecution/outputdelta")) {
+            const delta = extractDeltaText(payload.params);
+            if (delta) {
+              setStreamingTerminalOutput((existing) => `${existing}${delta}`);
+            }
+            return;
+          }
+
+          if (
+            method.includes("reasoning/textdelta") ||
+            method.includes("reasoning/summarytextdelta") ||
+            method.includes("reasoning/summarypartadded")
+          ) {
+            const delta = extractDeltaText(payload.params);
+            const chunk =
+              delta ||
+              (payload.params && typeof payload.params === "object" ? JSON.stringify(payload.params, null, 2) : "");
+            if (chunk) {
+              setStreamingReasoning((existing) => `${existing}${chunk}`);
+            }
+            return;
+          }
+
+          if (method.includes("item/plan/delta") || method.includes("turn/plan/updated")) {
+            const delta = extractDeltaText(payload.params);
+            const chunk =
+              delta ||
+              (payload.params && typeof payload.params === "object" ? JSON.stringify(payload.params, null, 2) : "");
+            if (chunk) {
+              setStreamingPlan((existing) => `${existing}${existing && !chunk.startsWith("\n") ? "\n" : ""}${chunk}`);
+            }
+            return;
+          }
+
+          if (method.includes("item/filechange/outputdelta")) {
+            const delta = extractDeltaText(payload.params);
+            const chunk =
+              delta ||
+              (payload.params && typeof payload.params === "object" ? JSON.stringify(payload.params, null, 2) : "");
+            if (chunk) {
+              setStreamingFileChanges((existing) => `${existing}${chunk}`);
+            }
+            return;
+          }
+
+          if (method.includes("item/mcptoolcall/progress")) {
+            const delta = extractDeltaText(payload.params);
+            const chunk =
+              delta ||
+              (payload.params && typeof payload.params === "object" ? JSON.stringify(payload.params, null, 2) : "");
+            if (chunk) {
+              setStreamingToolProgress((existing) => `${existing}${existing && !chunk.startsWith("\n") ? "\n" : ""}${chunk}`);
+            }
+            return;
+          }
+
+          if (method.includes("agentmessage/delta")) {
             const delta = extractDeltaText(payload.params);
             if (delta) {
               setStreamingAssistant((existing) => `${existing}${delta}`);
@@ -981,6 +1162,11 @@ export default function ThreadScreen() {
             setIsThinking(false);
             setActiveTurnId(null);
             flushStreamingAssistant();
+            flushStreamingTerminalOutput();
+            flushStreamingReasoning();
+            flushStreamingPlan();
+            flushStreamingFileChanges();
+            flushStreamingToolProgress();
             return;
           }
 
@@ -988,6 +1174,11 @@ export default function ThreadScreen() {
             setIsThinking(false);
             setActiveTurnId(null);
             flushStreamingAssistant();
+            flushStreamingTerminalOutput();
+            flushStreamingReasoning();
+            flushStreamingPlan();
+            flushStreamingFileChanges();
+            flushStreamingToolProgress();
           }
         };
 
@@ -1064,7 +1255,15 @@ export default function ThreadScreen() {
       streamSocketRef.current?.close();
       streamSocketRef.current = null;
     };
-  }, [threadId, flushStreamingAssistant]);
+  }, [
+    threadId,
+    flushStreamingAssistant,
+    flushStreamingTerminalOutput,
+    flushStreamingReasoning,
+    flushStreamingPlan,
+    flushStreamingFileChanges,
+    flushStreamingToolProgress,
+  ]);
 
   useEffect(() => {
     if (!threadId) {
@@ -1091,6 +1290,11 @@ export default function ThreadScreen() {
         if (nextSignature !== turnsSignatureRef.current) {
           turnsSignatureRef.current = nextSignature;
           setStreamingAssistant("");
+          setStreamingTerminalOutput("");
+          setStreamingReasoning("");
+          setStreamingPlan("");
+          setStreamingFileChanges("");
+          setStreamingToolProgress("");
           setTurns(rendered);
         }
         markConnectionRecovered();
@@ -1157,7 +1361,7 @@ export default function ThreadScreen() {
       }
     }, 40);
     return () => clearTimeout(timer);
-  }, [turns, streamingAssistant]);
+  }, [turns, streamingAssistant, streamingTerminalOutput, streamingReasoning, streamingPlan, streamingFileChanges, streamingToolProgress]);
 
   const onListScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
@@ -1235,13 +1439,28 @@ export default function ThreadScreen() {
       setIsThinking(false);
       setActiveTurnId(null);
       flushStreamingAssistant();
+      flushStreamingTerminalOutput();
+      flushStreamingReasoning();
+      flushStreamingPlan();
+      flushStreamingFileChanges();
+      flushStreamingToolProgress();
       setError(null);
     } catch (interruptError) {
       setError(interruptError instanceof Error ? interruptError.message : "Unable to stop response");
     } finally {
       setStopping(false);
     }
-  }, [activeTurnId, flushStreamingAssistant, stopping, threadId]);
+  }, [
+    activeTurnId,
+    flushStreamingAssistant,
+    flushStreamingTerminalOutput,
+    flushStreamingReasoning,
+    flushStreamingPlan,
+    flushStreamingFileChanges,
+    flushStreamingToolProgress,
+    stopping,
+    threadId,
+  ]);
 
   const onPickImages = useCallback(async () => {
     try {
@@ -1290,19 +1509,104 @@ export default function ThreadScreen() {
     }
   }, []);
 
-  const isResponding = sending || isThinking || streamingAssistant.trim().length > 0;
+  const isResponding =
+    sending ||
+    isThinking ||
+    streamingAssistant.trim().length > 0 ||
+    streamingTerminalOutput.trim().length > 0 ||
+    streamingReasoning.trim().length > 0 ||
+    streamingPlan.trim().length > 0 ||
+    streamingFileChanges.trim().length > 0 ||
+    streamingToolProgress.trim().length > 0;
 
-  const allTurns = streamingAssistant
-    ? [
-        ...turns,
-        {
-          id: "live-assistant",
-          role: "assistant" as const,
-          text: streamingAssistant,
-          streaming: true,
-        },
-      ]
-    : turns;
+  const allTurns = [
+    ...turns,
+    ...(streamingAssistant
+      ? [
+          {
+            id: "live-assistant",
+            role: "assistant" as const,
+            text: streamingAssistant,
+            streaming: true,
+          },
+        ]
+      : []),
+    ...(streamingReasoning
+      ? [
+          {
+            id: "live-reasoning",
+            role: "system" as const,
+            text: "",
+            kind: "activity" as const,
+            activity: {
+              title: "Reasoning",
+              detail: streamingReasoning,
+            },
+            streaming: true,
+          },
+        ]
+      : []),
+    ...(streamingPlan
+      ? [
+          {
+            id: "live-plan",
+            role: "system" as const,
+            text: "",
+            kind: "activity" as const,
+            activity: {
+              title: "Plan",
+              detail: streamingPlan,
+            },
+            streaming: true,
+          },
+        ]
+      : []),
+    ...(streamingFileChanges
+      ? [
+          {
+            id: "live-filechanges",
+            role: "system" as const,
+            text: "",
+            kind: "activity" as const,
+            activity: {
+              title: "File changes",
+              detail: streamingFileChanges,
+            },
+            streaming: true,
+          },
+        ]
+      : []),
+    ...(streamingToolProgress
+      ? [
+          {
+            id: "live-toolprogress",
+            role: "system" as const,
+            text: "",
+            kind: "activity" as const,
+            activity: {
+              title: "Tool progress",
+              detail: streamingToolProgress,
+            },
+            streaming: true,
+          },
+        ]
+      : []),
+    ...(streamingTerminalOutput
+      ? [
+          {
+            id: "live-terminal",
+            role: "system" as const,
+            text: "",
+            kind: "activity" as const,
+            activity: {
+              title: "Terminal output",
+              detail: streamingTerminalOutput,
+            },
+            streaming: true,
+          },
+        ]
+      : []),
+  ];
 
   return (
     <SafeAreaView className="flex-1 bg-background" edges={["top", "left", "right"]}>
@@ -1425,6 +1729,27 @@ export default function ThreadScreen() {
                 </View>
               ) : (
               item.kind === "activity" && item.activity ? (
+                (item.activity.title === "Terminal output" ||
+                  item.activity.title === "Reasoning" ||
+                  item.activity.title === "Plan" ||
+                  item.activity.title === "File changes" ||
+                  item.activity.title === "Tool progress") &&
+                item.activity.detail ? (
+                  <View className="w-full rounded-xl border border-border/20 bg-black/35 px-3 py-2">
+                    <Text className="mb-1 text-xs font-semibold uppercase tracking-[0.8px] text-muted-foreground">
+                      {item.activity.title}
+                    </Text>
+                    <Text
+                      className={`text-[12px] leading-5 text-foreground ${
+                        item.activity.title === "Terminal output" || item.activity.title === "File changes"
+                          ? "font-mono"
+                          : ""
+                      }`}
+                    >
+                      {item.activity.detail}
+                    </Text>
+                  </View>
+                ) : (
                 item.activity.title === "Ran command" && item.activity.detail ? (
                   <Pressable
                     className="w-full py-1"
@@ -1460,6 +1785,7 @@ export default function ThreadScreen() {
                       </Text>
                     ) : null}
                   </View>
+                )
                 )
               ) : (
               item.role === "user" ? (
@@ -1619,7 +1945,7 @@ export default function ThreadScreen() {
               placeholderTextColor="#6f6f6f"
               keyboardAppearance="dark"
               multiline
-              className="max-h-36 flex-1 rounded-full border border-border/10 bg-muted px-4 py-3 text-sm text-foreground"
+              className="max-h-36 flex-1 rounded-3xl border border-border/10 bg-muted px-4 py-3 text-sm text-foreground"
             />
             <Pressable
               disabled={isResponding ? stopping : sending || (!composerText.trim() && pendingImages.length === 0)}
