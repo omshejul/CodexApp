@@ -213,6 +213,10 @@ final class GatewayManager: ObservableObject {
       isRunning = false
       statusMessage = "Start timed out. Check details."
       appendOutput("launchd started the gateway service, but /health was not reachable on 127.0.0.1:\(port).")
+      if let tail = launchdStderrTail(maxLines: 40), !tail.isEmpty {
+        appendOutput("Recent launchd stderr:")
+        appendOutput(tail)
+      }
     }
   }
 
@@ -582,6 +586,16 @@ final class GatewayManager: ObservableObject {
     "gui/\(getuid())/\(launchAgentLabel)"
   }
 
+  private func isLaunchAgentLoaded() -> Bool {
+    let result = runSync(
+      executablePath: "/bin/launchctl",
+      arguments: ["print", launchAgentTarget()],
+      workingDirectory: nil,
+      environment: [:]
+    )
+    return result.exitCode == 0
+  }
+
   private func runtimeEnvironment(port: Int) -> [String: String] {
     var env = ProcessInfo.processInfo.environment
     for (key, value) in config.environment {
@@ -645,19 +659,21 @@ final class GatewayManager: ObservableObject {
       return false
     }
 
-    _ = runSync(executablePath: "/bin/launchctl", arguments: ["bootout", launchAgentTarget()], workingDirectory: nil, environment: [:])
-    let bootstrap = runSync(
-      executablePath: "/bin/launchctl",
-      arguments: ["bootstrap", "gui/\(getuid())", plistPath.path],
-      workingDirectory: nil,
-      environment: [:]
-    )
-    if bootstrap.exitCode != 0 {
-      appendOutput("Failed to bootstrap launch agent '\(launchAgentLabel)'.")
-      if !bootstrap.output.isEmpty {
-        appendOutput(bootstrap.output)
+    let wasLoaded = isLaunchAgentLoaded()
+    if !wasLoaded {
+      let bootstrap = runSync(
+        executablePath: "/bin/launchctl",
+        arguments: ["bootstrap", "gui/\(getuid())", plistPath.path],
+        workingDirectory: nil,
+        environment: [:]
+      )
+      if bootstrap.exitCode != 0 {
+        appendOutput("Failed to bootstrap launch agent '\(launchAgentLabel)'.")
+        if !bootstrap.output.isEmpty {
+          appendOutput(bootstrap.output)
+        }
+        return false
       }
-      return false
     }
 
     _ = runSync(
@@ -674,6 +690,41 @@ final class GatewayManager: ObservableObject {
       environment: [:]
     )
     if kickstart.exitCode != 0 {
+      if wasLoaded {
+        let bootout = runSync(
+          executablePath: "/bin/launchctl",
+          arguments: ["bootout", launchAgentTarget()],
+          workingDirectory: nil,
+          environment: [:]
+        )
+        if bootout.exitCode == 0 {
+          let retryBootstrap = runSync(
+            executablePath: "/bin/launchctl",
+            arguments: ["bootstrap", "gui/\(getuid())", plistPath.path],
+            workingDirectory: nil,
+            environment: [:]
+          )
+          if retryBootstrap.exitCode == 0 {
+            let retryKickstart = runSync(
+              executablePath: "/bin/launchctl",
+              arguments: ["kickstart", "-k", launchAgentTarget()],
+              workingDirectory: nil,
+              environment: [:]
+            )
+            if retryKickstart.exitCode == 0 {
+              appendOutput("LaunchAgent '\(launchAgentLabel)' is active.")
+              return true
+            }
+            if !retryKickstart.output.isEmpty {
+              appendOutput(retryKickstart.output)
+            }
+          } else if !retryBootstrap.output.isEmpty {
+            appendOutput(retryBootstrap.output)
+          }
+        } else if !bootout.output.isEmpty {
+          appendOutput(bootout.output)
+        }
+      }
       appendOutput("Failed to start launch agent '\(launchAgentLabel)'.")
       if !kickstart.output.isEmpty {
         appendOutput(kickstart.output)
@@ -762,6 +813,18 @@ final class GatewayManager: ObservableObject {
     }
 
     return false
+  }
+
+  private func launchdStderrTail(maxLines: Int) -> String? {
+    let logPath = appSupportDirectory()
+      .appendingPathComponent("logs", isDirectory: true)
+      .appendingPathComponent("launchd-stderr.log", isDirectory: false).path
+    guard let text = try? String(contentsOfFile: logPath, encoding: .utf8) else { return nil }
+    let lines = text
+      .split(whereSeparator: \.isNewline)
+      .map(String.init)
+    guard !lines.isEmpty else { return nil }
+    return lines.suffix(max(maxLines, 1)).joined(separator: "\n")
   }
 
   private func bundledNodePath() -> String? {
