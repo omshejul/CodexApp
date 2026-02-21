@@ -399,7 +399,7 @@ final class GatewayManager: ObservableObject {
   }
 
   func copyLogsToClipboard() {
-    let text = outputLines.joined(separator: "\n")
+    let text = recentLogsText.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !text.isEmpty else {
       statusMessage = "No logs to copy yet."
       return

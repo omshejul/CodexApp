@@ -186,7 +186,7 @@ struct StatusMenuView: View {
           .frame(maxHeight: 260)
         }
 
-        if !manager.outputLines.isEmpty {
+        if manager.recentLogsLineCount > 0 {
           Divider()
           HStack {
             Label {
