@@ -8,6 +8,7 @@ export interface RenderedTurn {
   turnId?: string;
   kind?: "message" | "changeSummary" | "activity";
   summary?: {
+    displayKind?: "change" | "preview";
     filesChanged: number;
     files: Array<{
       path: string;
@@ -249,6 +250,7 @@ function parseInlineChangeSummary(text: string): RenderedTurn["summary"] | null 
 
   const filesChanged = Number(headerMatch[1]);
   return {
+    displayKind: "change",
     filesChanged: Number.isFinite(filesChanged) ? filesChanged : files.length,
     files,
   };
@@ -364,6 +366,7 @@ function toFileChangeSummary(record: Record<string, unknown>, id: string, create
     createdAtMs: createdAtMs ?? undefined,
     kind: "changeSummary",
     summary: {
+      displayKind: "change",
       filesChanged: files.length,
       files,
     },

@@ -72,9 +72,17 @@ NOTARYTOOL_PROFILE="codex-notary" \
 - Standalone iOS build (no Metro):
   `cd /Users/omshejul/Code/CodexApp/app`
   `npx expo run:ios --device --no-bundler --configuration Debug`
+  `npx expo run:ios --device --no-bundler --configuration Release `
 - Standalone Android build (no Metro):
   `cd /Users/omshejul/Code/CodexApp/app`
   `npx expo run:android --variant debug --no-bundler`
+- Local standalone Android APK build (no EAS, no Metro):
+  `cd /Users/omshejul/Code/CodexApp/app`
+  `npx expo prebuild`
+  `cd android && ./gradlew assembleRelease`
+  Output: `/Users/omshejul/Code/CodexApp/app/android/app/build/outputs/apk/release/app-release.apk`
+  Optional install via adb:
+  `adb install -r /Users/omshejul/Code/CodexApp/app/android/app/build/outputs/apk/release/app-release.apk`
 
 If you think something is useful to be remembered for later and will save time instead of doing it again, ask user if they can make a doc about this, and make a md in docs and link it here, by mentioning the doc and how/where to use it
 

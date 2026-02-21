@@ -773,6 +773,12 @@ function isLikelyUnifiedDiff(value: string): boolean {
 
 function extractChangeSummaryFromEvent(method: string, params: unknown): RenderedTurn["summary"] | null {
   const lower = method.toLowerCase();
+  const isFileChangeEvent =
+    lower.includes("item/filechange") ||
+    lower.includes("filechange") ||
+    lower.includes("file_change") ||
+    lower.includes("turn/diff") ||
+    lower.includes("diff/updated");
 
   const files: Array<{ path: string; additions: number; deletions: number; snippets?: string[]; diff?: string }> = [];
   const seen = new Set<string>();
@@ -906,6 +912,7 @@ function extractChangeSummaryFromEvent(method: string, params: unknown): Rendere
   }
 
   return {
+    displayKind: isFileChangeEvent ? "change" : "preview",
     filesChanged: files.length,
     files,
   };
@@ -2814,7 +2821,9 @@ export default function ThreadScreen() {
               {item.kind === "changeSummary" && item.summary ? (
                 <View className="w-full rounded-2xl border border-border/10 bg-card px-4 py-4">
                   <Text className="text-lg font-bold text-card-foreground">
-                    {item.summary.filesChanged} file{item.summary.filesChanged === 1 ? "" : "s"} changed
+                    {item.summary.displayKind === "preview"
+                      ? "Diff preview"
+                      : `${item.summary.filesChanged} file${item.summary.filesChanged === 1 ? "" : "s"} changed`}
                   </Text>
                   {item.summary.files.map((file) => {
                     const diffId = `${item.id}:${file.path}`;
