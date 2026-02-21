@@ -92,6 +92,21 @@ export class CodexRpcClient extends EventEmitter {
     return this.sendRequest(method, params);
   }
 
+  async reconnect(): Promise<void> {
+    const socket = this.ws;
+    this.ws = null;
+    this.initialized = false;
+    this.connectPromise = null;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      try {
+        socket.terminate();
+      } catch {
+        // ignore close errors
+      }
+    }
+    await this.connect();
+  }
+
   onNotification(listener: (method: string, params: unknown) => void): () => void {
     const handler = (payload: { method: string; params: unknown }) => {
       listener(payload.method, payload.params);

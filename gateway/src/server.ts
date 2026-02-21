@@ -184,6 +184,74 @@ async function waitForCodexEndpoint(url: string, timeoutMs: number): Promise<boo
   return false;
 }
 
+async function waitForCodexEndpointDown(url: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!(await isCodexWsReachable(url))) {
+      return true;
+    }
+    await sleep(200);
+  }
+  return !(await isCodexWsReachable(url));
+}
+
+function resolveStableWorkingDirectory(): string {
+  try {
+    const cwd = process.cwd();
+    if (cwd && fs.existsSync(cwd) && fs.statSync(cwd).isDirectory()) {
+      return cwd;
+    }
+  } catch {
+    // Fall through to HOME_DIR fallback below.
+  }
+
+  try {
+    if (fs.existsSync(HOME_DIR) && fs.statSync(HOME_DIR).isDirectory()) {
+      return HOME_DIR;
+    }
+  } catch {
+    // Fall through to root fallback below.
+  }
+
+  return "/";
+}
+
+function listenerPidForPort(portToCheck: number): number | null {
+  try {
+    const output = execFileSync("lsof", ["-nP", `-iTCP:${portToCheck}`, "-sTCP:LISTEN", "-t"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const firstLine = output
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.length > 0);
+    if (!firstLine) {
+      return null;
+    }
+    const pid = Number(firstLine);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function readCommandForPid(pid: number): string {
+  try {
+    return execFileSync("ps", ["-p", String(pid), "-o", "command="], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return "";
+  }
+}
+
+function isCodexAppServerCommand(command: string): boolean {
+  const normalized = command.toLowerCase();
+  return normalized.includes("codex app-server") || (normalized.includes("/codex/codex") && normalized.includes("app-server"));
+}
+
 async function ensureCodexAppServerRunning() {
   const endpoint = parseWsEndpoint(codexWsUrl);
   if (!endpoint) {
@@ -211,6 +279,7 @@ async function ensureCodexAppServerRunning() {
 
   app.log.info(`Starting codex app-server: ${codexAppServerBin} app-server --listen ${codexAppServerListenUrl}`);
   const child = spawn(codexAppServerBin, ["app-server", "--listen", codexAppServerListenUrl], {
+    cwd: resolveStableWorkingDirectory(),
     stdio: ["ignore", "pipe", "pipe"],
   });
   managedCodexProcess = child;
@@ -273,6 +342,36 @@ async function stopManagedCodexAppServer() {
   });
 
   managedCodexProcess = null;
+}
+
+async function restartCodexAppServerAfterDeriveConfigFailure(): Promise<void> {
+  const endpoint = parseWsEndpoint(codexWsUrl);
+  if (!endpoint) {
+    throw new Error(`Cannot restart codex app-server: invalid CODEX_WS_URL '${codexWsUrl}'`);
+  }
+  if (!autoStartCodexAppServer) {
+    throw new Error("Cannot restart codex app-server because auto-start is disabled.");
+  }
+
+  await stopManagedCodexAppServer();
+
+  const listenerPid = listenerPidForPort(endpoint.port);
+  if (listenerPid !== null) {
+    const command = readCommandForPid(listenerPid);
+    if (!isCodexAppServerCommand(command)) {
+      throw new Error(
+        `Cannot restart codex app-server safely: port ${endpoint.port} is in use by pid ${listenerPid} (${command || "unknown"}).`
+      );
+    }
+    try {
+      process.kill(listenerPid, "SIGTERM");
+    } catch {
+      // Continue below. ensureCodexAppServerRunning will still fail loudly if the port stays busy.
+    }
+  }
+
+  await waitForCodexEndpointDown(codexWsUrl, 5_000);
+  await ensureCodexAppServerRunning();
 }
 
 function detectTailscaleBaseUrl(): string | null {
@@ -676,7 +775,7 @@ function listChildDirectories(root: string, limit = 50): string[] {
 }
 
 function buildWorkspaceSuggestions(): { defaultCwd: string; workspaces: string[] } {
-  const defaultCwd = process.cwd();
+  const defaultCwd = resolveStableWorkingDirectory();
   const suggestions = new Set<string>([defaultCwd]);
   const parent = path.resolve(defaultCwd, "..");
   if (parent !== defaultCwd) {
@@ -845,6 +944,65 @@ function isCodexDisconnectedError(error: unknown): boolean {
     message.includes("connection closed") ||
     message.includes("json-rpc timeout")
   );
+}
+
+function isDeriveConfigMissingPathError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const message = error.message.toLowerCase();
+  const missingPath = message.includes("no such file or directory") || message.includes("os error 2");
+  if (!missingPath) {
+    return false;
+  }
+  return (
+    message.includes("error deriving config") ||
+    message.includes("failed to read configuration layers") ||
+    message.includes("failed to resolve config cwd")
+  );
+}
+
+async function callCodexWithDeriveConfigRetry(method: string, params?: unknown): Promise<unknown> {
+  try {
+    return await codex.call(method, params);
+  } catch (error) {
+    if (!isDeriveConfigMissingPathError(error)) {
+      throw error;
+    }
+    app.log.warn(
+      {
+        method,
+        message: error instanceof Error ? error.message : String(error),
+      },
+      "Codex app-server derive-config error; reconnecting and retrying once"
+    );
+    runtimeLogs.event("codex.derive_config.retry", {
+      method,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    await codex.reconnect();
+    try {
+      return await codex.call(method, params);
+    } catch (retryError) {
+      if (!isDeriveConfigMissingPathError(retryError)) {
+        throw retryError;
+      }
+      app.log.warn(
+        {
+          method,
+          message: retryError instanceof Error ? retryError.message : String(retryError),
+        },
+        "Codex app-server derive-config error persisted after reconnect; restarting app-server and retrying once"
+      );
+      runtimeLogs.event("codex.derive_config.restart", {
+        method,
+        message: retryError instanceof Error ? retryError.message : String(retryError),
+      });
+      await restartCodexAppServerAfterDeriveConfigFailure();
+      await codex.reconnect();
+      return await codex.call(method, params);
+    }
+  }
 }
 
 function normalizeGatewayOptions(result: unknown) {
@@ -1460,7 +1618,7 @@ async function bootstrap() {
     }
 
     const trimmedCwd = parsedBody.data.cwd?.trim();
-    const result = await codex.call("thread/start", {
+    const result = await callCodexWithDeriveConfigRetry("thread/start", {
       approvalPolicy: "never",
       sandboxPolicy: buildDefaultDangerFullAccessSandboxPolicy(),
       ...(trimmedCwd ? { cwd: trimmedCwd } : {}),
@@ -1564,7 +1722,7 @@ async function bootstrap() {
 
     const name = parsedBody.data.name.trim();
     try {
-      await codex.call("thread/resume", {
+      await callCodexWithDeriveConfigRetry("thread/resume", {
         threadId: params.id,
         approvalPolicy: "never",
         sandbox: "danger-full-access",
@@ -1603,7 +1761,7 @@ async function bootstrap() {
   app.post("/threads/:id/resume", { preHandler: [requireAuth] }, async (request, reply) => {
     const params = request.params as { id: string };
     try {
-      await codex.call("thread/resume", {
+      await callCodexWithDeriveConfigRetry("thread/resume", {
         threadId: params.id,
         approvalPolicy: "never",
         sandbox: "danger-full-access",
