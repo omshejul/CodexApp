@@ -9,6 +9,11 @@ struct StatusMenuView: View {
     formatter.timeStyle = .short
     return formatter
   }()
+  private var appVersionText: String {
+    let shortVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "?"
+    let build = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "?"
+    return "Version \(shortVersion) (\(build))"
+  }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
@@ -158,6 +163,9 @@ struct StatusMenuView: View {
       }
 
       Divider()
+      Text(appVersionText)
+        .font(.caption2)
+        .foregroundStyle(.secondary)
 
       Button("Quit") {
         manager.quitApplication()
