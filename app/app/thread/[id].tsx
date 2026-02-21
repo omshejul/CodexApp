@@ -25,11 +25,13 @@ import { Ionicons } from "@expo/vector-icons";
 import Markdown, { RenderRules } from "react-native-markdown-display";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import {
+  ApiHttpError,
   ReauthRequiredError,
   clearSession,
   getGatewayOptions,
   getStreamConfig,
   getThreads,
+  getThreadFiles,
   getThread,
   getThreadEvents,
   interruptThreadTurn,
@@ -61,6 +63,19 @@ interface PendingImage {
   uri: string;
   imageUrl: string;
 }
+
+interface ComposerSelection {
+  start: number;
+  end: number;
+}
+
+interface MentionToken {
+  start: number;
+  end: number;
+  query: string;
+}
+
+const DIRECTIVE_LINE_PATTERN = /^::[a-z][a-z0-9-]*\{.*\}\s*$/i;
 
 const DEFAULT_REASONING_OPTIONS: ReasoningOption[] = [
   { label: "Minimal", value: "minimal" },
@@ -678,6 +693,20 @@ function parseFilesFromUnifiedDiff(diffText: string): Array<{
       }
     }
 
+    if (!currentPath) {
+      const plusHeader = line.match(/^\+\+\+\s+(.+)$/);
+      if (plusHeader && plusHeader[1] && plusHeader[1] !== "/dev/null") {
+        const rawPath = plusHeader[1].trim();
+        const normalizedPath = rawPath.replace(/^[ab]\//, "");
+        if (normalizedPath.length > 0) {
+          currentPath = normalizedPath;
+          if (!perFile.has(currentPath)) {
+            perFile.set(currentPath, { additions: 0, deletions: 0, snippets: [], lines: [] });
+          }
+        }
+      }
+    }
+
     if (currentPath) {
       const stat = perFile.get(currentPath);
       if (stat) {
@@ -721,9 +750,6 @@ function isLikelyUnifiedDiff(value: string): boolean {
 
 function extractChangeSummaryFromEvent(method: string, params: unknown): RenderedTurn["summary"] | null {
   const lower = method.toLowerCase();
-  if (!lower.includes("diff") && !lower.includes("filechange") && !lower.includes("file_change")) {
-    return null;
-  }
 
   const files: Array<{ path: string; additions: number; deletions: number; snippets?: string[]; diff?: string }> = [];
   const seen = new Set<string>();
@@ -744,6 +770,38 @@ function extractChangeSummaryFromEvent(method: string, params: unknown): Rendere
 
     const record = value as Record<string, unknown>;
     const pathValue = record.path ?? record.filePath ?? record.file ?? record.filename;
+    const diffValue =
+      typeof record.diff === "string"
+        ? record.diff
+        : typeof record.patch === "string"
+        ? record.patch
+        : typeof record.unifiedDiff === "string"
+        ? record.unifiedDiff
+        : typeof record.unified_diff === "string"
+        ? record.unified_diff
+        : null;
+
+    if (typeof pathValue === "string" && pathValue.trim().length > 0 && typeof diffValue === "string" && diffValue.trim().length > 0) {
+      const additions = diffValue
+        .split("\n")
+        .filter((line) => line.startsWith("+") && !line.startsWith("+++ "))
+        .length;
+      const deletions = diffValue
+        .split("\n")
+        .filter((line) => line.startsWith("-") && !line.startsWith("--- "))
+        .length;
+      const key = `${pathValue}:${additions}:${deletions}:${diffValue.length}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        files.push({
+          path: pathValue.trim(),
+          additions,
+          deletions,
+          diff: diffValue,
+        });
+      }
+    }
+
     const additionsValue = record.additions ?? record.added ?? record.linesAdded;
     const deletionsValue = record.deletions ?? record.removed ?? record.linesRemoved;
     const additions =
@@ -778,6 +836,27 @@ function extractChangeSummaryFromEvent(method: string, params: unknown): Rendere
     for (const valueEntry of Object.values(record)) {
       if (typeof valueEntry === "string" && isLikelyUnifiedDiff(valueEntry)) {
         const parsedFiles = parseFilesFromUnifiedDiff(valueEntry);
+        if (!parsedFiles.length && typeof pathValue === "string" && pathValue.trim().length > 0) {
+          const additions = valueEntry
+            .split("\n")
+            .filter((line) => line.startsWith("+") && !line.startsWith("+++ "))
+            .length;
+          const deletions = valueEntry
+            .split("\n")
+            .filter((line) => line.startsWith("-") && !line.startsWith("--- "))
+            .length;
+          const key = `${pathValue}:${additions}:${deletions}:${valueEntry.length}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            files.push({
+              path: pathValue.trim(),
+              additions,
+              deletions,
+              diff: valueEntry,
+            });
+          }
+          continue;
+        }
         for (const parsed of parsedFiles) {
           const key = `${parsed.path}:${parsed.additions}:${parsed.deletions}:${parsed.diff.length}`;
           if (!seen.has(key)) {
@@ -794,6 +873,10 @@ function extractChangeSummaryFromEvent(method: string, params: unknown): Rendere
   };
 
   walk(params);
+
+  if (!files.length && (lower.includes("diff") || lower.includes("filechange") || lower.includes("file_change"))) {
+    return null;
+  }
 
   if (!files.length) {
     return null;
@@ -1223,6 +1306,40 @@ function ThinkingShinyPill() {
   );
 }
 
+function findActiveMentionToken(text: string, cursor: number): MentionToken | null {
+  const safeCursor = Math.max(0, Math.min(cursor, text.length));
+  const prefix = text.slice(0, safeCursor);
+  const atIndex = prefix.lastIndexOf("@");
+  if (atIndex < 0) {
+    return null;
+  }
+
+  const charBefore = atIndex > 0 ? prefix[atIndex - 1] : "";
+  if (charBefore && !/\s/.test(charBefore)) {
+    return null;
+  }
+
+  const mentionBody = prefix.slice(atIndex + 1);
+  if (/\s/.test(mentionBody)) {
+    return null;
+  }
+
+  return {
+    start: atIndex,
+    end: safeCursor,
+    query: mentionBody,
+  };
+}
+
+function sanitizeAssistantDisplayText(text: string): string {
+  const cleaned = text
+    .split(/\r?\n/)
+    .filter((line) => !DIRECTIVE_LINE_PATTERN.test(line.trim()))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n");
+  return cleaned.trim();
+}
+
 export default function ThreadScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const threadId = useMemo(() => (Array.isArray(id) ? id[0] : id), [id]);
@@ -1230,6 +1347,10 @@ export default function ThreadScreen() {
 
   const [turns, setTurns] = useState<RenderedTurn[]>([]);
   const [composerText, setComposerText] = useState("");
+  const [composerSelection, setComposerSelection] = useState<ComposerSelection>({ start: 0, end: 0 });
+  const [mentionFiles, setMentionFiles] = useState<string[]>([]);
+  const [mentionLoading, setMentionLoading] = useState(false);
+  const [mentionError, setMentionError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -1269,6 +1390,7 @@ export default function ThreadScreen() {
   const liveIndicatorHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const optionsRefreshPromiseRef = useRef<Promise<void> | null>(null);
   const selectedModelRef = useRef<string | null>(null);
+  const composerInputRef = useRef<TextInput>(null);
   const listRef = useRef<FlatList<RenderedTurn>>(null);
   const followBottomRef = useRef(true);
   const draggingRef = useRef(false);
@@ -1276,6 +1398,12 @@ export default function ThreadScreen() {
   const seenEventIdsRef = useRef(new Set<string>());
   const seenChangeHashesRef = useRef(new Set<string>());
   const turnsSignatureRef = useRef("");
+  const mentionRequestRef = useRef(0);
+
+  const activeMention = useMemo(
+    () => findActiveMentionToken(composerText, composerSelection.start),
+    [composerSelection.start, composerText]
+  );
 
   const currentReasoningOptions = useMemo(() => {
     if (!selectedModel) {
@@ -2048,6 +2176,72 @@ export default function ThreadScreen() {
     }
   }, []);
 
+  useEffect(() => {
+    if (!threadId || !activeMention) {
+      setMentionFiles([]);
+      setMentionLoading(false);
+      setMentionError(null);
+      return;
+    }
+
+    let active = true;
+    const requestId = mentionRequestRef.current + 1;
+    mentionRequestRef.current = requestId;
+    setMentionLoading(true);
+    setMentionError(null);
+
+    const timer = setTimeout(async () => {
+      try {
+        const payload = await getThreadFiles(threadId, {
+          query: activeMention.query,
+          limit: 200,
+        });
+
+        if (!active || mentionRequestRef.current !== requestId) {
+          return;
+        }
+        setMentionFiles(payload.files);
+      } catch (mentionFetchError) {
+        if (!active || mentionRequestRef.current !== requestId) {
+          return;
+        }
+        setMentionFiles([]);
+        if (mentionFetchError instanceof ApiHttpError && mentionFetchError.status === 404) {
+          setMentionError("Files API unavailable. Restart gateway.");
+        } else {
+          setMentionError("Unable to load files");
+        }
+      } finally {
+        if (active && mentionRequestRef.current === requestId) {
+          setMentionLoading(false);
+        }
+      }
+    }, 80);
+
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [activeMention, threadId]);
+
+  const applyMentionSelection = useCallback(
+    (filePath: string) => {
+      if (!activeMention) {
+        return;
+      }
+      const nextText = `${composerText.slice(0, activeMention.start)}@${filePath} ${composerText.slice(activeMention.end)}`;
+      const nextCursor = activeMention.start + filePath.length + 2;
+      setComposerText(nextText);
+      setComposerSelection({ start: nextCursor, end: nextCursor });
+      setMentionFiles([]);
+      setMentionError(null);
+      setTimeout(() => {
+        composerInputRef.current?.focus();
+      }, 10);
+    },
+    [activeMention, composerText]
+  );
+
   const onSend = async () => {
     if (!threadId || sending) {
       return;
@@ -2060,6 +2254,9 @@ export default function ThreadScreen() {
     Keyboard.dismiss();
     const queuedImages = pendingImages;
     setComposerText("");
+    setComposerSelection({ start: 0, end: 0 });
+    setMentionFiles([]);
+    setMentionError(null);
     setPendingImages([]);
     setSending(true);
     setError(null);
@@ -2200,6 +2397,8 @@ export default function ThreadScreen() {
     : sending
     ? "time-outline"
     : "arrow-up";
+  const showMentionSuggestions = Boolean(activeMention);
+  const mentionSuggestions = mentionFiles.slice(0, 12);
 
   const allTurns = [
     ...turns,
@@ -2339,6 +2538,89 @@ export default function ThreadScreen() {
     [allTurns]
   );
 
+  const diffLineToneClassName = (line: string): string => {
+    if (line.startsWith("@@")) {
+      return "text-slate-400";
+    }
+    if (line.startsWith("+")) {
+      return "text-emerald-400";
+    }
+    if (line.startsWith("-")) {
+      return "text-red-400";
+    }
+    return "text-muted-foreground";
+  };
+
+  const toDisplayDiffLines = (
+    diffText: string
+  ): Array<{ lineNumber: number | null; line: string; tone: string }> => {
+    const rawLines = diffText.split("\n");
+    const filtered = rawLines.filter(
+      (line) =>
+        !line.startsWith("diff --git") &&
+        !line.startsWith("index ") &&
+        !line.startsWith("--- ") &&
+        !line.startsWith("+++ ")
+    );
+
+    let oldLineCursor: number | null = null;
+    let newLineCursor: number | null = null;
+
+    return filtered.map((line) => {
+      const hunkMatch = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      if (hunkMatch) {
+        oldLineCursor = Number.parseInt(hunkMatch[1] ?? "0", 10);
+        newLineCursor = Number.parseInt(hunkMatch[2] ?? "0", 10);
+        return {
+          lineNumber: null,
+          line,
+          tone: diffLineToneClassName(line),
+        };
+      }
+
+      if (line.startsWith("+")) {
+        const lineNumber = newLineCursor;
+        newLineCursor = (newLineCursor ?? 0) + 1;
+        return {
+          lineNumber,
+          line,
+          tone: diffLineToneClassName(line),
+        };
+      }
+
+      if (line.startsWith("-")) {
+        const lineNumber = oldLineCursor;
+        oldLineCursor = (oldLineCursor ?? 0) + 1;
+        return {
+          lineNumber,
+          line,
+          tone: diffLineToneClassName(line),
+        };
+      }
+
+      if (line.startsWith(" ")) {
+        const lineNumber = newLineCursor ?? oldLineCursor;
+        if (newLineCursor !== null) {
+          newLineCursor += 1;
+        }
+        if (oldLineCursor !== null) {
+          oldLineCursor += 1;
+        }
+        return {
+          lineNumber,
+          line,
+          tone: diffLineToneClassName(line),
+        };
+      }
+
+      return {
+        lineNumber: null,
+        line,
+        tone: diffLineToneClassName(line),
+      };
+    });
+  };
+
   return (
     <SafeAreaView className="flex-1 bg-background" edges={["top", "left", "right"]}>
       <KeyboardAvoidingView className="flex-1" behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={0}>
@@ -2432,13 +2714,13 @@ export default function ThreadScreen() {
             >
               {item.kind === "changeSummary" && item.summary ? (
                 <View className="w-full rounded-2xl border border-border/10 bg-card px-4 py-4">
-                  <Text className="text-3xl font-bold text-card-foreground">
+                  <Text className="text-2xl font-bold text-card-foreground">
                     {item.summary.filesChanged} file{item.summary.filesChanged === 1 ? "" : "s"} changed
                   </Text>
                   {item.summary.files.map((file) => (
                     <View key={`${item.id}-${file.path}`} className="mt-3">
                       <View className="flex-row items-center justify-between">
-                        <Text className="max-w-[70%] text-2xl text-foreground" numberOfLines={1}>
+                        <Text className="max-w-[70%] text-base text-foreground" numberOfLines={1}>
                           {file.path}
                         </Text>
                         <Text className="text-2xl font-semibold">
@@ -2448,7 +2730,36 @@ export default function ThreadScreen() {
                       </View>
                       {typeof file.diff === "string" && file.diff.length > 0 ? (
                         <View className="mt-2 rounded-lg border border-border/40 bg-muted/60 px-2.5 py-2">
-                          <Text className="font-mono text-[11px] leading-4 text-muted-foreground">{file.diff}</Text>
+                          {(() => {
+                            const diffLines = toDisplayDiffLines(file.diff);
+                            return (
+                              <View className="flex-row">
+                                <View className="w-9 pr-2">
+                                  {diffLines.map(({ lineNumber }, lineIndex) => (
+                                    <Text
+                                      key={`${item.id}-${file.path}-line-number-${lineIndex}`}
+                                      className="text-right text-[10px] leading-5 text-slate-500"
+                                    >
+                                      {lineNumber ?? ""}
+                                    </Text>
+                                  ))}
+                                </View>
+                                <ScrollView horizontal showsHorizontalScrollIndicator>
+                                  <View className="pr-2">
+                                    {diffLines.map(({ line, tone }, lineIndex) => (
+                                      <Text
+                                        key={`${item.id}-${file.path}-line-code-${lineIndex}`}
+                                        className={`text-[12px] leading-5 ${tone}`}
+                                        style={{ fontFamily: MONO_FONT, fontWeight: "600" }}
+                                      >
+                                        {line.length > 0 ? line : " "}
+                                      </Text>
+                                    ))}
+                                  </View>
+                                </ScrollView>
+                              </View>
+                            );
+                          })()}
                         </View>
                       ) : null}
                     </View>
@@ -2566,11 +2877,19 @@ export default function ThreadScreen() {
                     );
                   }
 
+                  const isReadFileActivity = item.activity.title.startsWith("Read ");
                   return (
                     <View className="w-full py-1">
-                      <Text className="text-center text-base font-medium text-muted-foreground">{item.activity.title}</Text>
+                      <Text
+                        className={`${isReadFileActivity ? "text-left" : "text-center"} text-base font-medium text-muted-foreground`}
+                      >
+                        {item.activity.title}
+                      </Text>
                       {item.activity.detail ? (
-                        <Text className="mt-0.5 text-center text-sm text-muted-foreground" numberOfLines={1}>
+                        <Text
+                          className={`mt-0.5 ${isReadFileActivity ? "text-left" : "text-center"} text-sm text-muted-foreground`}
+                          numberOfLines={1}
+                        >
                           {item.activity.detail}
                         </Text>
                       ) : null}
@@ -2580,7 +2899,7 @@ export default function ThreadScreen() {
               ) : (
               item.role === "user" ? (
                 <View className="mt-3 max-w-[86%]">
-                  <View className="rounded-2xl border border-border/10 bg-neutral-500/40 px-4 py-2">
+                  <View className="rounded-3xl border border-border/10 bg-neutral-500/40 px-4 py-2">
                     {item.text ? (
                       <Text selectable className="text-base leading-6 text-white">
                         {item.text}
@@ -2632,13 +2951,13 @@ export default function ThreadScreen() {
                 </View>
               ) : (
                 <View className="w-full px-1 py-1">
-                  {item.text ? (
+                  {sanitizeAssistantDisplayText(item.text ?? "").length > 0 ? (
                     <Markdown style={markdownStyles} rules={selectableMarkdownRules}>
-                      {item.text}
+                      {sanitizeAssistantDisplayText(item.text ?? "")}
                     </Markdown>
                   ) : null}
                   {item.images?.length ? (
-                    <View className={item.text ? "mt-1" : ""}>
+                    <View className={sanitizeAssistantDisplayText(item.text ?? "").length > 0 ? "mt-1" : ""}>
                       {item.images.map((uri, imageIndex) => (
                         <Pressable key={`${item.id}-assistant-image-${imageIndex}`} onPress={() => setPreviewImageUri(uri)}>
                           <Image
@@ -2714,239 +3033,203 @@ export default function ThreadScreen() {
           </Pressable>
         ) : null}
 
-        {Platform.OS === "android" ? (
-          <KeyboardStickyView offset={{ closed: 0, opened: 0 }}>
+        {(() => {
+          const composerContent = (
+            <>
+              {optionsLoaded && resolvedSelectedModel && currentReasoningOptions.length > 0 ? (
+                <View className="mb-1.5 flex-row justify-between gap-2">
+                  <View className="flex-row gap-2">
+                    <Pressable
+                      onPress={() => setOpenDropdown("model")}
+                      className="h-9 flex gap-2 flex-row items-center justify-between rounded-full px-3"
+                    >
+                      <Text className="text-sm font-semibold text-foreground">
+                        {modelOptions.find((option) => option.value === resolvedSelectedModel)?.label}
+                      </Text>
+                      <View className="w-4 items-center justify-center">
+                        <Ionicons name="chevron-up" size={14} className="text-foreground" />
+                      </View>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => setOpenDropdown("reasoning")}
+                      className="h-9 flex gap-2 flex-row items-center justify-between rounded-full px-3"
+                    >
+                      <Text className="text-sm font-semibold text-foreground">
+                        {currentReasoningOptions.find((option) => option.value === resolvedSelectedReasoning)?.label}
+                      </Text>
+                      <View className="w-4 items-center justify-center">
+                        <Ionicons name="chevron-up" size={14} className="text-foreground" />
+                      </View>
+                    </Pressable>
+                  </View>
+                  {keyboardVisible ? (
+                    <MotiView
+                      from={{ opacity: 0, scale: 0.8 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.8 }}
+                      transition={{ type: "timing", duration: 150 }}
+                    >
+                      <Pressable
+                        onPress={() => Keyboard.dismiss()}
+                        className="h-9 flex-row items-center justify-center gap-1.5 rounded-full border border-border/10 bg-muted px-3"
+                      >
+                        <Ionicons name="keypad" size={16} color="#e0e0e0" />
+                        <Ionicons name="chevron-down" className="pt-0.5" size={14} color="#e0e0e0" />
+                      </Pressable>
+                    </MotiView>
+                  ) : null}
+                </View>
+              ) : null}
+
+              {showMentionSuggestions ? (
+                <View className="mb-2 max-h-56 overflow-hidden rounded-2xl border border-border/10 bg-muted">
+                  <View className="flex-row items-center gap-1.5 border-b border-border/10 px-3 py-1.5">
+                    <Ionicons name="at" size={13} color="#94a3b8" />
+                    <Text className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                      Files
+                    </Text>
+                    {mentionLoading ? (
+                      <ActivityIndicator size="small" color="#94a3b8" className="ml-auto" />
+                    ) : null}
+                  </View>
+                  {mentionError ? (
+                    <View className="flex-row items-center gap-2 px-3 py-2.5">
+                      <Ionicons name="warning-outline" size={14} color="#fbbf24" />
+                      <Text className="text-xs text-amber-300">{mentionError}</Text>
+                    </View>
+                  ) : null}
+                  {mentionLoading && mentionSuggestions.length === 0 ? (
+                    <View className="px-3 py-3">
+                      <Text className="text-xs text-muted-foreground">Searching files…</Text>
+                    </View>
+                  ) : null}
+                  {!mentionLoading && !mentionError && mentionSuggestions.length === 0 ? (
+                    <View className="flex-row items-center gap-2 px-3 py-3">
+                      <Ionicons name="document-outline" size={14} color="#64748b" />
+                      <Text className="text-xs text-muted-foreground">No matching files</Text>
+                    </View>
+                  ) : null}
+                  <ScrollView
+                    nestedScrollEnabled
+                    keyboardShouldPersistTaps="handled"
+                    showsVerticalScrollIndicator
+                    className="max-h-44"
+                  >
+                    {mentionSuggestions.map((filePath) => {
+                      const parts = filePath.split("/");
+                      const fileName = parts.pop() ?? filePath;
+                      const dirPath = parts.join("/");
+                      return (
+                        <Pressable
+                          key={`mention-${filePath}`}
+                          onPress={() => applyMentionSelection(filePath)}
+                          className="flex-row items-center gap-2.5 border-b border-border/5 px-3 py-2 active:bg-white/5"
+                        >
+                          <Ionicons name="document-text-outline" size={16} color="#94a3b8" />
+                          <View className="flex-1">
+                            <Text className="font-mono text-[13px] font-semibold text-foreground" numberOfLines={1}>
+                              {fileName}
+                            </Text>
+                            {dirPath ? (
+                              <Text className="font-mono text-[11px] text-muted-foreground" numberOfLines={1}>
+                                {dirPath}
+                              </Text>
+                            ) : null}
+                          </View>
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+                </View>
+              ) : null}
+
+              {pendingImages.length > 0 ? (
+                <View className="mb-2">
+                  <FlatList
+                    horizontal
+                    data={pendingImages}
+                    keyExtractor={(item) => item.id}
+                    showsHorizontalScrollIndicator={false}
+                    renderItem={({ item }) => (
+                      <View className="mr-2">
+                        <Pressable onPress={() => setPreviewImageUri(item.uri)}>
+                          <Image source={{ uri: item.uri }} resizeMode="cover" className="h-16 w-16 rounded-lg bg-black/25" />
+                        </Pressable>
+                        <Pressable
+                          onPress={() =>
+                            setPendingImages((existing) => existing.filter((image) => image.id !== item.id))
+                          }
+                          className="absolute -right-1 -top-1 rounded-full bg-black/70 p-1"
+                        >
+                          <Ionicons name="close" size={12} color="#ffffff" />
+                        </Pressable>
+                      </View>
+                    )}
+                  />
+                </View>
+              ) : null}
+
+              <View className="flex-row items-end gap-2">
+                <Pressable
+                  onPress={onPickImages}
+                  className="h-11 w-11 items-center justify-center rounded-full border border-border/10 bg-muted"
+                >
+                  <Ionicons name="image-outline" size={18} className="text-primary-foreground" />
+                </Pressable>
+                <TextInput
+                  ref={composerInputRef}
+                  value={composerText}
+                  onChangeText={setComposerText}
+                  onSelectionChange={(event) => setComposerSelection(event.nativeEvent.selection)}
+                  selection={composerSelection}
+                  placeholder="Continue this thread..."
+                  placeholderTextColor="#94a3b8"
+                  keyboardAppearance="dark"
+                  multiline
+                  className="max-h-36 flex-1 rounded-3xl border border-border/10 bg-muted px-4 py-3 text-foreground"
+                />
+                <Pressable
+                  disabled={isResponding ? stopping || !activeTurnId : sending || !composerHasDraft}
+                  onPress={isResponding ? onStopResponse : onSend}
+                  className={`h-11 w-11 items-center justify-center rounded-full ${
+                    isResponding || sending || !composerHasDraft ? "bg-secondary" : "bg-primary"
+                  }`}
+                >
+                  <AnimatePresence>
+                    <MotiView
+                      key={`${composerActionIconName}-${isResponding ? "responding" : "idle"}-${stopping ? "stopping" : "active"}`}
+                      from={{ opacity: 0, scale: 0.78, rotate: "-10deg" }}
+                      animate={{ opacity: 1, scale: 1, rotate: "0deg" }}
+                      exit={{ opacity: 0, scale: 0.78, rotate: "10deg" }}
+                      transition={{ type: "timing", duration: 140 }}
+                      style={{ width: 20, height: 20, alignItems: "center", justifyContent: "center" }}
+                    >
+                      <Ionicons name={composerActionIconName} size={20} className="text-primary-foreground" />
+                    </MotiView>
+                  </AnimatePresence>
+                </Pressable>
+              </View>
+            </>
+          );
+
+          return Platform.OS === "android" ? (
+            <KeyboardStickyView offset={{ closed: 0, opened: 0 }}>
+              <View
+                className="-mx-4 border-t border-border/50 bg-background px-4 pt-2"
+                style={{ paddingBottom: Math.max(insets.bottom, 8) }}
+              >
+                {composerContent}
+              </View>
+            </KeyboardStickyView>
+          ) : (
             <View
               className="-mx-4 border-t border-border/50 bg-background px-4 pt-2"
-              style={{
-                paddingBottom: Math.max(insets.bottom, 8),
-              }}
+              style={{ paddingBottom: keyboardVisible ? 10 : Math.max(insets.bottom, 8) }}
             >
-          {optionsLoaded && resolvedSelectedModel && currentReasoningOptions.length > 0 ? (
-            <View className="mb-1.5 flex-row gap-2">
-              <Pressable
-                onPress={() => setOpenDropdown("model")}
-                className="h-9 flex-1 flex-row items-center justify-between rounded-full border border-border/10 bg-muted px-3"
-              >
-                <Text className="text-sm font-semibold text-foreground">
-                  {modelOptions.find((option) => option.value === resolvedSelectedModel)?.label}
-                </Text>
-                <View className="w-4 items-center justify-center">
-                  <Ionicons name="chevron-up" size={14} color="#86efac" />
-                </View>
-              </Pressable>
-              <Pressable
-                onPress={() => setOpenDropdown("reasoning")}
-                className="h-9 flex-1 flex-row items-center justify-between rounded-full border border-border/10 bg-muted px-3"
-              >
-                <Text className="text-sm font-semibold text-foreground">
-                  {currentReasoningOptions.find((option) => option.value === resolvedSelectedReasoning)?.label}
-                </Text>
-                <View className="w-4 items-center justify-center">
-                  <Ionicons name="chevron-up" size={14} color="#86efac" />
-                </View>
-              </Pressable>
-              {keyboardVisible ? (
-                <MotiView
-                  from={{ opacity: 0, scale: 0.8 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.8 }}
-                  transition={{ type: "timing", duration: 150 }}
-                >
-                  <Pressable
-                    onPress={() => Keyboard.dismiss()}
-                    className="h-9 flex-row items-center justify-center gap-1.5 rounded-full border border-border/10 bg-muted px-3"
-                  >
-                    <Ionicons name="keypad" size={16} color="#e0e0e0" />
-                    <Ionicons name="chevron-down" className="pt-0.5" size={14} color="#e0e0e0" />
-                  </Pressable>
-                </MotiView>
-              ) : null}
+              {composerContent}
             </View>
-          ) : null}
-
-          {pendingImages.length > 0 ? (
-            <View className="mb-2">
-              <FlatList
-                horizontal
-                data={pendingImages}
-                keyExtractor={(item) => item.id}
-                showsHorizontalScrollIndicator={false}
-                renderItem={({ item }) => (
-                  <View className="mr-2">
-                    <Pressable onPress={() => setPreviewImageUri(item.uri)}>
-                      <Image source={{ uri: item.uri }} resizeMode="cover" className="h-16 w-16 rounded-lg bg-black/25" />
-                    </Pressable>
-                    <Pressable
-                      onPress={() =>
-                        setPendingImages((existing) => existing.filter((image) => image.id !== item.id))
-                      }
-                      className="absolute -right-1 -top-1 rounded-full bg-black/70 p-1"
-                    >
-                      <Ionicons name="close" size={12} color="#ffffff" />
-                    </Pressable>
-                  </View>
-                )}
-              />
-            </View>
-          ) : null}
-
-          <View className="flex-row items-end gap-2">
-            <Pressable
-              onPress={onPickImages}
-              className="h-12 w-12 items-center justify-center rounded-full border border-border/10 bg-muted"
-            >
-              <Ionicons name="image-outline" size={18} color="#d8ffd8" />
-            </Pressable>
-            <TextInput
-              value={composerText}
-              onChangeText={setComposerText}
-              placeholder="Continue this thread..."
-              placeholderTextColor="#94a3b8"
-              keyboardAppearance="dark"
-              multiline
-              className="min-h-12 max-h-36 flex-1 rounded-3xl border border-border/10 bg-muted px-4 py-3 text-foreground"
-
-            />
-            <Pressable
-              disabled={isResponding ? stopping || !activeTurnId : sending || !composerHasDraft}
-              onPress={isResponding ? onStopResponse : onSend}
-              className={`h-10 w-10 items-center justify-center rounded-full ${
-                isResponding || sending || !composerHasDraft ? "bg-secondary" : "bg-primary"
-              }`}
-            >
-              <AnimatePresence>
-                <MotiView
-                  key={`${composerActionIconName}-${isResponding ? "responding" : "idle"}-${stopping ? "stopping" : "active"}`}
-                  from={{ opacity: 0, scale: 0.78, rotate: "-10deg" }}
-                  animate={{ opacity: 1, scale: 1, rotate: "0deg" }}
-                  exit={{ opacity: 0, scale: 0.78, rotate: "10deg" }}
-                  transition={{ type: "timing", duration: 140 }}
-                  style={{ width: 20, height: 20, alignItems: "center", justifyContent: "center" }}
-                >
-                  <Ionicons name={composerActionIconName} size={20} color="#d8ffd8" />
-                </MotiView>
-              </AnimatePresence>
-            </Pressable>
-          </View>
-            </View>
-          </KeyboardStickyView>
-        ) : (
-          <View
-            className="-mx-4 border-t border-border/50 bg-background px-4 pt-2"
-            style={{
-              paddingBottom: keyboardVisible ? 10 : Math.max(insets.bottom, 8),
-            }}
-          >
-            {optionsLoaded && resolvedSelectedModel && currentReasoningOptions.length > 0 ? (
-              <View className="mb-1.5 flex-row gap-2">
-                <Pressable
-                  onPress={() => setOpenDropdown("model")}
-                  className="h-9 flex-1 flex-row items-center justify-between rounded-full border border-border/10 bg-muted px-3"
-                >
-                  <Text className="text-sm font-semibold text-foreground">
-                    {modelOptions.find((option) => option.value === resolvedSelectedModel)?.label}
-                  </Text>
-                  <View className="w-4 items-center justify-center">
-                    <Ionicons name="chevron-up" size={14} color="#86efac" />
-                  </View>
-                </Pressable>
-                <Pressable
-                  onPress={() => setOpenDropdown("reasoning")}
-                  className="h-9 flex-1 flex-row items-center justify-between rounded-full border border-border/10 bg-muted px-3"
-                >
-                  <Text className="text-sm font-semibold text-foreground">
-                    {currentReasoningOptions.find((option) => option.value === resolvedSelectedReasoning)?.label}
-                  </Text>
-                  <View className="w-4 items-center justify-center">
-                    <Ionicons name="chevron-up" size={14} color="#86efac" />
-                  </View>
-                </Pressable>
-                {keyboardVisible ? (
-                  <MotiView
-                    from={{ opacity: 0, scale: 0.8 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    exit={{ opacity: 0, scale: 0.8 }}
-                    transition={{ type: "timing", duration: 150 }}
-                  >
-                    <Pressable
-                      onPress={() => Keyboard.dismiss()}
-                      className="h-9 flex-row items-center justify-center gap-1.5 rounded-full border border-border/10 bg-muted px-3"
-                    >
-                      <Ionicons name="keypad" size={16} color="#e0e0e0" />
-                      <Ionicons name="chevron-down" className="pt-0.5" size={14} color="#e0e0e0" />
-                    </Pressable>
-                  </MotiView>
-                ) : null}
-              </View>
-            ) : null}
-
-            {pendingImages.length > 0 ? (
-              <View className="mb-2">
-                <FlatList
-                  horizontal
-                  data={pendingImages}
-                  keyExtractor={(item) => item.id}
-                  showsHorizontalScrollIndicator={false}
-                  renderItem={({ item }) => (
-                    <View className="mr-2">
-                      <Pressable onPress={() => setPreviewImageUri(item.uri)}>
-                        <Image source={{ uri: item.uri }} resizeMode="cover" className="h-16 w-16 rounded-lg bg-black/25" />
-                      </Pressable>
-                      <Pressable
-                        onPress={() =>
-                          setPendingImages((existing) => existing.filter((image) => image.id !== item.id))
-                        }
-                        className="absolute -right-1 -top-1 rounded-full bg-black/70 p-1"
-                      >
-                        <Ionicons name="close" size={12} color="#ffffff" />
-                      </Pressable>
-                    </View>
-                  )}
-                />
-              </View>
-            ) : null}
-
-            <View className="flex-row items-end gap-2">
-              <Pressable
-                onPress={onPickImages}
-                className="h-12 w-12 items-center justify-center rounded-full border border-border/10 bg-muted"
-              >
-                <Ionicons name="image-outline" size={18} color="#d8ffd8" />
-              </Pressable>
-              <TextInput
-                value={composerText}
-                onChangeText={setComposerText}
-                placeholder="Continue this thread..."
-                placeholderTextColor="#94a3b8"
-                keyboardAppearance="dark"
-                multiline
-                className="min-h-12 max-h-36 flex-1 rounded-3xl border border-border/10 bg-muted px-4 py-3 text-foreground"
-                style={undefined}
-              />
-              <Pressable
-                disabled={isResponding ? stopping || !activeTurnId : sending || !composerHasDraft}
-                onPress={isResponding ? onStopResponse : onSend}
-                className={`h-10 w-10 items-center justify-center rounded-full ${
-                  isResponding || sending || !composerHasDraft ? "bg-secondary" : "bg-primary"
-                }`}
-              >
-                <AnimatePresence>
-                  <MotiView
-                    key={`${composerActionIconName}-${isResponding ? "responding" : "idle"}-${stopping ? "stopping" : "active"}`}
-                    from={{ opacity: 0, scale: 0.78, rotate: "-10deg" }}
-                    animate={{ opacity: 1, scale: 1, rotate: "0deg" }}
-                    exit={{ opacity: 0, scale: 0.78, rotate: "10deg" }}
-                    transition={{ type: "timing", duration: 140 }}
-                    style={{ width: 20, height: 20, alignItems: "center", justifyContent: "center" }}
-                  >
-                    <Ionicons name={composerActionIconName} size={20} color="#d8ffd8" />
-                  </MotiView>
-                </AnimatePresence>
-              </Pressable>
-            </View>
-          </View>
-        )}
+          );
+        })()}
       </View>
       </KeyboardAvoidingView>
 
@@ -2961,33 +3244,47 @@ export default function ThreadScreen() {
           style={{ paddingBottom: Math.max(insets.bottom, 8) + 96 }}
           onPress={() => setOpenDropdown(null)}
         >
-          <Pressable
-            className="rounded-xl border border-border/10 bg-muted p-2"
-            onPress={(event) => {
-              event.stopPropagation();
-            }}
-          >
-            {(openDropdown === "model" ? modelOptions : currentReasoningOptions).map((option) => {
-              const isModel = openDropdown === "model";
-              const active = isModel ? resolvedSelectedModel === option.value : resolvedSelectedReasoning === option.value;
-              return (
+          <AnimatePresence>
+            {openDropdown !== null && (
+              <MotiView
+                from={{ opacity: 0, translateY: 100 }}
+                animate={{ opacity: 1, translateY: 0 }}
+                exit={{ opacity: 0, translateY: 100 }}
+                transition={{ type: "timing", duration: 250 }}
+              >
                 <Pressable
-                  key={`${openDropdown}-${option.label}`}
-                  className={`rounded-lg px-3 py-3 ${active ? "bg-card" : "bg-transparent"}`}
-                  onPress={() => {
-                    if (isModel) {
-                      setSelectedModel(option.value as string);
-                    } else {
-                      setSelectedReasoning(option.value as ReasoningEffort);
-                    }
-                    setOpenDropdown(null);
+                  className="rounded-xl border border-border/10 bg-muted p-2"
+                  onPress={(event) => {
+                    event.stopPropagation();
                   }}
                 >
-                  <Text className={`text-base ${active ? "font-semibold text-primary-foreground" : "text-muted-foreground"}`}>{option.label}</Text>
+                  {(openDropdown === "model" ? modelOptions : currentReasoningOptions).map((option) => {
+                    const isModel = openDropdown === "model";
+                    const active = isModel ? resolvedSelectedModel === option.value : resolvedSelectedReasoning === option.value;
+                    return (
+                      <Pressable
+                        key={`${openDropdown}-${option.label}`}
+                        className={`rounded-lg px-3 py-3 flex-row items-center justify-between ${active ? "bg-card" : "bg-transparent"}`}
+                        onPress={() => {
+                          if (isModel) {
+                            setSelectedModel(option.value as string);
+                          } else {
+                            setSelectedReasoning(option.value as ReasoningEffort);
+                          }
+                          setOpenDropdown(null);
+                        }}
+                      >
+                        <Text className={`text-base ${active ? "font-semibold text-primary-foreground" : "text-muted-foreground"}`}>{option.label}</Text>
+                        {active && (
+                          <Ionicons name="checkmark" size={20} className="text-primary-foreground" />
+                        )}
+                      </Pressable>
+                    );
+                  })}
                 </Pressable>
-              );
-            })}
-          </Pressable>
+              </MotiView>
+            )}
+          </AnimatePresence>
         </Pressable>
       </Modal>
 

@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { ActivityIndicator, FlatList, Linking, Modal, Pressable, RefreshControl, ScrollView, Text, useWindowDimensions, View } from "react-native";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ActivityIndicator, FlatList, Linking, Modal, Pressable, RefreshControl, ScrollView, SectionList, Text, useWindowDimensions, View } from "react-native";
 import { router, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
+import Constants from "expo-constants";
 import { MotiView } from "moti";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import {
@@ -24,6 +25,40 @@ interface ThreadItem {
   title?: string;
   updatedAt?: string;
   cwd?: string;
+}
+
+interface ThreadSection {
+  title: string;
+  data: ThreadItem[];
+}
+
+function groupThreadsByDate(threads: ThreadItem[]): ThreadSection[] {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterday = new Date(today.getTime() - 86400000);
+  const thisWeek = new Date(today.getTime() - 7 * 86400000);
+  const thisMonth = new Date(today.getTime() - 30 * 86400000);
+
+  const buckets: [string, ThreadItem[]][] = [
+    ["Today", []],
+    ["Yesterday", []],
+    ["This Week", []],
+    ["This Month", []],
+    ["Older", []],
+  ];
+
+  for (const thread of threads) {
+    const d = thread.updatedAt ? new Date(thread.updatedAt) : new Date(0);
+    if (d >= today) buckets[0][1].push(thread);
+    else if (d >= yesterday) buckets[1][1].push(thread);
+    else if (d >= thisWeek) buckets[2][1].push(thread);
+    else if (d >= thisMonth) buckets[3][1].push(thread);
+    else buckets[4][1].push(thread);
+  }
+
+  return buckets
+    .filter(([, items]) => items.length > 0)
+    .map(([title, data]) => ({ title, data }));
 }
 
 type LoadingStep = "session" | "gateway" | "threads" | "render";
@@ -92,6 +127,7 @@ function formatRelativeTime(updatedAt?: string): string {
 export default function ThreadsScreen() {
   const { height: windowHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
+  const appVersion = Constants.expoConfig?.version ?? "Unknown";
   const [threads, setThreads] = useState<ThreadItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -120,6 +156,7 @@ export default function ThreadsScreen() {
   const [loadingStep, setLoadingStep] = useState<LoadingStep>("session");
   const [loadingSeconds, setLoadingSeconds] = useState(0);
   const hasLoadedThreadsOnceRef = useRef(false);
+  const sections = useMemo(() => groupThreadsByDate(threads), [threads]);
 
   useEffect(() => {
     if (!loading) {
@@ -289,29 +326,51 @@ export default function ThreadsScreen() {
 
   const renderItem = ({ item, index }: { item: ThreadItem; index: number }) => (
     <MotiView
-      from={{ opacity: 0, translateY: 14, scale: 0.98 }}
-      animate={{ opacity: 1, translateY: 0, scale: 1 }}
+      from={{ opacity: 0, translateY: 12 }}
+      animate={{ opacity: 1, translateY: 0 }}
       transition={{
         type: "timing",
-        delay: Math.min(index, 12) * 55,
-        duration: 280,
+        delay: Math.min(index, 8) * 50,
+        duration: 260,
       }}
-      className="mb-3"
     >
       <Pressable
         onPress={() => router.push(`/thread/${item.id}`)}
-        className="rounded-2xl border border-border/50 bg-card px-4 py-4"
+        className="flex-row items-center gap-3 px-1 py-3 active:opacity-70"
       >
-        <Text className="text-base text-card-foreground" numberOfLines={2} ellipsizeMode="tail">
-          {item.name || item.title || item.id}
-        </Text>
-        <View className="mt-1 flex-row items-center justify-between gap-3">
-          <Text className="flex-1 text-xs text-muted-foreground" numberOfLines={1} ellipsizeMode="middle">
-            {item.cwd ? formatPathForDisplay(item.cwd) : "No directory"}
-          </Text>
-          <Text className="text-xs text-muted-foreground">{formatRelativeTime(item.updatedAt)}</Text>
+        <View className="h-9 w-9 items-center justify-center rounded-xl bg-primary/10">
+          <Ionicons name="chatbubble-outline" size={16} className="text-primary" />
         </View>
+        <View className="min-w-0 flex-1">
+          <Text className="text-[15px] font-medium text-card-foreground" numberOfLines={2} ellipsizeMode="tail">
+            {item.name || item.title || item.id}
+          </Text>
+          <View className="mt-1 flex-row items-center gap-2">
+            <View className="min-w-0 flex-1 flex-row items-center gap-1">
+              <Ionicons name="folder-outline" size={11} className="text-muted-foreground" />
+              <Text className="flex-1 text-[11px] text-muted-foreground" numberOfLines={1} ellipsizeMode="middle">
+                {item.cwd ? formatPathForDisplay(item.cwd) : "No directory"}
+              </Text>
+            </View>
+            <Text className="text-[11px] text-muted-foreground">{formatRelativeTime(item.updatedAt)}</Text>
+          </View>
+        </View>
+        <Ionicons name="chevron-forward" size={15} className="text-muted-foreground/40" />
       </Pressable>
+    </MotiView>
+  );
+
+  const ItemSeparator = () => <View className="ml-14 h-px bg-border/30" />;
+
+  const renderSectionHeader = ({ section }: { section: { title: string } }) => (
+    <MotiView
+      from={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ type: "timing", duration: 200 }}
+    >
+      <Text className="pb-2 pt-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+        {section.title}
+      </Text>
     </MotiView>
   );
 
@@ -411,10 +470,13 @@ export default function ThreadsScreen() {
           </View>
         </MotiView>
       ) : (
-        <FlatList
-          data={threads}
+        <SectionList
+          sections={sections}
           keyExtractor={(item) => item.id}
           renderItem={renderItem}
+          renderSectionHeader={renderSectionHeader}
+          ItemSeparatorComponent={ItemSeparator}
+          stickySectionHeadersEnabled={false}
           contentContainerStyle={{ paddingBottom: 24 }}
           refreshControl={
             <RefreshControl
@@ -434,9 +496,21 @@ export default function ThreadsScreen() {
           }
           ListEmptyComponent={
             !loading ? (
-              <View className="rounded-2xl border border-dashed border-border/50 bg-muted p-6">
-                <Text className="text-center text-sm text-muted-foreground">No threads returned by the gateway.</Text>
-              </View>
+              <MotiView
+                from={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ type: "timing", duration: 300 }}
+              >
+                <View className="mt-8 items-center rounded-2xl border border-dashed border-border/50 bg-card/50 p-8">
+                  <View className="mb-3 h-14 w-14 items-center justify-center rounded-2xl bg-primary/10">
+                    <Ionicons name="chatbubbles-outline" size={28} className="text-primary" />
+                  </View>
+                  <Text className="text-base font-medium text-card-foreground">No threads yet</Text>
+                  <Text className="mt-1 text-center text-sm text-muted-foreground">
+                    Tap the + button to start a new conversation.
+                  </Text>
+                </View>
+              </MotiView>
             ) : null
           }
         />
@@ -604,9 +678,14 @@ export default function ThreadsScreen() {
               transition={{ type: "timing", duration: 260 }}
             >
               <View className="w-full rounded-2xl border border-border/50 bg-card" style={{ maxHeight: settingsPanelMaxHeight }}>
-                <View className="p-4" style={{ paddingBottom: Math.max(insets.bottom, 16) + 12 }}>
+                <View className="p-4">
                   <Text className="text-lg font-semibold text-card-foreground">Settings</Text>
                   <Text className="mt-1 text-xs text-muted-foreground">User info and pairing.</Text>
+
+            <View className="mt-4 px-1">
+              <Text className="text-xs text-muted-foreground">App version</Text>
+              <Text className="mt-1 text-sm text-foreground">{appVersion}</Text>
+            </View>
 
             <View className="mt-4 px-1">
               <Text className="text-xs text-muted-foreground">Paired server</Text>

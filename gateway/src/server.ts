@@ -11,7 +11,7 @@ import rateLimit from "@fastify/rate-limit";
 import jwt from "jsonwebtoken";
 import QRCode from "qrcode";
 import WebSocket from "ws";
-import { adjectives, animals, NumberDictionary, uniqueNamesGenerator } from "unique-names-generator";
+import { animals, colors, uniqueNamesGenerator } from "unique-names-generator";
 import {
   AuthLogoutRequestSchema,
   AuthRefreshRequestSchema,
@@ -31,6 +31,8 @@ import {
   ThreadNameSetResponseSchema,
   ThreadCreateResponseSchema,
   ThreadEventsResponseSchema,
+  ThreadFilesQuerySchema,
+  ThreadFilesResponseSchema,
   ThreadResponseSchema,
   ThreadResumeResponseSchema,
   ThreadsResponseSchema,
@@ -81,8 +83,6 @@ interface AccessTokenPayload {
   sub: string;
   deviceName?: string;
 }
-
-const deviceNumberDictionary = NumberDictionary.generate({ min: 10, max: 99 });
 
 function sanitizeBaseUrl(value: string): string {
   return value.replace(/\/+$/, "");
@@ -358,20 +358,22 @@ function numericSeedFromText(value: string): number {
   return hash;
 }
 
-function buildMemorableDeviceName(deviceId: string): string {
+function buildMemorableDeviceName(deviceId: string, sequence: number): string {
   const seed = numericSeedFromText(deviceId.toLowerCase());
-  return uniqueNamesGenerator({
-    dictionaries: [adjectives, animals, deviceNumberDictionary],
+  const colorAnimal = uniqueNamesGenerator({
+    dictionaries: [colors, animals],
     separator: "-",
     style: "capital",
     seed,
   });
+  return `${colorAnimal}-${sequence}`;
 }
 
-function withMemorableDeviceName<T extends { deviceId: string; deviceName: string }>(device: T): T {
+function withMemorableDeviceName<T extends { deviceId: string; deviceName: string; createdAt: number }>(device: T): T {
+  const sequence = db.getOrCreateDeviceSequence(device.deviceId, device.createdAt);
   return {
     ...device,
-    deviceName: buildMemorableDeviceName(device.deviceId),
+    deviceName: buildMemorableDeviceName(device.deviceId, sequence),
   };
 }
 
@@ -735,6 +737,118 @@ function browseDirectories(rawPath: unknown): { currentPath: string; parentPath:
     parentPath: parentPath === currentPath ? null : parentPath,
     folders: entries,
   };
+}
+
+function isExistingDirectory(candidate: unknown): candidate is string {
+  if (typeof candidate !== "string" || candidate.trim().length === 0) {
+    return false;
+  }
+  try {
+    return fs.statSync(candidate).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function listFilesInDirectory(cwd: string, query: string, limit: number): string[] {
+  const normalizedLimit = Math.max(1, Math.min(limit, 1000));
+  const normalizedQuery = query.trim().toLowerCase();
+  const deduped = new Set<string>();
+  let files: string[] = [];
+
+  try {
+    const output = execFileSync("rg", ["--files", "--hidden", "-g", "!.git"], {
+      cwd,
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024 * 8,
+    });
+    files = output
+      .split(/\r?\n/)
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0 && !value.includes("/.git/"));
+  } catch {
+    try {
+      const output = execFileSync("find", [".", "-type", "f", "-not", "-path", "*/.git/*", "-not", "-path", "*/node_modules/*"], {
+        cwd,
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024 * 8,
+      });
+      files = output
+        .split(/\r?\n/)
+        .map((value) => value.trim().replace(/^\.\//, ""))
+        .filter((value) => value.length > 0);
+    } catch {
+      files = [];
+    }
+  }
+
+  const filtered = files
+    .filter((value) => (normalizedQuery.length > 0 ? value.toLowerCase().includes(normalizedQuery) : true))
+    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+
+  for (const value of filtered) {
+    deduped.add(value);
+    if (deduped.size >= normalizedLimit) {
+      break;
+    }
+  }
+
+  return Array.from(deduped);
+}
+
+async function resolveThreadCwd(threadId: string): Promise<string> {
+  const persisted = db.getThreadCwd(threadId)?.cwd;
+  if (isExistingDirectory(persisted)) {
+    return persisted;
+  }
+
+  try {
+    const result = await codex.call("thread/read", {
+      threadId,
+      includeTurns: false,
+    });
+
+    if (result && typeof result === "object") {
+      const topLevel = result as Record<string, unknown>;
+      const nested = (topLevel.thread && typeof topLevel.thread === "object"
+        ? (topLevel.thread as Record<string, unknown>)
+        : topLevel) as Record<string, unknown>;
+      const nextCwd = [nested.cwd, nested.workingDirectory, nested.workdir, topLevel.cwd, topLevel.workingDirectory, topLevel.workdir]
+        .find((value) => isExistingDirectory(value));
+
+      if (typeof nextCwd === "string") {
+        db.upsertThreadCwd({
+          threadId,
+          cwd: nextCwd,
+          updatedAt: Date.now(),
+        });
+        return nextCwd;
+      }
+    }
+  } catch {
+    // Ignore lookup failures and use fallback cwd below.
+  }
+
+  try {
+    const listResult = await codex.call("thread/list", {});
+    const threads = normalizeThreads(listResult);
+    const matched = threads.find((thread) => thread.id === threadId);
+    if (matched?.cwd && isExistingDirectory(matched.cwd)) {
+      db.upsertThreadCwd({
+        threadId,
+        cwd: matched.cwd,
+        updatedAt: Date.now(),
+      });
+      return matched.cwd;
+    }
+  } catch {
+    // Ignore lookup failures and use fallback cwd below.
+  }
+
+  if (isExistingDirectory(HOME_DIR)) {
+    return HOME_DIR;
+  }
+  return process.cwd();
 }
 
 function normalizeThread(result: unknown, fallbackId: string): { id: string; name?: string; title?: string; turns: unknown[] } {
@@ -1220,7 +1334,8 @@ async function bootstrap() {
 
       db.markPairSessionUsed(pairId, Date.now());
 
-      const memorableDeviceName = buildMemorableDeviceName(deviceId);
+      const sequence = db.getOrCreateDeviceSequence(deviceId, Date.now());
+      const memorableDeviceName = buildMemorableDeviceName(deviceId, sequence);
       const accessToken = issueAccessToken(deviceId, memorableDeviceName);
       const refresh = createRefreshToken(deviceId, memorableDeviceName);
       db.insertRefreshToken(refresh.row);
@@ -1248,8 +1363,9 @@ async function bootstrap() {
       return reply.code(401).send({ error: "Invalid refresh token" });
     }
 
+    const sequence = db.getOrCreateDeviceSequence(tokenRecord.deviceId, tokenRecord.createdAt);
     const payload = AuthRefreshResponseSchema.parse({
-      accessToken: issueAccessToken(tokenRecord.deviceId, tokenRecord.deviceName),
+      accessToken: issueAccessToken(tokenRecord.deviceId, buildMemorableDeviceName(tokenRecord.deviceId, sequence)),
     });
 
     return reply.send(payload);
@@ -1322,6 +1438,42 @@ async function bootstrap() {
   app.get("/directories", { preHandler: [requireAuth] }, async (request, reply) => {
     const query = request.query as { path?: string };
     const payload = DirectoryBrowseResponseSchema.parse(browseDirectories(query.path));
+    return reply.send(payload);
+  });
+
+  app.get("/threads/:id/files", { preHandler: [requireAuth] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const parsedQuery = ThreadFilesQuerySchema.safeParse(request.query ?? {});
+    if (!parsedQuery.success) {
+      return reply.code(400).send({ error: parsedQuery.error.flatten() });
+    }
+
+    const primaryCwd = await resolveThreadCwd(params.id);
+    const query = parsedQuery.data.query?.trim() ?? "";
+    const limit = parsedQuery.data.limit ?? 250;
+    const candidateCwds = Array.from(
+      new Set(
+        [primaryCwd, db.getThreadCwd(params.id)?.cwd ?? null, process.cwd(), HOME_DIR].filter(
+          (value): value is string => isExistingDirectory(value)
+        )
+      )
+    );
+
+    let selectedCwd = candidateCwds[0] ?? process.cwd();
+    let files: string[] = [];
+    for (const candidate of candidateCwds) {
+      const nextFiles = listFilesInDirectory(candidate, query, limit);
+      if (nextFiles.length > 0) {
+        selectedCwd = candidate;
+        files = nextFiles;
+        break;
+      }
+    }
+    if (files.length === 0) {
+      files = listFilesInDirectory(selectedCwd, query, limit);
+    }
+
+    const payload = ThreadFilesResponseSchema.parse({ cwd: selectedCwd, files });
     return reply.send(payload);
   });
 

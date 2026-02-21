@@ -47,6 +47,12 @@ interface SettingsRow {
   createdAt: number;
 }
 
+interface DeviceSequenceRow {
+  deviceId: string;
+  sequence: number;
+  createdAt: number;
+}
+
 export class GatewayDatabase {
   private readonly db: Database.Database;
 
@@ -80,6 +86,12 @@ export class GatewayDatabase {
       CREATE TABLE IF NOT EXISTS settings (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         jwtSecret TEXT NOT NULL,
+        createdAt INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS device_sequences (
+        deviceId TEXT PRIMARY KEY,
+        sequence INTEGER NOT NULL UNIQUE,
         createdAt INTEGER NOT NULL
       );
 
@@ -117,6 +129,33 @@ export class GatewayDatabase {
     if (!threadEventColumns.some((column) => column.name === "turnId")) {
       this.db.exec("ALTER TABLE thread_events ADD COLUMN turnId TEXT NULL");
     }
+
+    this.backfillDeviceSequencesFromRefreshTokens();
+  }
+
+  private backfillDeviceSequencesFromRefreshTokens() {
+    const getMaxSequence = this.db.prepare("SELECT COALESCE(MAX(sequence), 0) AS maxSequence FROM device_sequences");
+    const selectMissing = this.db.prepare(
+      `SELECT rt.deviceId AS deviceId, MIN(rt.createdAt) AS createdAt
+       FROM refresh_tokens rt
+       WHERE rt.deviceId NOT IN (SELECT deviceId FROM device_sequences)
+       GROUP BY rt.deviceId
+       ORDER BY createdAt ASC, rt.deviceId ASC`
+    );
+    const insertSequence = this.db.prepare(
+      "INSERT INTO device_sequences (deviceId, sequence, createdAt) VALUES (?, ?, ?)"
+    );
+
+    const tx = this.db.transaction(() => {
+      let nextSequence = (getMaxSequence.get() as { maxSequence: number }).maxSequence + 1;
+      const missing = selectMissing.all() as Array<{ deviceId: string; createdAt: number }>;
+      for (const row of missing) {
+        insertSequence.run(row.deviceId, nextSequence, row.createdAt);
+        nextSequence += 1;
+      }
+    });
+
+    tx();
   }
 
   close() {
@@ -187,6 +226,27 @@ export class GatewayDatabase {
 
   cleanupRefreshTokens() {
     this.db.prepare("DELETE FROM refresh_tokens WHERE revokedAt IS NOT NULL").run();
+  }
+
+  getOrCreateDeviceSequence(deviceId: string, createdAt: number): number {
+    const getExisting = this.db.prepare("SELECT sequence FROM device_sequences WHERE deviceId = ?");
+    const getMaxSequence = this.db.prepare("SELECT COALESCE(MAX(sequence), 0) AS maxSequence FROM device_sequences");
+    const insertSequence = this.db.prepare(
+      "INSERT INTO device_sequences (deviceId, sequence, createdAt) VALUES (?, ?, ?)"
+    );
+
+    const tx = this.db.transaction((id: string, createdAtMillis: number) => {
+      const existing = getExisting.get(id) as Pick<DeviceSequenceRow, "sequence"> | undefined;
+      if (existing) {
+        return existing.sequence;
+      }
+
+      const nextSequence = (getMaxSequence.get() as { maxSequence: number }).maxSequence + 1;
+      insertSequence.run(id, nextSequence, createdAtMillis);
+      return nextSequence;
+    });
+
+    return tx(deviceId, createdAt);
   }
 
   listActiveDevices(): Array<Pick<RefreshTokenRow, "id" | "deviceId" | "deviceName" | "createdAt" | "expiresAt">> {

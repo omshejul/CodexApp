@@ -12,6 +12,7 @@ import {
   ThreadInterruptResponseSchema,
   ThreadCreateResponseSchema,
   ThreadEventsResponseSchema,
+  ThreadFilesResponseSchema,
   ThreadResponseSchema,
   ThreadResumeResponseSchema,
   ThreadsResponseSchema,
@@ -333,6 +334,21 @@ export async function getDirectories(pathValue?: string) {
   const query = pathValue ? `?path=${encodeURIComponent(pathValue)}` : "";
   const payload = await authenticatedRequest<unknown>(`/directories${query}`);
   return DirectoryBrowseResponseSchema.parse(payload);
+}
+
+export async function getThreadFiles(threadId: string, params?: { query?: string; limit?: number }) {
+  const queryParams = new URLSearchParams();
+  if (params?.query) {
+    queryParams.set("query", params.query);
+  }
+  if (typeof params?.limit === "number" && Number.isFinite(params.limit)) {
+    queryParams.set("limit", String(Math.max(1, Math.floor(params.limit))));
+  }
+  const querySuffix = queryParams.toString().length > 0 ? `?${queryParams.toString()}` : "";
+  const payload = await authenticatedRequest<unknown>(
+    `/threads/${encodeURIComponent(threadId)}/files${querySuffix}`
+  );
+  return ThreadFilesResponseSchema.parse(payload);
 }
 
 export async function resumeThread(threadId: string) {

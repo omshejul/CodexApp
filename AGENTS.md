@@ -49,12 +49,41 @@ NOTARYTOOL_PROFILE="codex-notary" \
 - Include only files related to the requested change.
 - Run the narrowest verification that proves the change works.
 
+## Expo App Versioning
+
+- When changes touch the Expo app (`app/`) in a way users can notice, increment `app/app.json` `expo.version` in the same change.
+- Use semantic versioning:
+  - Patch (`x.y.Z`) for fixes/small UI updates.
+  - Minor (`x.Y.z`) for new backward-compatible features.
+  - Major (`X.y.z`) for breaking or compatibility-impacting changes.
+- Keep `app/package.json` `version` aligned with `app/app.json` `expo.version`.
+
 ## Run/Restart Guidance
 
 - For macOS app changes, keep restart guidance minimal.
 - Say only: rebuild using `/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/scripts/build_app.sh`.
 
-- For Metro Restart say to run  `npx expo start --dev-client --clear`
-- For build/reinstall iOS app say to run  `npx expo run:ios --device --no-bundler --configuration Debug`
+- For Metro Restart say:
+  `cd /Users/omshejul/Code/CodexApp/app`
+  `npx expo start --dev-client --clear`
+- For build/reinstall iOS app say:
+  `cd /Users/omshejul/Code/CodexApp/app`
+  `npx expo run:ios --device --no-bundler --configuration Debug`
+- Standalone iOS build (no Metro):
+  `cd /Users/omshejul/Code/CodexApp/app`
+  `npx expo run:ios --device --no-bundler --configuration Debug`
+- Standalone Android build (no Metro):
+  `cd /Users/omshejul/Code/CodexApp/app`
+  `npx expo run:android --variant debug --no-bundler`
 
 If you think something is useful to be remembered for later and will save time instead of doing it again, ask user if they can make a doc about this, and make a md in docs and link it here, by mentioning the doc and how/where to use it
+
+## Chat JSON Inspection
+
+- For raw Codex chat/thread JSON from local Codex sessions (`~/.codex/sessions`), use `/Users/omshejul/Code/CodexApp/docs/CODEX_CHAT_JSON.md`.
+- Default workflow: if user shares a screenshot/text snippet, search that snippet in `~/.codex/sessions` first to find the exact chat file.
+- Use it when you need user/assistant message JSONL or to locate a session by thread ID.
+
+## Useful Docs
+
+- `docs/mac-gateway-reliability.md`: Use for mac menu gateway reliability issues (sleep/wake behavior, launchd supervision, port conflict diagnosis, local network prompt timing).

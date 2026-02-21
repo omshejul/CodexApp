@@ -65,6 +65,16 @@ export const DirectoryBrowseResponseSchema = z.object({
   folders: z.array(DirectoryEntrySchema),
 });
 
+export const ThreadFilesQuerySchema = z.object({
+  query: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(1000).optional(),
+});
+
+export const ThreadFilesResponseSchema = z.object({
+  cwd: z.string().min(1),
+  files: z.array(z.string().min(1)),
+});
+
 export const ThreadResponseSchema = z.object({
   id: z.string().min(1),
   name: z.string().optional(),
@@ -189,6 +199,8 @@ export type ThreadsResponse = z.infer<typeof ThreadsResponseSchema>;
 export type WorkspacesResponse = z.infer<typeof WorkspacesResponseSchema>;
 export type DirectoryEntry = z.infer<typeof DirectoryEntrySchema>;
 export type DirectoryBrowseResponse = z.infer<typeof DirectoryBrowseResponseSchema>;
+export type ThreadFilesQuery = z.infer<typeof ThreadFilesQuerySchema>;
+export type ThreadFilesResponse = z.infer<typeof ThreadFilesResponseSchema>;
 export type ThreadResponse = z.infer<typeof ThreadResponseSchema>;
 export type ThreadEvent = z.infer<typeof ThreadEventSchema>;
 export type ThreadEventsResponse = z.infer<typeof ThreadEventsResponseSchema>;
