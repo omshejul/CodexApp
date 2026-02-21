@@ -37,7 +37,7 @@ export default function IndexScreen() {
         flex: 1,
         alignItems: "center",
         justifyContent: "center",
-        backgroundColor: "#0b1220",
+        backgroundColor: "#000000",
         paddingHorizontal: 24,
       }}
     >
