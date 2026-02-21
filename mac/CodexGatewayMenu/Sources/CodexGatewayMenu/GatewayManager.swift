@@ -35,9 +35,11 @@ final class GatewayManager: ObservableObject {
   @Published var statusMessage = "Idle"
   @Published var outputLines: [String] = []
   @Published var pairedDevices: [PairedDevice] = []
+  @Published var needsFullDiskAccess = false
 
   private var process: Process?
   private var didBootstrap = false
+  private var didShowFullDiskAccessPrompt = false
   private var didConfigureServeRouteThisSession = false
   private var didConfigureLegacyServeRouteThisSession = false
   private var willTerminateObserver: NSObjectProtocol?
@@ -79,6 +81,8 @@ final class GatewayManager: ObservableObject {
     guard !didBootstrap else { return }
     didBootstrap = true
 
+    refreshFullDiskAccessStatus()
+    guard enforceFullDiskAccessRequirement() else { return }
     refreshSetupStatus()
     if config.autoStart {
       Task { await start() }
@@ -86,8 +90,51 @@ final class GatewayManager: ObservableObject {
     Task { await refreshPairedDevices() }
   }
 
+  func refreshFullDiskAccessStatus() {
+    needsFullDiskAccess = !hasFullDiskAccess()
+  }
+
+  func openFullDiskAccessSettings() {
+    let deepLink = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+    let fallback = URL(fileURLWithPath: "/System/Library/PreferencePanes/Security.prefPane")
+    if let deepLink {
+      NSWorkspace.shared.open(deepLink)
+    } else {
+      NSWorkspace.shared.open(fallback)
+    }
+  }
+
+  @discardableResult
+  private func enforceFullDiskAccessRequirement() -> Bool {
+    refreshFullDiskAccessStatus()
+    guard needsFullDiskAccess else { return true }
+    statusMessage = "Full Disk Access required"
+    showFullDiskAccessPromptIfNeeded()
+    return false
+  }
+
+  func showFullDiskAccessPromptIfNeeded() {
+    guard needsFullDiskAccess, !didShowFullDiskAccessPrompt else { return }
+    didShowFullDiskAccessPrompt = true
+
+    let alert = NSAlert()
+    alert.messageText = "Allow Full Disk Access"
+    alert.informativeText =
+      "Codex Gateway requires Full Disk Access to run. Enable it for this app and its helper in Privacy & Security > Full Disk Access, then relaunch the app."
+    alert.addButton(withTitle: "Open Settings")
+    alert.addButton(withTitle: "Close")
+    alert.alertStyle = .informational
+
+    NSApp.activate(ignoringOtherApps: true)
+    let response = alert.runModal()
+    if response == .alertFirstButtonReturn {
+      openFullDiskAccessSettings()
+    }
+  }
+
   func start() async {
     guard !isRunning else { return }
+    guard enforceFullDiskAccessRequirement() else { return }
 
     let diagnostics = diagnoseSetup()
     conflictingPID = diagnostics.portConflictPID
@@ -197,6 +244,7 @@ final class GatewayManager: ObservableObject {
 
   func fixSetup() async {
     guard !isFixingSetup else { return }
+    guard enforceFullDiskAccessRequirement() else { return }
     isFixingSetup = true
     defer { isFixingSetup = false }
 
@@ -270,6 +318,7 @@ final class GatewayManager: ObservableObject {
   }
 
   func openPairPage() {
+    guard enforceFullDiskAccessRequirement() else { return }
     guard let url = URL(string: localhostPairURL(port: configuredPort())) else {
       statusMessage = "Invalid pair URL"
       return
@@ -549,6 +598,17 @@ final class GatewayManager: ObservableObject {
     let appDir = base.appendingPathComponent("CodexGatewayMenu", isDirectory: true)
     try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
     return appDir
+  }
+
+  private func hasFullDiskAccess() -> Bool {
+    let protectedDirectory = FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent("Library/Application Support/com.apple.TCC", isDirectory: true)
+    do {
+      _ = try FileManager.default.contentsOfDirectory(atPath: protectedDirectory.path)
+      return true
+    } catch {
+      return false
+    }
   }
 
   private func discoverTailscaleMagicBaseURL(environment: [String: String]) -> String? {

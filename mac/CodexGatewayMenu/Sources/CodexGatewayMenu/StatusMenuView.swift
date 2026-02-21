@@ -18,6 +18,18 @@ struct StatusMenuView: View {
         .font(.caption)
         .foregroundStyle(.secondary)
 
+      if manager.needsFullDiskAccess {
+        VStack(alignment: .leading, spacing: 6) {
+          Text("Full Disk Access is required for this app.")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+          Button("Grant Full Disk Access") {
+            manager.openFullDiskAccessSettings()
+          }
+          .font(.caption)
+        }
+      }
+
       if manager.statusMessage != "Running" && manager.statusMessage != "Ready" {
         Text("Use Fix Setup to auto-check Codex CLI, Tailscale auth, and route configuration.")
           .font(.caption2)
@@ -30,7 +42,7 @@ struct StatusMenuView: View {
         Button("Start") {
           Task { await manager.start() }
         }
-        .disabled(manager.isRunning || manager.isFixingSetup)
+        .disabled(manager.needsFullDiskAccess || manager.isRunning || manager.isFixingSetup)
 
         Button("Stop") {
           manager.stop()
@@ -41,7 +53,7 @@ struct StatusMenuView: View {
       Button(manager.isFixingSetup ? "Fixing..." : "Fix Setup") {
         Task { await manager.fixSetup() }
       }
-      .disabled(manager.isFixingSetup || manager.isRunning)
+      .disabled(manager.needsFullDiskAccess || manager.isFixingSetup || manager.isRunning)
 
       if let pid = manager.conflictingPID, !manager.isRunning {
         Button("Stop Other Process (PID \(pid))") {
@@ -52,6 +64,7 @@ struct StatusMenuView: View {
       Button("Open Pair Page") {
         manager.openPairPage()
       }
+      .disabled(manager.needsFullDiskAccess)
 
       Button("Settings") {
         NSApp.activate(ignoringOtherApps: true)
@@ -143,6 +156,7 @@ struct StatusMenuView: View {
     .frame(width: 500)
     .onAppear {
       manager.bootstrap()
+      manager.refreshFullDiskAccessStatus()
     }
   }
 }
