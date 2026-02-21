@@ -626,6 +626,7 @@ export default function ThreadScreen() {
     tone: "warn",
     text: "Connecting",
   });
+  const [showLiveIndicator, setShowLiveIndicator] = useState(true);
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const [reasoningOptionsByModel, setReasoningOptionsByModel] = useState<Record<string, ReasoningOption[]>>({});
   const [optionsLoaded, setOptionsLoaded] = useState(false);
@@ -637,6 +638,7 @@ export default function ThreadScreen() {
   const streamSocketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptRef = useRef(0);
+  const liveIndicatorHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const optionsRefreshPromiseRef = useRef<Promise<void> | null>(null);
   const selectedModelRef = useRef<string | null>(null);
   const listRef = useRef<FlatList<RenderedTurn>>(null);
@@ -701,6 +703,34 @@ export default function ThreadScreen() {
   useEffect(() => {
     selectedModelRef.current = selectedModel;
   }, [selectedModel]);
+
+  useEffect(() => {
+    if (liveIndicatorHideTimerRef.current) {
+      clearTimeout(liveIndicatorHideTimerRef.current);
+      liveIndicatorHideTimerRef.current = null;
+    }
+
+    if (streamStatus.tone !== "ok") {
+      setShowLiveIndicator(true);
+      return;
+    }
+
+    if (streamStatus.text === "Live") {
+      setShowLiveIndicator(true);
+      liveIndicatorHideTimerRef.current = setTimeout(() => {
+        setShowLiveIndicator(false);
+      }, 1000);
+    } else {
+      setShowLiveIndicator(true);
+    }
+
+    return () => {
+      if (liveIndicatorHideTimerRef.current) {
+        clearTimeout(liveIndicatorHideTimerRef.current);
+        liveIndicatorHideTimerRef.current = null;
+      }
+    };
+  }, [streamStatus.tone, streamStatus.text]);
 
   const loadGatewayOptions = useCallback(async () => {
     const payload = await getGatewayOptions();
@@ -1100,6 +1130,7 @@ export default function ThreadScreen() {
 
   const streamDotColor =
     streamStatus.tone === "ok" ? "#22c55e" : streamStatus.tone === "warn" ? "#f59e0b" : "#ef4444";
+  const indicatorVisible = showLiveIndicator || streamStatus.tone !== "ok";
 
   useEffect(() => {
     if (!followBottomRef.current) {
@@ -1280,10 +1311,15 @@ export default function ThreadScreen() {
             <Text className="text-2xl font-semibold text-foreground">Chat</Text>
           </View>
           <View className="w-28 items-end">
-            <View className="flex-row items-center rounded-full border border-border/10 bg-card px-3 py-1.5">
-              <View className="mr-2 h-2.5 w-2.5 rounded-full" style={{ backgroundColor: streamDotColor }} />
-              <Text className="text-xs font-semibold text-foreground">{streamStatus.text}</Text>
-            </View>
+            <MotiView
+              animate={{ opacity: indicatorVisible ? 1 : 0, scale: indicatorVisible ? 1 : 0.97 }}
+              transition={{ type: "timing", duration: 1000 }}
+            >
+              <View className="flex-row items-center rounded-full border border-border/10 bg-card px-3 py-1.5">
+                <View className="mr-2 h-2.5 w-2.5 rounded-full" style={{ backgroundColor: streamDotColor }} />
+                <Text className="text-xs font-semibold text-foreground">{streamStatus.text}</Text>
+              </View>
+            </MotiView>
           </View>
         </View>
         {/* <Text className="mb-2 text-[11px] font-semibold uppercase tracking-[1.2px] text-muted-foreground">ID</Text>
@@ -1456,7 +1492,8 @@ export default function ThreadScreen() {
         {showScrollToBottom ? (
           <Pressable
             onPress={scrollToBottom}
-            className="absolute bottom-[188px] right-4 z-20 rounded-full border border-border/10 bg-muted px-2.5 py-2"
+            className="absolute bottom-[158px] z-20 self-center rounded-full border border-border/10 bg-muted"
+            style={{ width: 36, height: 36, justifyContent: "center", alignItems: "center" }}
           >
             <Ionicons name="arrow-down" size={16} color="#e0e0e0" />
           </Pressable>
