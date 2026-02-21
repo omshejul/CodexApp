@@ -17,6 +17,7 @@ import {
 import { useLocalSearchParams } from "expo-router";
 import { router } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
+import * as ImageManipulator from "expo-image-manipulator";
 import { MotiView } from "moti";
 import { Ionicons } from "@expo/vector-icons";
 import Markdown from "react-native-markdown-display";
@@ -1149,29 +1150,37 @@ export default function ThreadScreen() {
   const onPickImages = useCallback(async () => {
     try {
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        mediaTypes: ["images"],
         allowsMultipleSelection: true,
         quality: 0.7,
-        base64: true,
+        base64: false,
       });
 
       if (result.canceled || !result.assets.length) {
         return;
       }
 
-      const nextImages: PendingImage[] = result.assets
-        .map((asset) => {
-          if (!asset.base64) {
-            return null;
-          }
-          const mimeType = typeof asset.mimeType === "string" && asset.mimeType.length > 0 ? asset.mimeType : "image/jpeg";
-          return {
-            id: `${Date.now()}-${asset.assetId ?? asset.uri}`,
-            uri: asset.uri,
-            imageUrl: `data:${mimeType};base64,${asset.base64}`,
-          };
-        })
-        .filter((image): image is PendingImage => image !== null);
+      const nextImages = (
+        await Promise.all(
+          result.assets.map(async (asset, index): Promise<PendingImage | null> => {
+            const normalized = await ImageManipulator.manipulateAsync(asset.uri, [], {
+              compress: 0.8,
+              format: ImageManipulator.SaveFormat.JPEG,
+              base64: true,
+            });
+
+            if (!normalized.base64) {
+              return null;
+            }
+
+            return {
+              id: `${Date.now()}-${index}-${asset.assetId ?? asset.uri}`,
+              uri: normalized.uri,
+              imageUrl: `data:image/jpeg;base64,${normalized.base64}`,
+            };
+          })
+        )
+      ).filter((image): image is PendingImage => image !== null);
 
       if (!nextImages.length) {
         setError("Unable to attach selected image.");
