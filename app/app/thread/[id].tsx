@@ -920,10 +920,11 @@ function extractChangeSummaryFromEvent(method: string, params: unknown): Rendere
 
 function extractActivityFromEvent(method: string, params: unknown): RenderedTurn | null {
   const lower = method.toLowerCase();
+  const nonce = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 
   if (lower === "thread/compacted") {
     return {
-      id: `activity-compact-${Date.now()}`,
+      id: `activity-compact-${nonce}`,
       role: "system",
       text: "",
       kind: "activity",
@@ -937,7 +938,7 @@ function extractActivityFromEvent(method: string, params: unknown): RenderedTurn
     const record = params && typeof params === "object" ? (params as Record<string, unknown>) : null;
     const files = record && Array.isArray(record.files) ? record.files : [];
     return {
-      id: `activity-search-${Date.now()}`,
+      id: `activity-search-${nonce}`,
       role: "system",
       text: "",
       kind: "activity",
@@ -968,7 +969,7 @@ function extractActivityFromEvent(method: string, params: unknown): RenderedTurn
       responseItem.callName,
       responseItem.call_name
     );
-    const responseId = `raw-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+    const responseId = `raw-${nonce}`;
 
     if (
       typeLower === "web_search_call" ||
@@ -1036,7 +1037,7 @@ function extractActivityFromEvent(method: string, params: unknown): RenderedTurn
   const threadItem = item as Record<string, unknown>;
   const itemType = typeof threadItem.type === "string" ? threadItem.type : "";
   const itemTypeLower = itemType.toLowerCase();
-  const itemId = typeof threadItem.id === "string" ? threadItem.id : `${Date.now()}`;
+  const itemId = typeof threadItem.id === "string" ? threadItem.id : `generated-${nonce}`;
 
   if (itemTypeLower === "contextcompaction") {
     return {
@@ -1454,6 +1455,12 @@ export default function ThreadScreen() {
   const turnsSignatureRef = useRef("");
   const mentionRequestRef = useRef(0);
   const wrapToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clientTurnIdRef = useRef(0);
+
+  const makeClientTurnId = useCallback((prefix: string): string => {
+    clientTurnIdRef.current += 1;
+    return `${prefix}-${Date.now()}-${clientTurnIdRef.current}`;
+  }, []);
 
   const activeMention = useMemo(
     () => findActiveMentionToken(composerText, composerSelection.start),
@@ -1646,14 +1653,14 @@ export default function ThreadScreen() {
       setTurns((existing) => [
         ...existing,
         {
-          id: `assistant-${Date.now()}`,
+          id: makeClientTurnId("assistant"),
           role: "assistant",
           text: current,
         },
       ]);
       return "";
     });
-  }, []);
+  }, [makeClientTurnId]);
 
   const flushStreamingTerminalOutput = useCallback(() => {
     setStreamingTerminalOutput((current) => {
@@ -1664,7 +1671,7 @@ export default function ThreadScreen() {
       setTurns((existing) => [
         ...existing,
         {
-          id: `terminal-${Date.now()}`,
+          id: makeClientTurnId("terminal"),
           role: "system",
           text: "",
           kind: "activity",
@@ -1676,7 +1683,7 @@ export default function ThreadScreen() {
       ]);
       return "";
     });
-  }, []);
+  }, [makeClientTurnId]);
 
   const flushStreamingReasoning = useCallback(() => {
     setStreamingReasoning((current) => {
@@ -1687,7 +1694,7 @@ export default function ThreadScreen() {
       setTurns((existing) => [
         ...existing,
         {
-          id: `reasoning-${Date.now()}`,
+          id: makeClientTurnId("reasoning"),
           role: "system",
           text: "",
           kind: "activity",
@@ -1699,7 +1706,7 @@ export default function ThreadScreen() {
       ]);
       return "";
     });
-  }, []);
+  }, [makeClientTurnId]);
 
   const flushStreamingPlan = useCallback(() => {
     setStreamingPlan((current) => {
@@ -1710,7 +1717,7 @@ export default function ThreadScreen() {
       setTurns((existing) => [
         ...existing,
         {
-          id: `plan-${Date.now()}`,
+          id: makeClientTurnId("plan"),
           role: "system",
           text: "",
           kind: "activity",
@@ -1722,7 +1729,7 @@ export default function ThreadScreen() {
       ]);
       return "";
     });
-  }, []);
+  }, [makeClientTurnId]);
 
   const flushStreamingFileChanges = useCallback(() => {
     setStreamingFileChanges((current) => {
@@ -1733,7 +1740,7 @@ export default function ThreadScreen() {
       setTurns((existing) => [
         ...existing,
         {
-          id: `filechanges-${Date.now()}`,
+          id: makeClientTurnId("filechanges"),
           role: "system",
           text: "",
           kind: "activity",
@@ -1745,7 +1752,7 @@ export default function ThreadScreen() {
       ]);
       return "";
     });
-  }, []);
+  }, [makeClientTurnId]);
 
   const flushStreamingToolProgress = useCallback(() => {
     setStreamingToolProgress((current) => {
@@ -1756,7 +1763,7 @@ export default function ThreadScreen() {
       setTurns((existing) => [
         ...existing,
         {
-          id: `toolprogress-${Date.now()}`,
+          id: makeClientTurnId("toolprogress"),
           role: "system",
           text: "",
           kind: "activity",
@@ -1768,7 +1775,7 @@ export default function ThreadScreen() {
       ]);
       return "";
     });
-  }, []);
+  }, [makeClientTurnId]);
 
   useEffect(() => {
     if (!threadId) {
@@ -1887,7 +1894,7 @@ export default function ThreadScreen() {
               setTurns((existing) => [
                 ...existing,
                 {
-                  id: `change-${Date.now()}`,
+                  id: makeClientTurnId("change"),
                   role: "system",
                   text: "",
                   kind: "changeSummary",
@@ -1952,7 +1959,7 @@ export default function ThreadScreen() {
             const progressQueries = extractWebSearchQueries(payload.params);
             if (progressQueries.length > 0 || isLikelyWebSearchToolName(progressToolName ?? "")) {
               const candidate: RenderedTurn = {
-                id: `web-search-progress-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+                id: makeClientTurnId("web-search-progress"),
                 role: "system",
                 text: "",
                 kind: "activity",
@@ -2370,7 +2377,7 @@ export default function ThreadScreen() {
     setTurns((existing) => [
       ...existing,
       {
-        id: `local-user-${Date.now()}`,
+        id: makeClientTurnId("local-user"),
         role: "user",
         text,
         images: queuedImages.map((image) => image.uri),
