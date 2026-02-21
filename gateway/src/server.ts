@@ -750,52 +750,6 @@ function isExistingDirectory(candidate: unknown): candidate is string {
   }
 }
 
-function listFilesInDirectory(cwd: string, query: string, limit: number): string[] {
-  const normalizedLimit = Math.max(1, Math.min(limit, 1000));
-  const normalizedQuery = query.trim().toLowerCase();
-  const deduped = new Set<string>();
-  let files: string[] = [];
-
-  try {
-    const output = execFileSync("rg", ["--files", "--hidden", "-g", "!.git"], {
-      cwd,
-      encoding: "utf8",
-      maxBuffer: 1024 * 1024 * 8,
-    });
-    files = output
-      .split(/\r?\n/)
-      .map((value) => value.trim())
-      .filter((value) => value.length > 0 && !value.includes("/.git/"));
-  } catch {
-    try {
-      const output = execFileSync("find", [".", "-type", "f", "-not", "-path", "*/.git/*", "-not", "-path", "*/node_modules/*"], {
-        cwd,
-        encoding: "utf8",
-        maxBuffer: 1024 * 1024 * 8,
-      });
-      files = output
-        .split(/\r?\n/)
-        .map((value) => value.trim().replace(/^\.\//, ""))
-        .filter((value) => value.length > 0);
-    } catch {
-      files = [];
-    }
-  }
-
-  const filtered = files
-    .filter((value) => (normalizedQuery.length > 0 ? value.toLowerCase().includes(normalizedQuery) : true))
-    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
-
-  for (const value of filtered) {
-    deduped.add(value);
-    if (deduped.size >= normalizedLimit) {
-      break;
-    }
-  }
-
-  return Array.from(deduped);
-}
-
 async function resolveThreadCwd(threadId: string): Promise<string> {
   const persisted = db.getThreadCwd(threadId)?.cwd;
   if (isExistingDirectory(persisted)) {
@@ -1451,29 +1405,25 @@ async function bootstrap() {
     const primaryCwd = await resolveThreadCwd(params.id);
     const query = parsedQuery.data.query?.trim() ?? "";
     const limit = parsedQuery.data.limit ?? 250;
-    const candidateCwds = Array.from(
+    const result = await codex.call("fuzzyFileSearch", {
+      query,
+      roots: [primaryCwd],
+      cancellationToken: null,
+    });
+
+    const filesRaw =
+      result && typeof result === "object" && Array.isArray((result as Record<string, unknown>).files)
+        ? ((result as Record<string, unknown>).files as unknown[])
+        : [];
+    const files = Array.from(
       new Set(
-        [primaryCwd, db.getThreadCwd(params.id)?.cwd ?? null, process.cwd(), HOME_DIR].filter(
-          (value): value is string => isExistingDirectory(value)
-        )
+        filesRaw
+          .map((entry) => (entry && typeof entry === "object" ? ((entry as Record<string, unknown>).path as string) : ""))
+          .filter((entry) => typeof entry === "string" && entry.trim().length > 0)
       )
-    );
+    ).slice(0, Math.max(1, Math.min(limit, 1000)));
 
-    let selectedCwd = candidateCwds[0] ?? process.cwd();
-    let files: string[] = [];
-    for (const candidate of candidateCwds) {
-      const nextFiles = listFilesInDirectory(candidate, query, limit);
-      if (nextFiles.length > 0) {
-        selectedCwd = candidate;
-        files = nextFiles;
-        break;
-      }
-    }
-    if (files.length === 0) {
-      files = listFilesInDirectory(selectedCwd, query, limit);
-    }
-
-    const payload = ThreadFilesResponseSchema.parse({ cwd: selectedCwd, files });
+    const payload = ThreadFilesResponseSchema.parse({ cwd: primaryCwd, files });
     return reply.send(payload);
   });
 
