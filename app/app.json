@@ -11,7 +11,15 @@
       "expo-router",
       "expo-secure-store",
       "expo-asset",
-      "expo-font"
+      "expo-font",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Codex to access your photos so you can attach images in chat.",
+          "cameraPermission": "Allow Codex to access your camera so you can capture images.",
+          "microphonePermission": "Allow Codex to access your microphone for videos."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
@@ -27,7 +35,11 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.codex.phone",
       "icon": "./assets/icon.png",
-      "appleTeamId": "M4K84L4TKR"
+      "appleTeamId": "M4K84L4TKR",
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "Allow Codex to access your photos so you can attach images in chat.",
+        "NSPhotoLibraryAddUsageDescription": "Allow Codex to save images to your photo library."
+      }
     },
     "extra": {
       "router": {},

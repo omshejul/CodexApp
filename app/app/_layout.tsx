@@ -3,6 +3,7 @@ import { StatusBar } from "expo-status-bar";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
 import { Platform } from "react-native";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 import "../global.css";
 
 const SYSTEM_FONT = Platform.select({
@@ -17,7 +18,7 @@ export default function RootLayout() {
   }, []);
 
   return (
-    <>
+    <SafeAreaProvider>
       <StatusBar style="light" backgroundColor="#0a0a0a" />
       <Stack
         initialRouteName="index"
@@ -37,6 +38,6 @@ export default function RootLayout() {
         <Stack.Screen name="threads" options={{ title: "Threads", headerShown: false }} />
         <Stack.Screen name="thread/[id]" options={{ title: "Thread", headerShown: false }} />
       </Stack>
-    </>
+    </SafeAreaProvider>
   );
 }
