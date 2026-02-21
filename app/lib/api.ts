@@ -2,6 +2,7 @@ import {
   AuthRefreshResponseSchema,
   DirectoryBrowseResponseSchema,
   GatewayOptionsResponseSchema,
+  PairedDevicesResponseSchema,
   ThreadCreateRequest,
   PairClaimRequest,
   PairClaimResponseSchema,
@@ -358,4 +359,9 @@ export async function getStreamConfig(threadId: string): Promise<{ wsUrl: string
 export async function getGatewayOptions() {
   const payload = await authenticatedRequest<unknown>("/options");
   return GatewayOptionsResponseSchema.parse(payload);
+}
+
+export async function getPairedDevices() {
+  const payload = await authenticatedRequest<unknown>("/devices/active");
+  return PairedDevicesResponseSchema.parse(payload);
 }

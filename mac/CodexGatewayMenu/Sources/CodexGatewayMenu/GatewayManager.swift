@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-private let tailscaleServiceName = "codex-gateway"
+private let tailscaleServiceName = "codexgateway"
 
 @MainActor
 final class GatewayManager: ObservableObject {
@@ -17,6 +17,16 @@ final class GatewayManager: ObservableObject {
     let devices: [PairedDevice]
   }
 
+  private struct SetupDiagnostics {
+    let bundledNodeReady: Bool
+    let bundledGatewayReady: Bool
+    let codexReady: Bool
+    let tailscaleAvailable: Bool
+    let tailscaleAuthenticated: Bool
+    let serveConfigured: Bool
+    let portConflictPID: Int32?
+  }
+
   @Published var config: AppConfig = .default
   @Published var isRunning = false
   @Published var isFixingSetup = false
@@ -29,6 +39,7 @@ final class GatewayManager: ObservableObject {
   private var process: Process?
   private var didBootstrap = false
   private var didConfigureServeRouteThisSession = false
+  private var didConfigureLegacyServeRouteThisSession = false
   private var willTerminateObserver: NSObjectProtocol?
 
   init() {
@@ -43,24 +54,14 @@ final class GatewayManager: ObservableObject {
     }
 
     do {
-      config = try ConfigStore.load()
-      if config.workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-         let discovered = discoverGatewayDirectory()
-      {
-          config.workingDirectory = discovered
-        try? ConfigStore.save(config)
-      }
-      migrateLegacyBunRuntimeIfNeeded()
+      config = normalizeConfig(try ConfigStore.load())
+      try? ConfigStore.save(config)
       prefillPublicBaseURLFromTailscaleIfNeeded()
-      statusMessage = "Ready"
+      refreshSetupStatus()
     } catch {
-      statusMessage = "Config load failed: \(error.localizedDescription)"
       config = .default
-      if let discovered = discoverGatewayDirectory() {
-        config.workingDirectory = discovered
-      }
-      migrateLegacyBunRuntimeIfNeeded()
-      prefillPublicBaseURLFromTailscaleIfNeeded()
+      statusMessage = "Config load failed. Using defaults."
+      appendOutput("Config load failed: \(error.localizedDescription)")
     }
   }
 
@@ -78,6 +79,7 @@ final class GatewayManager: ObservableObject {
     guard !didBootstrap else { return }
     didBootstrap = true
 
+    refreshSetupStatus()
     if config.autoStart {
       Task { await start() }
     }
@@ -86,40 +88,62 @@ final class GatewayManager: ObservableObject {
 
   func start() async {
     guard !isRunning else { return }
-    migrateLegacyBunRuntimeIfNeeded()
-    ensureRuntimePathConfigured()
-    ensureCodexBinaryConfigured()
 
-    let listenPort = configuredPort()
-    _ = ensureTailscaleServeRoutesToGateway(port: listenPort)
-    if let pid = listenerPID(forPort: listenPort) {
-      conflictingPID = pid
-      statusMessage = "Port \(listenPort) is already in use."
-      appendOutput("Another process is already using 127.0.0.1:\(listenPort) (PID \(pid)).")
+    let diagnostics = diagnoseSetup()
+    conflictingPID = diagnostics.portConflictPID
+    if let pid = diagnostics.portConflictPID {
+      statusMessage = "Port \(configuredPort()) is already in use."
+      appendOutput("Another process is already using 127.0.0.1:\(configuredPort()) (PID \(pid)).")
       appendOutput("Action: stop the other process in this app, or use Open Pair Page if gateway is already running.")
       return
     }
-    conflictingPID = nil
 
-    let process = Process()
-    let workingDirectory = resolvedWorkingDirectory()
-    process.currentDirectoryURL = workingDirectory.map { URL(fileURLWithPath: $0) }
-
-    var mergedEnv = ProcessInfo.processInfo.environment
-    for (key, value) in config.environment {
-      mergedEnv[key] = value
-    }
-    process.environment = mergedEnv
-
-    guard let executablePath = resolveExecutablePath(for: config.command, environment: mergedEnv) else {
-      let message = "Command not found: \(config.command). Set an absolute path in Settings (example: /opt/homebrew/bin/node)."
-      statusMessage = message
-      appendOutput(message)
+    guard diagnostics.bundledNodeReady, diagnostics.bundledGatewayReady else {
+      statusMessage = "App bundle is incomplete. Rebuild the mac app."
+      appendOutput("Bundled gateway runtime is missing.")
       return
     }
 
-    process.executableURL = URL(fileURLWithPath: executablePath)
-    process.arguments = config.args
+    guard diagnostics.codexReady else {
+      statusMessage = "Missing Codex CLI. Click Fix Setup."
+      appendOutput("Codex CLI not found. Install Codex and click Fix Setup.")
+      return
+    }
+
+    let port = configuredPort()
+    _ = ensureTailscaleServeRoutesToGateway(port: port)
+
+    guard let bundledNode = bundledNodePath(), let gatewayEntry = bundledGatewayEntryPath() else {
+      statusMessage = "App bundle is incomplete. Rebuild the mac app."
+      appendOutput("Bundled Node or gateway entrypoint is missing.")
+      return
+    }
+
+    let process = Process()
+    process.currentDirectoryURL = bundledGatewayRoot().map { URL(fileURLWithPath: $0) }
+
+    var env = ProcessInfo.processInfo.environment
+    for (key, value) in config.environment {
+      env[key] = value
+    }
+    env["HOST"] = "127.0.0.1"
+    env["PORT"] = "\(port)"
+    env["PATH"] = buildRuntimePATH(existing: env["PATH"])
+
+    let appSupport = appSupportDirectory()
+    let logsDir = appSupport.appendingPathComponent("logs", isDirectory: true)
+    try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
+    env["DB_PATH"] = appSupport.appendingPathComponent("gateway.sqlite").path
+    env["EVENTS_LOG_PATH"] = logsDir.appendingPathComponent("events.log").path
+    env["ERRORS_LOG_PATH"] = logsDir.appendingPathComponent("errors.log").path
+
+    if let codexPath = resolvedCodexBinaryPath(environment: env) {
+      env["CODEX_APP_SERVER_BIN"] = codexPath
+    }
+    process.environment = env
+
+    process.executableURL = URL(fileURLWithPath: bundledNode)
+    process.arguments = [gatewayEntry]
 
     let stdoutPipe = Pipe()
     let stderrPipe = Pipe()
@@ -158,35 +182,17 @@ final class GatewayManager: ObservableObject {
       self.process = process
       self.isRunning = true
       self.statusMessage = "Running"
-      appendOutput("Started: \(executablePath) \(config.args.joined(separator: " "))")
-      if let workingDirectory {
-        appendOutput("CWD: \(workingDirectory)")
+      appendOutput("Started: \(bundledNode) \(gatewayEntry)")
+      if let cwd = process.currentDirectoryURL?.path {
+        appendOutput("CWD: \(cwd)")
       }
       Task { await refreshPairedDevices() }
     } catch {
       self.isRunning = false
       self.process = nil
-      self.statusMessage = "Start failed: \(error.localizedDescription)"
+      self.statusMessage = "Start failed. Check details."
       appendOutput("Start failed: \(error.localizedDescription)")
     }
-  }
-
-  private func migrateLegacyBunRuntimeIfNeeded() {
-    let command = config.command.trimmingCharacters(in: .whitespacesAndNewlines)
-    let isLegacyBunStart =
-      command == "bun" ||
-      command.hasSuffix("/bun") ||
-      (config.args.count >= 2 && config.args[0] == "run" && config.args[1] == "start")
-
-    guard isLegacyBunStart else { return }
-
-    let mergedEnv = ProcessInfo.processInfo.environment.merging(config.environment) { _, new in new }
-    guard let nodePath = resolveExecutablePath(for: "node", environment: mergedEnv) else { return }
-
-    config.command = nodePath
-    config.args = ["dist/server.js"]
-    try? ConfigStore.save(config)
-    appendOutput("Auto-fix: switched runtime from Bun to Node.js for gateway compatibility.")
   }
 
   func fixSetup() async {
@@ -194,110 +200,43 @@ final class GatewayManager: ObservableObject {
     isFixingSetup = true
     defer { isFixingSetup = false }
 
-    appendOutput("Running guided setup and repair...")
+    appendOutput("Running setup checks...")
 
-    var nextConfig = config
-
-    if let gatewayDir = discoverGatewayDirectory() {
-      nextConfig.workingDirectory = gatewayDir
-    }
-
-    if nextConfig.environment["HOST"] == nil {
-      nextConfig.environment["HOST"] = "127.0.0.1"
-    }
-    if nextConfig.environment["PORT"] == nil {
-      nextConfig.environment["PORT"] = "8787"
-    }
-    let port = Int(nextConfig.environment["PORT"] ?? "") ?? 8787
-    nextConfig.pairURL = localhostPairURL(port: port)
-
+    var nextConfig = normalizeConfig(config)
     nextConfig.environment["PATH"] = buildRuntimePATH(existing: nextConfig.environment["PATH"])
 
-    let currentPublicBase = nextConfig.environment["PUBLIC_BASE_URL"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    if !currentPublicBase.isEmpty {
-      appendOutput("Using configured Public Base URL: \(currentPublicBase)")
-    } else if let magicBaseURL = discoverTailscaleMagicBaseURL(environment: nextConfig.environment) {
-      nextConfig.environment["PUBLIC_BASE_URL"] = magicBaseURL
-      appendOutput("Configured Tailscale Magic URL: \(magicBaseURL)")
-    } else {
-      appendOutput("Tailscale Magic URL not found; keeping existing PUBLIC_BASE_URL/pairURL values.")
+    let trimmedPublicBase = nextConfig.environment["PUBLIC_BASE_URL"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if trimmedPublicBase.isEmpty {
+      if let detected = discoverTailscaleMagicBaseURL(environment: nextConfig.environment) {
+        nextConfig.environment["PUBLIC_BASE_URL"] = detected
+        appendOutput("Auto-filled Public Base URL from Tailscale: \(detected)")
+      } else {
+        appendOutput("Could not auto-detect Tailscale Magic DNS URL.")
+      }
     }
-    if nextConfig.environment["CODEX_APP_SERVER_BIN"] == nil,
-       let codexPath = resolveExecutablePath(for: "codex", environment: ProcessInfo.processInfo.environment)
+
+    if nextConfig.codexBinaryPath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false,
+       let codexPath = resolveExecutablePath(for: "codex", environment: nextConfig.environment)
     {
-      nextConfig.environment["CODEX_APP_SERVER_BIN"] = codexPath
+      nextConfig.codexBinaryPath = codexPath
       appendOutput("Configured Codex CLI path: \(codexPath)")
     }
 
-    _ = ensureTailscaleServeRoutesToGateway(port: port)
-
-    let mergedEnv = ProcessInfo.processInfo.environment.merging(nextConfig.environment) { _, new in new }
-    guard let nodePath = resolveExecutablePath(for: "node", environment: mergedEnv) else {
-      statusMessage = "Setup needs Node.js installed. Install Node.js, then click Fix Setup again."
-      appendOutput("Repair failed: could not find Node executable.")
-      return
-    }
-    nextConfig.command = nodePath
-    nextConfig.args = ["dist/server.js"]
-
-    let configuredGatewayDir = nextConfig.workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
-    let gatewayDir = configuredGatewayDir.isEmpty ? (discoverGatewayDirectory() ?? "") : configuredGatewayDir
-    guard isGatewayDirectory(gatewayDir) else {
-      statusMessage = "Setup needs the project folder. Open Settings and set Working Directory to the gateway folder."
-      appendOutput("Repair failed: gateway folder not found.")
-      return
-    }
-
-    let bunPath = resolveExecutablePath(for: "bun", environment: mergedEnv)
-    if let repoRoot = discoverRepoRoot(fromGatewayDirectory: gatewayDir), let bunPath {
-      appendOutput("Checking and repairing dependencies...")
-      let installResult = runSync(
-        executablePath: bunPath,
-        arguments: ["install"],
-        workingDirectory: repoRoot,
-        environment: nextConfig.environment
-      )
-      appendOutput(installResult.output)
-      if installResult.exitCode != 0 {
-        statusMessage = "Setup could not install dependencies. Check logs."
-        appendOutput("Repair failed during dependency install (exit \(installResult.exitCode)).")
-        return
-      }
-    } else if discoverRepoRoot(fromGatewayDirectory: gatewayDir) != nil {
-      appendOutput("Bun not found. Skipping dependency repair and using existing node_modules.")
-    } else {
-      appendOutput("Could not detect monorepo root; skipping dependency repair step.")
-    }
-
-    let distServer = URL(fileURLWithPath: gatewayDir).appendingPathComponent("dist/server.js").path
-    if !FileManager.default.fileExists(atPath: distServer) {
-      appendOutput("Gateway build artifacts missing. Building now...")
-    } else {
-      appendOutput("Rebuilding gateway to ensure native modules are aligned...")
-    }
-
-    if let bunPath {
-      let buildResult = runSync(
-        executablePath: bunPath,
-        arguments: ["run", "build"],
-        workingDirectory: gatewayDir,
-        environment: nextConfig.environment
-      )
-      appendOutput(buildResult.output)
-      if buildResult.exitCode != 0 {
-        statusMessage = "Setup could not build gateway. Check logs."
-        appendOutput("Repair failed during build (exit \(buildResult.exitCode)).")
-        return
-      }
-    } else if !FileManager.default.fileExists(atPath: distServer) {
-      statusMessage = "Bun is required to build gateway the first time."
-      appendOutput("Repair failed: Bun not found and dist/server.js is missing.")
-      return
+    if ensureTailscaleServeRoutesToGateway(port: nextConfig.port) {
+      appendOutput("Tailscale service route '\(tailscaleServiceName)' is configured.")
     }
 
     saveConfig(nextConfig)
-    statusMessage = "Setup complete. Click Start."
-    appendOutput("Setup complete. Runtime is now set to Node.js.")
+
+    let diagnostics = diagnoseSetup()
+    conflictingPID = diagnostics.portConflictPID
+    if diagnostics.bundledNodeReady && diagnostics.bundledGatewayReady && diagnostics.codexReady {
+      statusMessage = "Setup complete. Click Start."
+      appendOutput("Setup complete.")
+    } else {
+      refreshSetupStatus()
+      appendOutput("Setup finished with remaining checks. See status above.")
+    }
   }
 
   func stop() {
@@ -331,8 +270,7 @@ final class GatewayManager: ObservableObject {
   }
 
   func openPairPage() {
-    let pairURL = localhostPairURL(port: configuredPort())
-    guard let url = URL(string: pairURL) else {
+    guard let url = URL(string: localhostPairURL(port: configuredPort())) else {
       statusMessage = "Invalid pair URL"
       return
     }
@@ -385,11 +323,14 @@ final class GatewayManager: ObservableObject {
 
   func saveConfig(_ newConfig: AppConfig) {
     do {
-      try ConfigStore.save(newConfig)
-      config = newConfig
-      statusMessage = isRunning ? "Running (config saved)" : "Config saved"
+      let normalized = normalizeConfig(newConfig)
+      try ConfigStore.save(normalized)
+      config = normalized
+      statusMessage = isRunning ? "Running (settings saved)" : "Settings saved"
+      refreshSetupStatus()
     } catch {
-      statusMessage = "Config save failed: \(error.localizedDescription)"
+      statusMessage = "Settings save failed."
+      appendOutput("Settings save failed: \(error.localizedDescription)")
     }
   }
 
@@ -414,7 +355,74 @@ final class GatewayManager: ObservableObject {
       config.environment["PUBLIC_BASE_URL"] = detected
       try? ConfigStore.save(config)
       appendOutput("Auto-filled Public Base URL from Tailscale: \(detected)")
+      refreshSetupStatus()
     }
+  }
+
+  private func refreshSetupStatus() {
+    guard !isRunning else {
+      statusMessage = "Running"
+      return
+    }
+
+    let diagnostics = diagnoseSetup()
+    conflictingPID = diagnostics.portConflictPID
+
+    if !diagnostics.bundledNodeReady || !diagnostics.bundledGatewayReady {
+      statusMessage = "Needs setup: app bundle is incomplete."
+      return
+    }
+    if !diagnostics.codexReady {
+      statusMessage = "Missing Codex CLI"
+      return
+    }
+    if !diagnostics.tailscaleAvailable {
+      statusMessage = "Missing Tailscale"
+      return
+    }
+    if !diagnostics.tailscaleAuthenticated {
+      statusMessage = "Tailscale not authenticated"
+      return
+    }
+    if let pid = diagnostics.portConflictPID {
+      statusMessage = "Port \(configuredPort()) is already in use (PID \(pid))."
+      return
+    }
+    if !diagnostics.serveConfigured {
+      statusMessage = "Needs setup: configure Tailscale route."
+      return
+    }
+    statusMessage = "Ready"
+  }
+
+  private func diagnoseSetup() -> SetupDiagnostics {
+    let port = configuredPort()
+    let env = config.environment
+    let tailscalePath = resolveExecutablePath(for: "tailscale", environment: env)
+
+    return SetupDiagnostics(
+      bundledNodeReady: bundledNodePath() != nil,
+      bundledGatewayReady: bundledGatewayEntryPath() != nil,
+      codexReady: resolvedCodexBinaryPath(environment: env) != nil,
+      tailscaleAvailable: tailscalePath != nil,
+      tailscaleAuthenticated: tailscalePath != nil ? isTailscaleAuthenticated(environment: env) : false,
+      serveConfigured: tailscalePath != nil ? isServeRouteConfigured(port: port, environment: env) : false,
+      portConflictPID: listenerPID(forPort: port)
+    )
+  }
+
+  private func normalizeConfig(_ config: AppConfig) -> AppConfig {
+    var normalizedEnvironment = config.environment
+    normalizedEnvironment["HOST"] = "127.0.0.1"
+    normalizedEnvironment["PORT"] = "\(max(config.port, 1))"
+    let pairURL = localhostPairURL(port: max(config.port, 1))
+    return AppConfig(
+      port: max(config.port, 1),
+      environment: normalizedEnvironment,
+      pairURL: pairURL,
+      codexBinaryPath: config.codexBinaryPath,
+      autoStart: config.autoStart
+    )
   }
 
   private func appendOutput(_ raw: String) {
@@ -426,32 +434,20 @@ final class GatewayManager: ObservableObject {
     guard !lines.isEmpty else { return }
 
     for line in lines {
-      if line.contains("Script not found") {
-        outputLines.append("Fix: click \"Fix Setup\" to auto-configure working directory and command.")
-      }
-      if line.contains("No such file or directory") && line.contains("bun") {
-        outputLines.append("Fix: click \"Fix Setup\" to auto-detect Bun path.")
-      }
-      if line.contains("ERR_DLOPEN_FAILED") || line.contains("better-sqlite3") {
-        outputLines.append("Fix: click \"Fix Setup\" to switch runtime to Node.js and rebuild dependencies.")
-      }
-      if line.contains("not yet supported in Bun") {
-        outputLines.append("Fix: click \"Fix Setup\" to switch runtime from Bun to Node.js.")
-      }
       if line.contains("spawn codex ENOENT") {
-        outputLines.append("Fix: click \"Fix Setup\" to auto-configure the Codex CLI path.")
+        outputLines.append("Fix: install Codex CLI, then click \"Fix Setup\".")
       }
-      if line.contains("env: node: No such file or directory") {
-        outputLines.append("Fix: click \"Fix Setup\" to auto-configure PATH for Node and Codex.")
+      if line.contains("Failed to configure Tailscale Serve route") {
+        outputLines.append("Fix: sign in to Tailscale and click \"Fix Setup\".")
       }
-      if line.contains("PUBLIC_BASE_URL") && line.contains("not configured") {
-        outputLines.append("Fix: click \"Fix Setup\" to auto-configure Tailscale Magic URL.")
+      if line.contains("EADDRINUSE") {
+        outputLines.append("Fix: click \"Stop Other Process\" or change the port in Settings.")
       }
     }
 
     outputLines.append(contentsOf: lines)
-    if outputLines.count > 200 {
-      outputLines = Array(outputLines.suffix(200))
+    if outputLines.count > 240 {
+      outputLines = Array(outputLines.suffix(240))
     }
   }
 
@@ -483,32 +479,17 @@ final class GatewayManager: ObservableObject {
         return candidate
       }
     }
-
     return nil
   }
 
-  private func ensureCodexBinaryConfigured() {
-    if let current = config.environment["CODEX_APP_SERVER_BIN"],
-       !current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    {
-      return
+  private func resolvedCodexBinaryPath(environment: [String: String]) -> String? {
+    if let configured = config.codexBinaryPath?.trimmingCharacters(in: .whitespacesAndNewlines), !configured.isEmpty {
+      return resolveExecutablePath(for: configured, environment: environment) ?? (FileManager.default.isExecutableFile(atPath: configured) ? configured : nil)
     }
-
-    if let codexPath = resolveExecutablePath(for: "codex", environment: ProcessInfo.processInfo.environment) {
-      config.environment["CODEX_APP_SERVER_BIN"] = codexPath
-      try? ConfigStore.save(config)
-      appendOutput("Auto-fix: configured Codex CLI path to \(codexPath).")
+    if let envPath = config.environment["CODEX_APP_SERVER_BIN"]?.trimmingCharacters(in: .whitespacesAndNewlines), !envPath.isEmpty {
+      return resolveExecutablePath(for: envPath, environment: environment) ?? (FileManager.default.isExecutableFile(atPath: envPath) ? envPath : nil)
     }
-  }
-
-  private func ensureRuntimePathConfigured() {
-    let existing = config.environment["PATH"]
-    let nextPATH = buildRuntimePATH(existing: existing)
-    if existing != nextPATH {
-      config.environment["PATH"] = nextPATH
-      try? ConfigStore.save(config)
-      appendOutput("Auto-fix: configured PATH for GUI runtime.")
-    }
+    return resolveExecutablePath(for: "codex", environment: environment)
   }
 
   private func buildRuntimePATH(existing: String?) -> String {
@@ -542,6 +523,34 @@ final class GatewayManager: ObservableObject {
     return "http://127.0.0.1:\(port)/pair"
   }
 
+  private func bundledNodePath() -> String? {
+    guard let base = Bundle.main.resourcePath else { return nil }
+    let candidate = URL(fileURLWithPath: base).appendingPathComponent("Node/bin/node").path
+    return FileManager.default.isExecutableFile(atPath: candidate) ? candidate : nil
+  }
+
+  private func bundledGatewayRoot() -> String? {
+    guard let base = Bundle.main.resourcePath else { return nil }
+    let candidate = URL(fileURLWithPath: base).appendingPathComponent("GatewayRuntime").path
+    var isDir: ObjCBool = false
+    let exists = FileManager.default.fileExists(atPath: candidate, isDirectory: &isDir)
+    return exists && isDir.boolValue ? candidate : nil
+  }
+
+  private func bundledGatewayEntryPath() -> String? {
+    guard let root = bundledGatewayRoot() else { return nil }
+    let candidate = URL(fileURLWithPath: root).appendingPathComponent("dist/server.js").path
+    return FileManager.default.fileExists(atPath: candidate) ? candidate : nil
+  }
+
+  private func appSupportDirectory() -> URL {
+    let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+      ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
+    let appDir = base.appendingPathComponent("CodexGatewayMenu", isDirectory: true)
+    try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
+    return appDir
+  }
+
   private func discoverTailscaleMagicBaseURL(environment: [String: String]) -> String? {
     guard let tailscalePath = resolveExecutablePath(for: "tailscale", environment: environment) else {
       return nil
@@ -566,6 +575,39 @@ final class GatewayManager: ObservableObject {
     let dnsName = rawDNSName.trimmingCharacters(in: CharacterSet(charactersIn: "."))
     guard !dnsName.isEmpty else { return nil }
     return "https://\(dnsName)"
+  }
+
+  private func isTailscaleAuthenticated(environment: [String: String]) -> Bool {
+    guard let tailscalePath = resolveExecutablePath(for: "tailscale", environment: environment) else {
+      return false
+    }
+    let result = runSync(
+      executablePath: tailscalePath,
+      arguments: ["status", "--json"],
+      workingDirectory: nil,
+      environment: environment
+    )
+    guard result.exitCode == 0, let data = result.output.data(using: .utf8) else { return false }
+    guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+    let backendState = json["BackendState"] as? String
+    let hasSelfNode = (json["Self"] as? [String: Any]) != nil
+    return hasSelfNode && backendState != "NeedsLogin"
+  }
+
+  private func isServeRouteConfigured(port: Int, environment: [String: String]) -> Bool {
+    guard let tailscalePath = resolveExecutablePath(for: "tailscale", environment: environment) else {
+      return false
+    }
+    let result = runSync(
+      executablePath: tailscalePath,
+      arguments: ["serve", "status", "--json"],
+      workingDirectory: nil,
+      environment: environment
+    )
+    guard result.exitCode == 0 else { return false }
+    let hasEndpoint = result.output.contains("127.0.0.1:\(port)")
+    let hasService = result.output.contains(tailscaleServiceName)
+    return hasEndpoint && (hasService || result.output.contains("\"Web\""))
   }
 
   private func runSync(
@@ -609,10 +651,7 @@ final class GatewayManager: ObservableObject {
   }
 
   private func configuredPort() -> Int {
-    if let raw = config.environment["PORT"], let parsed = Int(raw), parsed > 0 {
-      return parsed
-    }
-    return 8787
+    return config.port > 0 ? config.port : 8787
   }
 
   private func listenerPID(forPort port: Int) -> Int32? {
@@ -640,7 +679,11 @@ final class GatewayManager: ObservableObject {
   private func ensureTailscaleServeRoutesToGateway(port: Int) -> Bool {
     let environment = config.environment
     guard let tailscalePath = resolveExecutablePath(for: "tailscale", environment: environment) else {
-      appendOutput("Tailscale CLI not found; skipping serve route setup.")
+      appendOutput("Tailscale CLI not found; skipping route setup.")
+      return false
+    }
+    guard isTailscaleAuthenticated(environment: environment) else {
+      appendOutput("Tailscale is not authenticated. Sign in and click Fix Setup.")
       return false
     }
 
@@ -653,11 +696,33 @@ final class GatewayManager: ObservableObject {
 
     if configureResult.exitCode == 0 {
       didConfigureServeRouteThisSession = true
+      didConfigureLegacyServeRouteThisSession = false
       appendOutput("Configured Tailscale Serve route to 127.0.0.1:\(port).")
       return true
     }
 
-    appendOutput("Failed to configure Tailscale Serve route. Run: tailscale serve --bg http://127.0.0.1:\(port)")
+    // Older/newer Tailscale variants may reject service names; fall back to node-level serve.
+    if configureResult.output.contains("invalid service name") || configureResult.output.contains("flag -service") {
+      let legacyResult = runSync(
+        executablePath: tailscalePath,
+        arguments: ["serve", "--bg", "http://127.0.0.1:\(port)"],
+        workingDirectory: nil,
+        environment: environment
+      )
+      if legacyResult.exitCode == 0 {
+        didConfigureServeRouteThisSession = false
+        didConfigureLegacyServeRouteThisSession = true
+        appendOutput("Configured Tailscale route in node mode (service mode unsupported by this Tailscale CLI).")
+        return true
+      }
+      appendOutput("Failed to configure Tailscale route in fallback mode.")
+      if !legacyResult.output.isEmpty {
+        appendOutput(legacyResult.output)
+      }
+      return false
+    }
+
+    appendOutput("Failed to configure Tailscale route. Run Fix Setup after signing in to Tailscale.")
     if !configureResult.output.isEmpty {
       appendOutput(configureResult.output)
     }
@@ -665,24 +730,33 @@ final class GatewayManager: ObservableObject {
   }
 
   private func disableTailscaleServeIfManagedByApp() {
-    guard didConfigureServeRouteThisSession else { return }
+    if !didConfigureServeRouteThisSession && !didConfigureLegacyServeRouteThisSession {
+      return
+    }
+
     let environment = config.environment
     guard let tailscalePath = resolveExecutablePath(for: "tailscale", environment: environment) else { return }
 
-    let clearResult = runSync(
-      executablePath: tailscalePath,
-      arguments: ["serve", "clear", tailscaleServiceName],
-      workingDirectory: nil,
-      environment: environment
-    )
+    if didConfigureServeRouteThisSession {
+      let clearResult = runSync(
+        executablePath: tailscalePath,
+        arguments: ["serve", "clear", tailscaleServiceName],
+        workingDirectory: nil,
+        environment: environment
+      )
 
-    if clearResult.exitCode == 0 {
-      appendOutput("Removed Tailscale service route '\(tailscaleServiceName)' configured by this app.")
-    } else if !clearResult.output.isEmpty {
-      appendOutput("Could not clear Tailscale service route '\(tailscaleServiceName)' on quit.")
-      appendOutput(clearResult.output)
+      if clearResult.exitCode == 0 {
+        appendOutput("Removed Tailscale service route '\(tailscaleServiceName)' configured by this app.")
+      } else if !clearResult.output.isEmpty {
+        appendOutput("Could not clear Tailscale service route '\(tailscaleServiceName)' on quit.")
+        appendOutput(clearResult.output)
+      }
+    } else if didConfigureLegacyServeRouteThisSession {
+      appendOutput("Tailscale service-scoped clear is unavailable on this CLI; leaving existing node-level serve config unchanged.")
     }
+
     didConfigureServeRouteThisSession = false
+    didConfigureLegacyServeRouteThisSession = false
   }
 
   private func cleanupManagedProcess() {
@@ -710,61 +784,5 @@ final class GatewayManager: ObservableObject {
   private func performShutdownCleanup() {
     cleanupManagedProcess()
     disableTailscaleServeIfManagedByApp()
-  }
-
-  private func resolvedWorkingDirectory() -> String? {
-    let configured = config.workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
-    if !configured.isEmpty {
-      return configured
-    }
-    return discoverGatewayDirectory()
-  }
-
-  private func discoverGatewayDirectory() -> String? {
-    let fileManager = FileManager.default
-    let home = fileManager.homeDirectoryForCurrentUser.path
-    var candidates: [String] = [
-      fileManager.currentDirectoryPath,
-      URL(fileURLWithPath: fileManager.currentDirectoryPath).appendingPathComponent("gateway").path,
-      "\(home)/Code/CodexApp/gateway",
-      "\(home)/CodexApp/gateway"
-    ]
-
-    if let bundlePath = Bundle.main.bundleURL.path.removingPercentEncoding {
-      var cursor = URL(fileURLWithPath: bundlePath)
-      for _ in 0..<8 {
-        cursor.deleteLastPathComponent()
-        candidates.append(cursor.appendingPathComponent("gateway").path)
-      }
-    }
-
-    for candidate in candidates {
-      if isGatewayDirectory(candidate) {
-        return candidate
-      }
-    }
-    return nil
-  }
-
-  private func discoverRepoRoot(fromGatewayDirectory gatewayDir: String) -> String? {
-    let gatewayURL = URL(fileURLWithPath: gatewayDir)
-    let candidate = gatewayURL.deletingLastPathComponent()
-    let packageJSON = candidate.appendingPathComponent("package.json")
-    guard let data = try? Data(contentsOf: packageJSON),
-          let text = String(data: data, encoding: .utf8)
-    else {
-      return nil
-    }
-    return text.contains("\"workspaces\"") ? candidate.path : nil
-  }
-
-  private func isGatewayDirectory(_ path: String) -> Bool {
-    let packageJSON = URL(fileURLWithPath: path).appendingPathComponent("package.json")
-    guard let data = try? Data(contentsOf: packageJSON),
-          let text = String(data: data, encoding: .utf8)
-    else {
-      return false
-    }
-    return text.contains("\"name\": \"@codex-phone/gateway\"") && text.contains("\"start\":")
   }
 }

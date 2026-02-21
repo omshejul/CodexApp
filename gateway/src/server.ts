@@ -44,8 +44,8 @@ const DEFAULT_PORT = 8787;
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_CODEX_URL = "ws://127.0.0.1:4500";
 const PAIR_TTL_MS = 10 * 60 * 1000;
-const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const ACCESS_TTL_SECONDS = 15 * 60;
+const NEVER_EXPIRES_AT_MS = 253402300799000; // 9999-12-31T23:59:59.000Z
 const GATEWAY_VERSION = process.env.GATEWAY_VERSION ?? "0.1.0";
 const GATEWAY_NAME = "codex-phone-gateway";
 
@@ -367,14 +367,13 @@ function createRefreshToken(deviceId: string, deviceName: string): { token: stri
   const id = randomUUID();
   const secret = generateRefreshSecret();
   const now = Date.now();
-  const expiresAt = now + REFRESH_TTL_MS;
   const tokenHash = hashValue(secret, tokenHashSecret);
 
   const row: RefreshTokenRow = {
     id,
     tokenHash,
     createdAt: now,
-    expiresAt,
+    expiresAt: NEVER_EXPIRES_AT_MS,
     revokedAt: null,
     deviceId,
     deviceName,
@@ -397,7 +396,7 @@ function verifyRefreshToken(rawToken: string): RefreshTokenRow | null {
     return null;
   }
 
-  if (row.revokedAt !== null || row.expiresAt <= Date.now()) {
+  if (row.revokedAt !== null) {
     return null;
   }
 
@@ -1190,7 +1189,11 @@ async function bootstrap() {
     if (!ensureLocalRequest(request, reply)) {
       return;
     }
-    return reply.send({ devices: db.listActiveDevices(Date.now()) });
+    return reply.send({ devices: db.listActiveDevices() });
+  });
+
+  app.get("/devices/active", { preHandler: [requireAuth] }, async (_request, reply) => {
+    return reply.send({ devices: db.listActiveDevices() });
   });
 
   app.post("/devices/:id/revoke", async (request, reply) => {

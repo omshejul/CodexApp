@@ -127,4 +127,14 @@ pod install --repo-update
 
 ## macOS Gateway App
 
-- Configurable menu bar app guide: `/Users/omshejul/Code/CodexApp/docs/MAC_GATEWAY_APP.md`
+- Self-contained menu bar app guide: `/Users/omshejul/Code/CodexApp/docs/MAC_GATEWAY_APP.md`
+- Build local app + DMG:
+```bash
+/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/scripts/build_app.sh
+```
+- Signed/notarized release build:
+```bash
+SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+NOTARYTOOL_PROFILE="codex-notary" \
+/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/scripts/build_app.sh --release
+```

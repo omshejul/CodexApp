@@ -16,6 +16,8 @@ app/dist
 app/node_modules
 
 mac/CodexGatewayMenu/.build
+mac/CodexGatewayMenu/.cache
+mac/CodexGatewayMenu/.staging
 mac/CodexGatewayMenu/build
 
 *.tsbuildinfo

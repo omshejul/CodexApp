@@ -140,6 +140,18 @@ export const HealthResponseSchema = z.object({
   codexError: z.string().optional(),
 });
 
+export const PairedDeviceSchema = z.object({
+  id: z.string().min(1),
+  deviceId: z.string().min(1),
+  deviceName: z.string().min(1),
+  createdAt: z.number().int(),
+  expiresAt: z.number().int(),
+});
+
+export const PairedDevicesResponseSchema = z.object({
+  devices: z.array(PairedDeviceSchema),
+});
+
 export type PairCreateResponse = z.infer<typeof PairCreateResponseSchema>;
 export type PairClaimRequest = z.infer<typeof PairClaimRequestSchema>;
 export type PairClaimResponse = z.infer<typeof PairClaimResponseSchema>;
@@ -164,3 +176,5 @@ export type ThreadMessageResponse = z.infer<typeof ThreadMessageResponseSchema>;
 export type ModelOption = z.infer<typeof ModelOptionSchema>;
 export type GatewayOptionsResponse = z.infer<typeof GatewayOptionsResponseSchema>;
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;
+export type PairedDevice = z.infer<typeof PairedDeviceSchema>;
+export type PairedDevicesResponse = z.infer<typeof PairedDevicesResponseSchema>;

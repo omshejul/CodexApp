@@ -177,19 +177,19 @@ export class GatewayDatabase {
     this.db.prepare("UPDATE refresh_tokens SET revokedAt = ? WHERE id = ?").run(revokedAt, id);
   }
 
-  cleanupRefreshTokens(now: number) {
-    this.db.prepare("DELETE FROM refresh_tokens WHERE expiresAt < ? OR revokedAt IS NOT NULL").run(now);
+  cleanupRefreshTokens() {
+    this.db.prepare("DELETE FROM refresh_tokens WHERE revokedAt IS NOT NULL").run();
   }
 
-  listActiveDevices(now: number): Array<Pick<RefreshTokenRow, "id" | "deviceId" | "deviceName" | "createdAt" | "expiresAt">> {
+  listActiveDevices(): Array<Pick<RefreshTokenRow, "id" | "deviceId" | "deviceName" | "createdAt" | "expiresAt">> {
     return this.db
       .prepare(
         `SELECT id, deviceId, deviceName, createdAt, expiresAt
          FROM refresh_tokens
-         WHERE revokedAt IS NULL AND expiresAt > ?
+         WHERE revokedAt IS NULL
          ORDER BY createdAt DESC`
       )
-      .all(now) as Array<Pick<RefreshTokenRow, "id" | "deviceId" | "deviceName" | "createdAt" | "expiresAt">>;
+      .all() as Array<Pick<RefreshTokenRow, "id" | "deviceId" | "deviceName" | "createdAt" | "expiresAt">>;
   }
 
   upsertThreadName(threadName: ThreadNameRow) {

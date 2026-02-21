@@ -18,6 +18,12 @@ struct StatusMenuView: View {
         .font(.caption)
         .foregroundStyle(.secondary)
 
+      if manager.statusMessage != "Running" && manager.statusMessage != "Ready" {
+        Text("Use Fix Setup to auto-check Codex CLI, Tailscale auth, and route configuration.")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+      }
+
       Divider()
 
       HStack(spacing: 8) {

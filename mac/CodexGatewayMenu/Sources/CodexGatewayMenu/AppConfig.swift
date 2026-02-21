@@ -1,24 +1,83 @@
 import Foundation
 
 struct AppConfig: Codable, Equatable {
-  var command: String
-  var args: [String]
-  var workingDirectory: String
+  var port: Int
   var environment: [String: String]
   var pairURL: String
+  var codexBinaryPath: String?
   var autoStart: Bool
 
   static let `default` = AppConfig(
-    command: "node",
-    args: ["dist/server.js"],
-    workingDirectory: "",
+    port: 8787,
     environment: [
-      "HOST": "127.0.0.1",
-      "PORT": "8787"
+      "HOST": "127.0.0.1"
     ],
     pairURL: "http://127.0.0.1:8787/pair",
+    codexBinaryPath: nil,
     autoStart: false
   )
+
+  private enum CodingKeys: String, CodingKey {
+    case port
+    case environment
+    case pairURL
+    case codexBinaryPath
+    case autoStart
+
+    // Legacy keys kept for migration-only decode.
+    case command
+    case args
+    case workingDirectory
+  }
+
+  init(
+    port: Int,
+    environment: [String: String],
+    pairURL: String,
+    codexBinaryPath: String?,
+    autoStart: Bool
+  ) {
+    let sanitizedPort = port > 0 ? port : 8787
+    self.port = sanitizedPort
+    self.environment = environment
+    self.environment["HOST"] = "127.0.0.1"
+    self.environment["PORT"] = "\(sanitizedPort)"
+    self.pairURL = pairURL
+    self.codexBinaryPath = codexBinaryPath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true
+      ? nil
+      : codexBinaryPath?.trimmingCharacters(in: .whitespacesAndNewlines)
+    self.autoStart = autoStart
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+
+    let decodedEnvironment = try container.decodeIfPresent([String: String].self, forKey: .environment) ?? [:]
+    let decodedPairURL = try container.decodeIfPresent(String.self, forKey: .pairURL)
+    let decodedAutoStart = try container.decodeIfPresent(Bool.self, forKey: .autoStart) ?? false
+    let decodedCodexPath = try container.decodeIfPresent(String.self, forKey: .codexBinaryPath)
+
+    let explicitPort = try container.decodeIfPresent(Int.self, forKey: .port)
+    let envPort = Int(decodedEnvironment["PORT"] ?? "")
+    let migratedPort = explicitPort ?? envPort ?? 8787
+
+    self.init(
+      port: migratedPort,
+      environment: decodedEnvironment,
+      pairURL: decodedPairURL ?? "http://127.0.0.1:\(migratedPort)/pair",
+      codexBinaryPath: decodedCodexPath,
+      autoStart: decodedAutoStart
+    )
+  }
+
+  func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(port, forKey: .port)
+    try container.encode(environment, forKey: .environment)
+    try container.encode(pairURL, forKey: .pairURL)
+    try container.encodeIfPresent(codexBinaryPath, forKey: .codexBinaryPath)
+    try container.encode(autoStart, forKey: .autoStart)
+  }
 }
 
 enum ConfigStore {

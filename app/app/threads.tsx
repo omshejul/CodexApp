@@ -10,6 +10,7 @@ import {
   getCurrentServerBaseUrl,
   getDirectories,
   getGatewayOptions,
+  getPairedDevices,
   getThreads,
   ReauthRequiredError,
 } from "@/lib/api";
@@ -94,6 +95,13 @@ export default function ThreadsScreen() {
   const [pairedServer, setPairedServer] = useState<string | null>(null);
   const [defaultModel, setDefaultModel] = useState<string | null>(null);
   const [modelCount, setModelCount] = useState<number | null>(null);
+  const [pairedDevices, setPairedDevices] = useState<Array<{
+    id: string;
+    deviceId: string;
+    deviceName: string;
+    createdAt: number;
+    expiresAt: number;
+  }>>([]);
   const [loadingDirectories, setLoadingDirectories] = useState(false);
   const [pickerError, setPickerError] = useState<string | null>(null);
   const [currentDirectory, setCurrentDirectory] = useState<string | null>(null);
@@ -198,10 +206,15 @@ export default function ThreadsScreen() {
     setSettingsInfoLoading(true);
     setSettingsInfoError(null);
     try {
-      const [serverBaseUrl, options] = await Promise.all([getCurrentServerBaseUrl(), getGatewayOptions()]);
+      const [serverBaseUrl, options, devices] = await Promise.all([
+        getCurrentServerBaseUrl(),
+        getGatewayOptions(),
+        getPairedDevices(),
+      ]);
       setPairedServer(serverBaseUrl);
       setDefaultModel(options.defaultModel ?? null);
       setModelCount(options.models.length);
+      setPairedDevices(devices.devices);
     } catch (settingsError) {
       if (settingsError instanceof ReauthRequiredError) {
         await clearSession();
@@ -478,6 +491,30 @@ export default function ThreadsScreen() {
             <View className="mt-3 px-1">
               <Text className="text-xs text-muted-foreground">Available models</Text>
               <Text className="mt-1 text-sm text-foreground">{modelCount ?? 0}</Text>
+            </View>
+
+            <View className="mt-4 px-1">
+              <Text className="text-xs text-muted-foreground">Paired devices</Text>
+              {pairedDevices.length === 0 ? (
+                <Text className="mt-1 text-sm text-foreground">No active devices</Text>
+              ) : (
+                <View className="mt-1 gap-2">
+                  {pairedDevices.slice(0, 4).map((device) => (
+                    <View key={device.id}>
+                      <Text className="text-sm font-semibold text-foreground">{device.deviceName}</Text>
+                      <Text className="text-xs text-muted-foreground" numberOfLines={1} ellipsizeMode="middle">
+                        {device.deviceId}
+                      </Text>
+                      <Text className="text-xs text-muted-foreground">
+                        Added {new Date(device.createdAt).toLocaleString()}
+                      </Text>
+                      <Text className="text-xs text-muted-foreground">
+                        Expires {device.expiresAt >= 253402300799000 ? "Never" : new Date(device.expiresAt).toLocaleString()}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              )}
             </View>
 
             {settingsInfoLoading ? (

@@ -2,16 +2,135 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(cd "$ROOT_DIR/../.." && pwd)"
 APP_NAME="CodexGatewayMenu"
 BUILD_DIR="$ROOT_DIR/.build/release"
 OUT_DIR="$ROOT_DIR/build"
 APP_DIR="$OUT_DIR/$APP_NAME.app"
+DMG_PATH="$OUT_DIR/$APP_NAME.dmg"
+DMG_RW_PATH="$OUT_DIR/$APP_NAME-rw.dmg"
+DMG_VOLUME_NAME="$APP_NAME Installer"
 EXECUTABLE="$BUILD_DIR/$APP_NAME"
 ICON_SRC="$ROOT_DIR/Resources/AppIcon.icns"
+STAGE_DIR="$ROOT_DIR/.staging"
+DMG_STAGE="$STAGE_DIR/dmg-root"
+GATEWAY_STAGE="$STAGE_DIR/GatewayRuntime"
+NODE_STAGE="$STAGE_DIR/Node"
+CACHE_DIR="$ROOT_DIR/.cache"
+NODE_VERSION="${NODE_VERSION:-20.19.0}"
+NODE_DIST="node-v${NODE_VERSION}-darwin-arm64"
+NODE_TARBALL="$CACHE_DIR/${NODE_DIST}.tar.gz"
+NODE_DOWNLOAD_URL="https://nodejs.org/dist/v${NODE_VERSION}/${NODE_DIST}.tar.gz"
+RELEASE_MODE=0
+NPM_CLI_REL="lib/node_modules/npm/bin/npm-cli.js"
+NODE_GYP_REL="lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js"
+ENTITLEMENTS_PATH="$STAGE_DIR/codesign.entitlements"
 
+if [ "${1:-}" = "--release" ]; then
+  RELEASE_MODE=1
+elif [ "$#" -gt 0 ]; then
+  echo "Usage: $0 [--release]"
+  exit 1
+fi
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required command: $1"
+    exit 1
+  fi
+}
+
+for cmd in node python3 swift hdiutil; do
+  require_cmd "$cmd"
+done
+
+run_tsc() {
+  local project_file="$1"
+  if [ -x "$REPO_ROOT/node_modules/.bin/tsc" ]; then
+    "$REPO_ROOT/node_modules/.bin/tsc" -p "$project_file"
+  else
+    npx tsc -p "$project_file"
+  fi
+}
+
+run_bundled_npm() {
+  local cwd="$1"
+  shift
+  (cd "$cwd" && "$NODE_STAGE/bin/node" "$NODE_STAGE/$NPM_CLI_REL" "$@")
+}
+
+echo "==> Building shared + gateway with Node toolchain"
+run_tsc "$REPO_ROOT/shared/tsconfig.json"
+run_tsc "$REPO_ROOT/gateway/tsconfig.json"
+
+echo "==> Preparing staging directories"
+rm -rf "$STAGE_DIR" "$APP_DIR" "$DMG_PATH"
+mkdir -p "$STAGE_DIR" "$OUT_DIR" "$CACHE_DIR" "$GATEWAY_STAGE" "$DMG_STAGE"
+
+echo "==> Downloading Node runtime (${NODE_VERSION}) if needed"
+if [ ! -f "$NODE_TARBALL" ]; then
+  curl -fsSL "$NODE_DOWNLOAD_URL" -o "$NODE_TARBALL"
+fi
+
+tar -xzf "$NODE_TARBALL" -C "$STAGE_DIR"
+mv "$STAGE_DIR/$NODE_DIST" "$NODE_STAGE"
+
+echo "==> Staging bundled gateway runtime"
+cp -R "$REPO_ROOT/gateway/dist" "$GATEWAY_STAGE/dist"
+
+REPO_ROOT_FOR_NODE="$REPO_ROOT" GATEWAY_STAGE_FOR_NODE="$GATEWAY_STAGE" "$NODE_STAGE/bin/node" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+
+const repoRoot = process.env.REPO_ROOT_FOR_NODE;
+const stage = process.env.GATEWAY_STAGE_FOR_NODE;
+if (!repoRoot || !stage) {
+  throw new Error("Missing environment for staging script.");
+}
+
+const gatewayPkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "gateway/package.json"), "utf8"));
+const sharedPkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "shared/package.json"), "utf8"));
+
+const deps = { ...(gatewayPkg.dependencies || {}) };
+delete deps["@codex-phone/shared"];
+Object.assign(deps, sharedPkg.dependencies || {});
+
+const runtimePkg = {
+  name: "codex-gateway-runtime",
+  private: true,
+  version: gatewayPkg.version || "0.1.0",
+  type: "commonjs",
+  dependencies: deps,
+};
+
+fs.writeFileSync(path.join(stage, "package.json"), JSON.stringify(runtimePkg, null, 2));
+NODE
+
+run_bundled_npm "$GATEWAY_STAGE" install --omit=dev --no-audit --no-fund
+(
+  cd "$GATEWAY_STAGE/node_modules/better-sqlite3"
+  rm -rf build
+  "$NODE_STAGE/bin/node" "$NODE_STAGE/$NODE_GYP_REL" rebuild --release
+)
+(
+  cd "$GATEWAY_STAGE"
+  "$NODE_STAGE/bin/node" -e "const Better=require('better-sqlite3'); const db=new Better(':memory:'); db.prepare('select 1').get(); db.close(); console.log('node-modules=' + process.versions.modules); console.log('better-sqlite3-validated')"
+)
+
+mkdir -p "$GATEWAY_STAGE/node_modules/@codex-phone/shared"
+cp -R "$REPO_ROOT/shared/dist" "$GATEWAY_STAGE/node_modules/@codex-phone/shared/dist"
+cat > "$GATEWAY_STAGE/node_modules/@codex-phone/shared/package.json" <<'JSON'
+{
+  "name": "@codex-phone/shared",
+  "version": "0.1.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts"
+}
+JSON
+
+echo "==> Building Swift app"
 swift build -c release --package-path "$ROOT_DIR"
 
-rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
 
@@ -20,6 +139,16 @@ chmod +x "$APP_DIR/Contents/MacOS/$APP_NAME"
 if [ -f "$ICON_SRC" ]; then
   cp "$ICON_SRC" "$APP_DIR/Contents/Resources/AppIcon.icns"
 fi
+
+for bundle in "$BUILD_DIR"/*.bundle; do
+  if [ -d "$bundle" ]; then
+    cp -R "$bundle" "$APP_DIR/Contents/Resources/"
+  fi
+done
+
+cp -R "$GATEWAY_STAGE" "$APP_DIR/Contents/Resources/GatewayRuntime"
+cp -R "$NODE_STAGE" "$APP_DIR/Contents/Resources/Node"
+chmod +x "$APP_DIR/Contents/Resources/Node/bin/node"
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -41,9 +170,9 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>0.2.0</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>2</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSUIElement</key>
@@ -54,4 +183,120 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+if [ -n "${SIGN_IDENTITY:-}" ]; then
+  echo "==> Codesigning app with identity: ${SIGN_IDENTITY}"
+  cat > "$ENTITLEMENTS_PATH" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>
+PLIST
+
+  while IFS= read -r -d '' sign_target; do
+    if [ "$(basename "$sign_target")" = "node" ]; then
+      codesign --force --sign "$SIGN_IDENTITY" --options runtime --timestamp --entitlements "$ENTITLEMENTS_PATH" "$sign_target"
+    else
+      codesign --force --sign "$SIGN_IDENTITY" --options runtime --timestamp "$sign_target"
+    fi
+  done < <(find "$APP_DIR/Contents" -type f \( -name "*.dylib" -o -name "*.node" -o -name "node" \) -print0)
+
+  codesign --force --deep --sign "$SIGN_IDENTITY" --options runtime --timestamp --entitlements "$ENTITLEMENTS_PATH" "$APP_DIR"
+else
+  echo "==> SIGN_IDENTITY not set. Building unsigned app bundle."
+fi
+
+echo "==> Building DMG"
+cp -R "$APP_DIR" "$DMG_STAGE/$APP_NAME.app"
+
+mkdir -p "$DMG_STAGE/.background"
+BG_PATH="$DMG_STAGE/.background/background.png"
+BG_PATH="$BG_PATH" python3 - <<'PY'
+import os
+from PIL import Image, ImageDraw
+
+bg_path = os.environ["BG_PATH"]
+img = Image.new("RGB", (720, 420), "white")
+draw = ImageDraw.Draw(img)
+draw.line((290, 210, 430, 210), fill="black", width=8)
+draw.polygon([(430, 190), (430, 230), (470, 210)], fill="black")
+img.save(bg_path)
+PY
+
+hdiutil create -volname "$DMG_VOLUME_NAME" -srcfolder "$DMG_STAGE" -ov -format UDRW -fs HFS+ "$DMG_RW_PATH"
+ATTACH_OUTPUT="$(hdiutil attach -readwrite -noverify -noautoopen "$DMG_RW_PATH")"
+DMG_DEVICE="$(printf '%s\n' "$ATTACH_OUTPUT" | awk '/\/Volumes\// {print $1; exit}')"
+DMG_MOUNT_DIR="$(printf '%s\n' "$ATTACH_OUTPUT" | awk '/\/Volumes\// {idx=index($0, "/Volumes/"); print substr($0, idx); exit}')"
+DMG_BG_POSIX="$DMG_MOUNT_DIR/.background/background.png"
+
+# Create the Applications drop target inside the mounted DMG.
+# Prefer a Finder alias for better icon fidelity on recent macOS releases.
+rm -rf "$DMG_MOUNT_DIR/Applications"
+if ! osascript <<EOF >/dev/null 2>&1
+tell application "Finder"
+  set dmgFolder to POSIX file "$DMG_MOUNT_DIR" as alias
+  set appAlias to make new alias file at dmgFolder to POSIX file "/Applications"
+  set name of appAlias to "Applications"
+end tell
+EOF
+then
+  # Fallback in case Finder alias creation is unavailable.
+  ln -s /Applications "$DMG_MOUNT_DIR/Applications"
+fi
+
+osascript <<EOF
+tell application "Finder"
+  tell disk (POSIX file "$DMG_MOUNT_DIR" as alias)
+    open
+    set current view of container window to icon view
+    set toolbar visible of container window to false
+    set statusbar visible of container window to false
+    set bounds of container window to {120, 120, 840, 540}
+    set viewOptions to the icon view options of container window
+    set arrangement of viewOptions to not arranged
+    set icon size of viewOptions to 128
+    set text size of viewOptions to 14
+    set shows icon preview of viewOptions to false
+    set background picture of viewOptions to POSIX file "$DMG_BG_POSIX"
+    set position of item "$APP_NAME.app" of container window to {180, 220}
+    set position of item "Applications" of container window to {560, 220}
+    close
+    open
+    update without registering applications
+    delay 1
+  end tell
+end tell
+EOF
+
+sync
+DETACH_TARGET="${DMG_DEVICE:-$DMG_MOUNT_DIR}"
+hdiutil detach "$DETACH_TARGET" || hdiutil detach -force "$DETACH_TARGET"
+hdiutil convert "$DMG_RW_PATH" -format UDZO -o "$DMG_PATH"
+rm -f "$DMG_RW_PATH"
+
+if [ "$RELEASE_MODE" -eq 1 ]; then
+  if [ -z "${SIGN_IDENTITY:-}" ]; then
+    echo "Release mode requires SIGN_IDENTITY."
+    exit 1
+  fi
+  if [ -z "${NOTARYTOOL_PROFILE:-}" ]; then
+    echo "Release mode requires NOTARYTOOL_PROFILE."
+    exit 1
+  fi
+  require_cmd xcrun
+
+  echo "==> Submitting DMG for notarization with profile: ${NOTARYTOOL_PROFILE}"
+  xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARYTOOL_PROFILE" --wait
+  xcrun stapler staple "$APP_DIR"
+  xcrun stapler staple "$DMG_PATH"
+fi
+
 echo "Built app: $APP_DIR"
+echo "Built DMG: $DMG_PATH"

@@ -1,71 +1,49 @@
-# Configurable macOS Gateway App
+# Self-Contained macOS Gateway App
 
-This guide explains how to run and package a simple macOS menu bar app that manages the Codex gateway process.
+This guide covers the packaged menu bar app that bundles the gateway runtime and Node.js so it can run outside this repo checkout.
 
 Project location:
 - `/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu`
 
-## What This App Does
+## What Is Bundled
 
-- Runs as a menu bar app (`LSUIElement` app).
-- Starts and stops the gateway process.
-- Fixes common setup issues with one click (`Fix Setup`).
-- Opens the pairing URL.
-- Shows recent process logs.
-- Provides a Settings window to edit runtime configuration.
-- Persists config in JSON.
+- Swift menu bar app binary
+- Gateway runtime (`dist` + production `node_modules`)
+- Shared runtime package (`@codex-phone/shared`)
+- Private Node runtime under app resources
 
-## Configuration
+The app no longer depends on local `gateway/` source paths at runtime.
 
-The app stores config at:
-- `~/.codex-gateway-menu/config.json`
+## External Requirements (Not Bundled)
 
-Config fields:
-- `command`: executable name or absolute path (example: `bun`)
-- `args`: command arguments array (example: `[
-  "run", "start"
-]`)
-- `workingDirectory`: where process runs from (set to gateway folder)
-- `environment`: key/value env vars
-- `pairURL`: URL opened by "Open Pair Page"
-- `autoStart`: start process automatically when app launches
+- Codex CLI (`codex`) installed on Mac
+- Tailscale app + CLI (`tailscale`) installed and logged in
 
-Example config:
+## Runtime Behavior
 
-```json
-{
-  "command": "bun",
-  "args": ["run", "start"],
-  "workingDirectory": "/Users/omshejul/Code/CodexApp/gateway",
-  "environment": {
-    "HOST": "127.0.0.1",
-    "PORT": "8787",
-    "PUBLIC_BASE_URL": "https://your-machine.tailnet.ts.net"
-  },
-  "pairURL": "http://127.0.0.1:8787/pair",
-  "autoStart": false
-}
-```
+- Gateway runs locally on `127.0.0.1:<port>` (default `8787`).
+- Pair page always opens locally: `http://127.0.0.1:<port>/pair`.
+- App stores writable runtime state in:
+  - `~/Library/Application Support/CodexGatewayMenu/gateway.sqlite`
+  - `~/Library/Application Support/CodexGatewayMenu/logs/`
+- On setup/start, app configures Tailscale route:
+  - `tailscale serve --service codexgateway --bg http://127.0.0.1:<port>`
+  - If this CLI rejects `--service`, app falls back to: `tailscale serve --bg http://127.0.0.1:<port>`
+- On app quit, only this app-owned route is cleared:
+  - `tailscale serve clear codexgateway`
+  - In fallback node mode (no service support), app does not run `serve reset` to avoid removing unrelated routes.
 
-## Prerequisites
+## Settings
 
-- macOS 13+
-- Xcode command line tools (`xcode-select --install`)
-- Swift 5.9+
-- Bun installed and available in PATH (if using `command: bun`)
+User-editable settings are intentionally small:
+- `Magic DNS URL` (`PUBLIC_BASE_URL`)
+- `Gateway Port`
+- `Codex CLI Path (optional override)`
+- `Auto-start`
 
-## Build And Run (Dev)
+Runtime command, args, and working directory are managed by the app.
 
-From repo root:
-
-```bash
-cd /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu
-swift run
-```
-
-You should see a "Codex Gateway" menu bar icon.
-
-## Build .app Bundle
+## Build App + DMG
 
 From repo root:
 
@@ -73,45 +51,82 @@ From repo root:
 /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/scripts/build_app.sh
 ```
 
-Output app path:
+Outputs:
 - `/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.app`
+- `/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.dmg`
 
-To run:
+## Signed + Notarized Release
+
+Set:
+- `SIGN_IDENTITY` (Developer ID Application certificate name)
+- `NOTARYTOOL_PROFILE` (saved keychain profile for `xcrun notarytool`)
+
+Then run:
 
 ```bash
-open /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.app
+SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+NOTARYTOOL_PROFILE="codex-notary" \
+/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/scripts/build_app.sh --release
 ```
 
-## First-Time Setup
+This will:
+1. Build bundled app
+2. Codesign app
+3. Build DMG
+4. Submit DMG to notarization
+5. Staple notarization ticket to app + DMG
 
-Recommended for non-technical users:
+## Release Runbook (Exact Steps Used)
 
-1. Open the menu bar app.
+1. Verify signing identity exists:
+
+```bash
+security find-identity -v -p codesigning
+```
+
+Expected identity format:
+- `Developer ID Application: <Name> (<TEAM_ID>)`
+
+2. Store notary credentials in keychain profile (one-time):
+
+```bash
+xcrun notarytool store-credentials codex-gateway \
+  --apple-id "<APPLE_ID_EMAIL>" \
+  --team-id "M4K84L4TKR" \
+  --password "<APP_SPECIFIC_PASSWORD>"
+```
+
+3. Run signed + notarized build:
+
+```bash
+SIGN_IDENTITY="Developer ID Application: Om Shejul (M4K84L4TKR)" \
+NOTARYTOOL_PROFILE="codex-gateway" \
+/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/scripts/build_app.sh --release
+```
+
+4. Output artifacts:
+- `/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.app`
+- `/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.dmg`
+
+5. Optional validation commands:
+
+```bash
+spctl -a -t exec -vv /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.app
+spctl -a -t open -vv /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.dmg
+codesign --verify --deep --strict --verbose=2 /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.app
+```
+
+Notes:
+- Do not commit secrets (Apple ID password or app-specific password).
+- If you need to update stored credentials later, run `notarytool store-credentials` again with the same profile name.
+
+## First-Run Flow for End Users
+
+1. Open app.
 2. Click `Fix Setup`.
-3. Wait for `Setup complete. Click Start.`
+3. Confirm status is `Ready`.
 4. Click `Start`.
 5. Click `Open Pair Page`.
 
-You only need Settings if your project is in a non-standard location.
-
-## Troubleshooting
-
-- "Start failed" with command not found:
-  - Click `Fix Setup` first.
-  - If needed, set absolute command path in Settings (for example `/opt/homebrew/bin/bun`).
-- Gateway starts but app cannot pair:
-  - Verify `PORT` and `pairURL` match.
-  - Ensure Tailscale serve is configured if pairing remotely.
-- Config changes not applied to running process:
-  - Save config, then Stop and Start.
-- `ERR_DLOPEN_FAILED` / `better-sqlite3`:
-  - Click `Fix Setup` (it reinstalls dependencies and rebuilds gateway).
-
-## Source Files
-
-- `Package.swift`
-- `Sources/CodexGatewayMenu/CodexGatewayMenuApp.swift`
-- `Sources/CodexGatewayMenu/GatewayManager.swift`
-- `Sources/CodexGatewayMenu/SettingsView.swift`
-- `Sources/CodexGatewayMenu/StatusMenuView.swift`
-- `scripts/build_app.sh`
+If status shows `Missing Codex CLI`, install Codex CLI and click `Fix Setup` again.  
+If status shows `Missing Tailscale` or `Tailscale not authenticated`, install/sign in to Tailscale and click `Fix Setup`.
