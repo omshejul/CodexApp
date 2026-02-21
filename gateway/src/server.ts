@@ -11,6 +11,7 @@ import rateLimit from "@fastify/rate-limit";
 import jwt from "jsonwebtoken";
 import QRCode from "qrcode";
 import WebSocket from "ws";
+import { adjectives, animals, NumberDictionary, uniqueNamesGenerator } from "unique-names-generator";
 import {
   AuthLogoutRequestSchema,
   AuthRefreshRequestSchema,
@@ -78,6 +79,8 @@ interface AccessTokenPayload {
   sub: string;
   deviceName?: string;
 }
+
+const deviceNumberDictionary = NumberDictionary.generate({ min: 10, max: 99 });
 
 function sanitizeBaseUrl(value: string): string {
   return value.replace(/\/+$/, "");
@@ -343,6 +346,31 @@ function issueAccessToken(deviceId: string, deviceName: string): string {
       expiresIn: ACCESS_TTL_SECONDS,
     }
   );
+}
+
+function numericSeedFromText(value: string): number {
+  let hash = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
+  }
+  return hash;
+}
+
+function buildMemorableDeviceName(deviceId: string): string {
+  const seed = numericSeedFromText(deviceId.toLowerCase());
+  return uniqueNamesGenerator({
+    dictionaries: [adjectives, animals, deviceNumberDictionary],
+    separator: "-",
+    style: "capital",
+    seed,
+  });
+}
+
+function withMemorableDeviceName<T extends { deviceId: string; deviceName: string }>(device: T): T {
+  return {
+    ...device,
+    deviceName: buildMemorableDeviceName(device.deviceId),
+  };
 }
 
 function buildDefaultDangerFullAccessSandboxPolicy() {
@@ -1115,7 +1143,7 @@ async function bootstrap() {
         return reply.code(400).send({ error: parsedBody.error.flatten() });
       }
 
-      const { pairId, code, deviceId, deviceName } = parsedBody.data;
+      const { pairId, code, deviceId } = parsedBody.data;
       const session = db.getPairSession(pairId);
 
       if (!session) {
@@ -1137,8 +1165,9 @@ async function bootstrap() {
 
       db.markPairSessionUsed(pairId, Date.now());
 
-      const accessToken = issueAccessToken(deviceId, deviceName);
-      const refresh = createRefreshToken(deviceId, deviceName);
+      const memorableDeviceName = buildMemorableDeviceName(deviceId);
+      const accessToken = issueAccessToken(deviceId, memorableDeviceName);
+      const refresh = createRefreshToken(deviceId, memorableDeviceName);
       db.insertRefreshToken(refresh.row);
 
       const payload = PairClaimResponseSchema.parse({
@@ -1189,11 +1218,11 @@ async function bootstrap() {
     if (!ensureLocalRequest(request, reply)) {
       return;
     }
-    return reply.send({ devices: db.listActiveDevices() });
+    return reply.send({ devices: db.listActiveDevices().map((device) => withMemorableDeviceName(device)) });
   });
 
   app.get("/devices/active", { preHandler: [requireAuth] }, async (_request, reply) => {
-    return reply.send({ devices: db.listActiveDevices() });
+    return reply.send({ devices: db.listActiveDevices().map((device) => withMemorableDeviceName(device)) });
   });
 
   app.post("/devices/:id/revoke", async (request, reply) => {

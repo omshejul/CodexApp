@@ -3,6 +3,12 @@ import SwiftUI
 struct StatusMenuView: View {
   @ObservedObject var manager: GatewayManager
   @Environment(\.openWindow) private var openWindow
+  private static let addedDateFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.dateStyle = .medium
+    formatter.timeStyle = .short
+    return formatter
+  }()
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
@@ -109,6 +115,9 @@ struct StatusMenuView: View {
                   .font(.caption2)
                   .foregroundStyle(.secondary)
                   .lineLimit(1)
+                Text("Added \(formatAddedDate(device.createdAt))")
+                  .font(.caption2)
+                  .foregroundStyle(.secondary)
               }
               Spacer()
               Button("Revoke") {
@@ -158,5 +167,10 @@ struct StatusMenuView: View {
       manager.bootstrap()
       manager.refreshFullDiskAccessStatus()
     }
+  }
+
+  private func formatAddedDate(_ createdAtMillis: Int64) -> String {
+    let date = Date(timeIntervalSince1970: TimeInterval(createdAtMillis) / 1000)
+    return Self.addedDateFormatter.string(from: date)
   }
 }
