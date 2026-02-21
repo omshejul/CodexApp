@@ -56,3 +56,5 @@ NOTARYTOOL_PROFILE="codex-notary" \
 
 - For Metro Restart say to run  `npx expo start --dev-client --clear`
 - For build/reinstall iOS app say to run  `npx expo run:ios --device --no-bundler --configuration Debug`
+
+If you think something is useful to be remembered for later and will save time instead of doing it again, ask user if they can make a doc about this, and make a md in docs and link it here, by mentioning the doc and how/where to use it
