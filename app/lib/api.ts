@@ -1,5 +1,6 @@
 import {
   AuthRefreshResponseSchema,
+  GatewayOptionsResponseSchema,
   PairClaimRequest,
   PairClaimResponseSchema,
   ThreadMessageRequest,
@@ -277,4 +278,9 @@ export async function getStreamConfig(threadId: string): Promise<{ url: string; 
     url: `${current.serverBaseUrl}/threads/${encodeURIComponent(threadId)}/stream`,
     token,
   };
+}
+
+export async function getGatewayOptions() {
+  const payload = await authenticatedRequest<unknown>("/options");
+  return GatewayOptionsResponseSchema.parse(payload);
 }

@@ -59,11 +59,28 @@ export const ThreadResumeResponseSchema = z.object({
 
 export const ThreadMessageRequestSchema = z.object({
   text: z.string().min(1),
+  model: z.string().min(1).optional(),
+  reasoningEffort: z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]).optional(),
 });
 
 export const ThreadMessageResponseSchema = z.object({
   ok: z.literal(true),
   turnId: z.string().optional(),
+});
+
+export const ModelOptionSchema = z.object({
+  id: z.string().min(1),
+  model: z.string().min(1),
+  label: z.string().min(1),
+  isDefault: z.boolean(),
+  supportedReasoningEfforts: z.array(z.enum(["none", "minimal", "low", "medium", "high", "xhigh"])),
+  defaultReasoningEffort: z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]).optional(),
+});
+
+export const GatewayOptionsResponseSchema = z.object({
+  models: z.array(ModelOptionSchema),
+  defaultModel: z.string().optional(),
+  defaultReasoningEffort: z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]).optional(),
 });
 
 export const HealthResponseSchema = z.object({
@@ -85,4 +102,6 @@ export type ThreadResponse = z.infer<typeof ThreadResponseSchema>;
 export type ThreadResumeResponse = z.infer<typeof ThreadResumeResponseSchema>;
 export type ThreadMessageRequest = z.infer<typeof ThreadMessageRequestSchema>;
 export type ThreadMessageResponse = z.infer<typeof ThreadMessageResponseSchema>;
+export type ModelOption = z.infer<typeof ModelOptionSchema>;
+export type GatewayOptionsResponse = z.infer<typeof GatewayOptionsResponseSchema>;
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;

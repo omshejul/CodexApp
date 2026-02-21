@@ -182,6 +182,27 @@ export class CodexRpcClient extends EventEmitter {
     }
 
     const record = message as Record<string, unknown>;
+    if (typeof record.method === "string") {
+      // A message with method is either a notification (no id) or server-initiated request (has id).
+      if (typeof record.id === "number" || typeof record.id === "string") {
+        this.handleServerRequest({
+          id: record.id,
+          method: record.method,
+          params: record.params,
+        });
+        return;
+      }
+
+      const payload = {
+        method: record.method,
+        params: record.params,
+      };
+
+      this.emit("notification", payload);
+      this.dispatchToThreadListeners(payload);
+      return;
+    }
+
     const maybeId = record.id;
     if (typeof maybeId === "number" || typeof maybeId === "string") {
       if (typeof maybeId === "number") {
@@ -198,29 +219,8 @@ export class CodexRpcClient extends EventEmitter {
           return;
         }
       }
-
-      if (typeof record.method === "string") {
-        this.handleServerRequest({
-          id: maybeId,
-          method: record.method,
-          params: record.params,
-        });
-      }
       return;
     }
-
-    const notification = message as { method?: string; params?: unknown };
-    if (!notification.method) {
-      return;
-    }
-
-    const payload = {
-      method: notification.method,
-      params: notification.params,
-    };
-
-    this.emit("notification", payload);
-    this.dispatchToThreadListeners(payload);
   }
 
   private handleServerRequest(payload: { id: JsonRpcId; method: string; params: unknown }) {

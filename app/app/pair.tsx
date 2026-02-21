@@ -39,20 +39,20 @@ export default function PairScreen() {
   };
 
   return (
-    <View className="flex-1 bg-[#f6f9ff] px-5 pt-12">
+    <View className="flex-1 bg-[#090f1a] px-5 pt-12">
       <MotiView
         from={{ opacity: 0, translateY: 12 }}
         animate={{ opacity: 1, translateY: 0 }}
         transition={{ type: "timing", duration: 260 }}
-        className="rounded-3xl border border-[#d9ecff] bg-white p-5"
+        className="rounded-3xl border border-[#1d2b42] bg-[#0f1729] p-5"
       >
-        <Text className="text-3xl font-black text-[#14335f]">Codex Phone</Text>
-        <Text className="mt-2 text-base leading-6 text-[#365f89]">
+        <Text className="text-3xl font-black text-[#d7e9ff]">Codex Phone</Text>
+        <Text className="mt-2 text-base leading-6 text-[#9bb8dc]">
           Scan the pairing QR from your laptop at <Text className="font-bold">http://127.0.0.1:8787/pair</Text>.
         </Text>
 
         {permission?.granted && scanning ? (
-          <View className="mt-4 overflow-hidden rounded-2xl border border-[#c5def9]">
+          <View className="mt-4 overflow-hidden rounded-2xl border border-[#294364]">
             <CameraView
               style={{ width: "100%", height: 360 }}
               onBarcodeScanned={onScan}
@@ -62,16 +62,16 @@ export default function PairScreen() {
             />
           </View>
         ) : (
-          <View className="mt-4 rounded-2xl bg-[#eef5ff] p-4">
-            <Text className="text-sm text-[#365f89]">
+          <View className="mt-4 rounded-2xl bg-[#0d1628] p-4">
+            <Text className="text-sm text-[#9bb8dc]">
               This app uses one-time pairing. Your Codex server stays local on the laptop and is only reachable through your own Tailscale tunnel.
             </Text>
           </View>
         )}
 
         {error ? (
-          <View className="mt-4 rounded-xl border border-[#f1b7b7] bg-[#fff4f4] p-3">
-            <Text className="text-sm font-medium text-[#a42f2f]">{error}</Text>
+          <View className="mt-4 rounded-xl border border-[#66313d] bg-[#2c141b] p-3">
+            <Text className="text-sm font-medium text-[#ffc5d2]">{error}</Text>
           </View>
         ) : null}
 

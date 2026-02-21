@@ -12,6 +12,7 @@ import {
   AuthLogoutRequestSchema,
   AuthRefreshRequestSchema,
   AuthRefreshResponseSchema,
+  GatewayOptionsResponseSchema,
   HealthResponseSchema,
   PairClaimRequestSchema,
   PairClaimResponseSchema,
@@ -479,6 +480,90 @@ function normalizeThread(result: unknown, fallbackId: string): { id: string; tit
   return { id: fallbackId, turns: [] };
 }
 
+function normalizeGatewayOptions(result: unknown) {
+  const asObject = result && typeof result === "object" ? (result as Record<string, unknown>) : null;
+  const modelArray = Array.isArray(asObject?.data)
+    ? (asObject?.data as unknown[])
+    : Array.isArray(asObject?.models)
+    ? (asObject?.models as unknown[])
+    : [];
+
+  const models = modelArray.reduce<
+    Array<{
+      id: string;
+      model: string;
+      label: string;
+      isDefault: boolean;
+      supportedReasoningEfforts: Array<"none" | "minimal" | "low" | "medium" | "high" | "xhigh">;
+      defaultReasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+    }>
+  >((acc, item) => {
+    if (!item || typeof item !== "object") {
+      return acc;
+    }
+
+    const row = item as Record<string, unknown>;
+    const model = typeof row.model === "string" ? row.model : null;
+    const id = typeof row.id === "string" ? row.id : model;
+    if (!model || !id) {
+      return acc;
+    }
+
+    const displayName = typeof row.displayName === "string" && row.displayName.trim().length > 0 ? row.displayName : model;
+    const isDefault = row.isDefault === true;
+
+    const reasoningFromModel = Array.isArray(row.supportedReasoningEfforts) ? row.supportedReasoningEfforts : [];
+    const supportedReasoningEfforts = reasoningFromModel
+      .map((entry) => {
+        if (!entry || typeof entry !== "object") {
+          return null;
+        }
+        const effort = (entry as Record<string, unknown>).reasoningEffort;
+        if (
+          effort === "none" ||
+          effort === "minimal" ||
+          effort === "low" ||
+          effort === "medium" ||
+          effort === "high" ||
+          effort === "xhigh"
+        ) {
+          return effort;
+        }
+        return null;
+      })
+      .filter((value): value is "none" | "minimal" | "low" | "medium" | "high" | "xhigh" => value !== null);
+
+    const defaultReasoningEffort =
+      row.defaultReasoningEffort === "none" ||
+      row.defaultReasoningEffort === "minimal" ||
+      row.defaultReasoningEffort === "low" ||
+      row.defaultReasoningEffort === "medium" ||
+      row.defaultReasoningEffort === "high" ||
+      row.defaultReasoningEffort === "xhigh"
+        ? row.defaultReasoningEffort
+        : undefined;
+
+    acc.push({
+      id,
+      model,
+      label: displayName,
+      isDefault,
+      supportedReasoningEfforts,
+      defaultReasoningEffort,
+    });
+    return acc;
+  }, []);
+
+  const defaultModel = models.find((model) => model.isDefault)?.model;
+  const defaultReasoningEffort = models.find((model) => model.isDefault)?.defaultReasoningEffort;
+
+  return {
+    models,
+    defaultModel,
+    defaultReasoningEffort,
+  };
+}
+
 const app = Fastify({
   logger: true,
 });
@@ -746,6 +831,12 @@ async function bootstrap() {
     return reply.send(payload);
   });
 
+  app.get("/options", { preHandler: [requireAuth] }, async (_request, reply) => {
+    const result = await codex.call("model/list", {});
+    const payload = GatewayOptionsResponseSchema.parse(normalizeGatewayOptions(result));
+    return reply.send(payload);
+  });
+
   app.post("/threads/:id/resume", { preHandler: [requireAuth] }, async (request, reply) => {
     const params = request.params as { id: string };
     await codex.call("thread/resume", {
@@ -767,6 +858,8 @@ async function bootstrap() {
     const result = await codex.call("turn/start", {
       threadId: params.id,
       approvalPolicy: "never",
+      model: parsedBody.data.model ?? null,
+      effort: parsedBody.data.reasoningEffort ?? null,
       input: [{ type: "text", text: parsedBody.data.text, text_elements: [] }],
     });
 

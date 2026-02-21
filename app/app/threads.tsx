@@ -57,32 +57,34 @@ export default function ThreadsScreen() {
     >
       <Pressable
         onPress={() => router.push(`/thread/${item.id}`)}
-        className="rounded-2xl border border-[#d9ecff] bg-white px-4 py-4"
+        className="rounded-2xl border border-[#1d2b42] bg-[#0f1729] px-4 py-4"
       >
-        <Text className="text-base font-bold text-[#14335f]">{item.title || item.id}</Text>
-        <Text className="mt-1 text-xs text-[#365f89]">{item.updatedAt ? new Date(item.updatedAt).toLocaleString() : "Unknown update time"}</Text>
+        <Text className="text-base font-bold text-[#e6f0ff]">{item.title || item.id}</Text>
+        <Text className="mt-1 text-xs text-[#8baad0]">
+          {item.updatedAt ? new Date(item.updatedAt).toLocaleString() : "Unknown update time"}
+        </Text>
       </Pressable>
     </MotiView>
   );
 
   return (
-    <View className="flex-1 bg-[#f6f9ff] px-4 pt-4">
+    <View className="flex-1 bg-[#090f1a] px-4 pt-4">
       <View className="mb-4 flex-row items-center justify-between">
-        <Text className="text-3xl font-black text-[#14335f]">Threads</Text>
+        <Text className="text-3xl font-black text-[#d7e9ff]">Threads</Text>
         <Pressable
-          className="rounded-lg border border-[#c4ddfb] bg-white px-3 py-2"
+          className="rounded-lg border border-[#2a3f60] bg-[#0f1a2d] px-3 py-2"
           onPress={async () => {
             await clearSession();
             router.replace("/pair");
           }}
         >
-          <Text className="text-xs font-semibold text-[#1f57a4]">Re-pair</Text>
+          <Text className="text-xs font-semibold text-[#a8c8ef]">Re-pair</Text>
         </Pressable>
       </View>
 
       {error ? (
-        <View className="mb-4 rounded-xl border border-[#f1b7b7] bg-[#fff4f4] p-3">
-          <Text className="text-sm text-[#a42f2f]">{error}</Text>
+        <View className="mb-4 rounded-xl border border-[#66313d] bg-[#2c141b] p-3">
+          <Text className="text-sm text-[#ffc5d2]">{error}</Text>
         </View>
       ) : null}
 
@@ -94,8 +96,8 @@ export default function ThreadsScreen() {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2f7de1" />}
         ListEmptyComponent={
           !loading ? (
-            <View className="rounded-2xl border border-dashed border-[#c4ddfb] bg-white p-6">
-              <Text className="text-center text-sm text-[#365f89]">No threads returned by the gateway.</Text>
+            <View className="rounded-2xl border border-dashed border-[#2a3c59] bg-[#0d1628] p-6">
+              <Text className="text-center text-sm text-[#85a7d1]">No threads returned by the gateway.</Text>
             </View>
           ) : null
         }
