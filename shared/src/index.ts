@@ -135,6 +135,14 @@ export const ThreadMessageResponseSchema = z.object({
   turnId: z.string().optional(),
 });
 
+export const ThreadInterruptRequestSchema = z.object({
+  turnId: z.string().min(1).optional(),
+});
+
+export const ThreadInterruptResponseSchema = z.object({
+  ok: z.literal(true),
+});
+
 export const ModelOptionSchema = z.object({
   id: z.string().min(1),
   model: z.string().min(1),
@@ -190,6 +198,8 @@ export type ThreadNameSetRequest = z.infer<typeof ThreadNameSetRequestSchema>;
 export type ThreadNameSetResponse = z.infer<typeof ThreadNameSetResponseSchema>;
 export type ThreadMessageRequest = z.infer<typeof ThreadMessageRequestSchema>;
 export type ThreadMessageResponse = z.infer<typeof ThreadMessageResponseSchema>;
+export type ThreadInterruptRequest = z.infer<typeof ThreadInterruptRequestSchema>;
+export type ThreadInterruptResponse = z.infer<typeof ThreadInterruptResponseSchema>;
 export type ModelOption = z.infer<typeof ModelOptionSchema>;
 export type GatewayOptionsResponse = z.infer<typeof GatewayOptionsResponseSchema>;
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;

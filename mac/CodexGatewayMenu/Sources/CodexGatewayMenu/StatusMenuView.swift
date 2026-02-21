@@ -138,22 +138,39 @@ struct StatusMenuView: View {
 
       if !manager.outputLines.isEmpty {
         Divider()
-        Text("Recent Logs")
-          .font(.caption)
-          .foregroundStyle(.white.opacity(0.85))
+        HStack {
+          Text("Recent Logs")
+            .font(.caption)
+            .foregroundStyle(.white.opacity(0.85))
+          Spacer()
+          Text("\(manager.outputLines.count) lines")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        }
 
-        TextEditor(text: .constant(manager.recentLogsText))
-          .font(.system(size: 12, weight: .medium, design: .monospaced))
-          .foregroundStyle(.white.opacity(0.96))
-          .scrollContentBackground(.hidden)
-          .frame(minHeight: 240, maxHeight: 280)
+        ScrollView {
+          Text(manager.recentLogsText)
+            .font(.system(size: 12, weight: .regular, design: .monospaced))
+            .foregroundStyle(.white.opacity(0.96))
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .textSelection(.enabled)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+        }
+        .frame(minHeight: 240, maxHeight: 280)
         .background(
           RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .fill(Color.black.opacity(0.38))
+            .fill(
+              LinearGradient(
+                colors: [Color.black.opacity(0.56), Color.black.opacity(0.44)],
+                startPoint: .top,
+                endPoint: .bottom
+              )
+            )
         )
         .overlay(
           RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .stroke(Color.white.opacity(0.15), lineWidth: 1)
+            .stroke(Color.white.opacity(0.22), lineWidth: 1)
         )
       }
 

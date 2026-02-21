@@ -29,6 +29,7 @@ import {
   getStreamConfig,
   getThread,
   getThreadEvents,
+  interruptThreadTurn,
   resumeThread,
   sendThreadMessage,
 } from "@/lib/api";
@@ -612,6 +613,7 @@ export default function ThreadScreen() {
   const [composerText, setComposerText] = useState("");
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [streamingAssistant, setStreamingAssistant] = useState("");
   const [isThinking, setIsThinking] = useState(false);
@@ -630,6 +632,7 @@ export default function ThreadScreen() {
   const [openDropdown, setOpenDropdown] = useState<OpenDropdown>(null);
   const [previewImageUri, setPreviewImageUri] = useState<string | null>(null);
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
+  const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
 
   const streamSocketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -794,6 +797,23 @@ export default function ThreadScreen() {
     });
   }, [refreshGatewayOptionsIfNeeded]);
 
+  const flushStreamingAssistant = useCallback(() => {
+    setStreamingAssistant((current) => {
+      if (!current.trim()) {
+        return "";
+      }
+      setTurns((existing) => [
+        ...existing,
+        {
+          id: `assistant-${Date.now()}`,
+          role: "assistant",
+          text: current,
+        },
+      ]);
+      return "";
+    });
+  }, []);
+
   useEffect(() => {
     if (!threadId) {
       return;
@@ -806,6 +826,7 @@ export default function ThreadScreen() {
     setShowScrollToBottom(false);
     setStreamingAssistant("");
     setIsThinking(false);
+    setActiveTurnId(null);
     setTurns([]);
     setExpandedActivityIds(new Set());
     turnsSignatureRef.current = "";
@@ -870,6 +891,19 @@ export default function ThreadScreen() {
 
           if (method === "turn/started" || method === "item/started" || method.includes("reasoning") || method.includes("plan/")) {
             setIsThinking(true);
+            if (method === "turn/started" && payload.params && typeof payload.params === "object") {
+              const eventParams = payload.params as Record<string, unknown>;
+              const turnId =
+                (typeof eventParams.turnId === "string" && eventParams.turnId) ||
+                (eventParams.turn &&
+                typeof eventParams.turn === "object" &&
+                typeof (eventParams.turn as Record<string, unknown>).id === "string"
+                  ? ((eventParams.turn as Record<string, unknown>).id as string)
+                  : null);
+              if (turnId) {
+                setActiveTurnId(turnId);
+              }
+            }
           }
 
           const activity = extractActivityFromEvent(method, payload.params);
@@ -908,22 +942,17 @@ export default function ThreadScreen() {
             return;
           }
 
+          if (method.includes("aborted") || method.includes("interrupt")) {
+            setIsThinking(false);
+            setActiveTurnId(null);
+            flushStreamingAssistant();
+            return;
+          }
+
           if (method.includes("complete") || method.includes("done") || method.includes("turn/end")) {
             setIsThinking(false);
-            setStreamingAssistant((current) => {
-              if (!current.trim()) {
-                return "";
-              }
-              setTurns((existing) => [
-                ...existing,
-                {
-                  id: `assistant-${Date.now()}`,
-                  role: "assistant",
-                  text: current,
-                },
-              ]);
-              return "";
-            });
+            setActiveTurnId(null);
+            flushStreamingAssistant();
           }
         };
 
@@ -991,7 +1020,7 @@ export default function ThreadScreen() {
       streamSocketRef.current?.close();
       streamSocketRef.current = null;
     };
-  }, [threadId]);
+  }, [threadId, flushStreamingAssistant]);
 
   useEffect(() => {
     if (!threadId) {
@@ -1129,12 +1158,15 @@ export default function ThreadScreen() {
     followBottomRef.current = true;
 
     try {
-      await sendThreadMessage(threadId, {
+      const response = await sendThreadMessage(threadId, {
         text: text || undefined,
         images: queuedImages.map((image) => ({ imageUrl: image.imageUrl })),
         model: resolvedSelectedModel ?? undefined,
         reasoningEffort: resolvedSelectedReasoning ?? undefined,
       });
+      if (response.turnId) {
+        setActiveTurnId(response.turnId);
+      }
     } catch (sendError) {
       if (sendError instanceof ReauthRequiredError) {
         await clearSession();
@@ -1146,6 +1178,25 @@ export default function ThreadScreen() {
       setSending(false);
     }
   };
+
+  const onStopResponse = useCallback(async () => {
+    if (!threadId || stopping) {
+      return;
+    }
+
+    setStopping(true);
+    try {
+      await interruptThreadTurn(threadId, activeTurnId ? { turnId: activeTurnId } : undefined);
+      setIsThinking(false);
+      setActiveTurnId(null);
+      flushStreamingAssistant();
+      setError(null);
+    } catch (interruptError) {
+      setError(interruptError instanceof Error ? interruptError.message : "Unable to stop response");
+    } finally {
+      setStopping(false);
+    }
+  }, [activeTurnId, flushStreamingAssistant, stopping, threadId]);
 
   const onPickImages = useCallback(async () => {
     try {
@@ -1193,6 +1244,8 @@ export default function ThreadScreen() {
       setError(pickError instanceof Error ? pickError.message : "Unable to pick image");
     }
   }, []);
+
+  const isResponding = sending || isThinking || streamingAssistant.trim().length > 0;
 
   const allTurns = streamingAssistant
     ? [
@@ -1412,21 +1465,11 @@ export default function ThreadScreen() {
         <View
           className="-mx-4 border-t border-border/50 bg-background px-4 pt-2"
           style={{
-            paddingBottom: Math.max(insets.bottom, 8),
+            paddingBottom: keyboardVisible ? 10 : Math.max(insets.bottom, 8),
           }}
         >
-          {keyboardVisible ? (
-            <View className="mb-2 flex-row justify-end">
-              <Pressable
-                onPress={() => Keyboard.dismiss()}
-                className="rounded-full border border-border/10 bg-muted px-3 py-1.5"
-              >
-                <Text className="text-xs font-semibold text-foreground">Hide Keyboard</Text>
-              </Pressable>
-            </View>
-          ) : null}
           {optionsLoaded && resolvedSelectedModel && currentReasoningOptions.length > 0 ? (
-            <View className="mb-2 flex-row gap-2">
+            <View className="mb-1.5 flex-row gap-2">
               <Pressable
                 onPress={() => setOpenDropdown("model")}
                 className="h-9 flex-1 flex-row items-center justify-between rounded-full border border-border/10 bg-muted px-3"
@@ -1449,6 +1492,22 @@ export default function ThreadScreen() {
                   <Ionicons name="chevron-up" size={14} color="#86efac" />
                 </View>
               </Pressable>
+              {keyboardVisible ? (
+                <MotiView
+                  from={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.8 }}
+                  transition={{ type: "timing", duration: 150 }}
+                >
+                  <Pressable
+                    onPress={() => Keyboard.dismiss()}
+                    className="h-9 flex-row items-center justify-center gap-1.5 rounded-full border border-border/10 bg-muted px-3"
+                  >
+                    <Ionicons name="keypad" size={16} color="#e0e0e0" />
+                    <Ionicons name="chevron-down" className="pt-0.5" size={14} color="#e0e0e0" />
+                  </Pressable>
+                </MotiView>
+              ) : null}
             </View>
           ) : null}
 
@@ -1490,20 +1549,22 @@ export default function ThreadScreen() {
               onChangeText={setComposerText}
               placeholder="Continue this thread..."
               placeholderTextColor="#6f6f6f"
+              keyboardAppearance="dark"
               multiline
               className="max-h-36 flex-1 rounded-full border border-border/10 bg-muted px-4 py-3 text-sm text-foreground"
             />
             <Pressable
-              disabled={sending || (!composerText.trim() && pendingImages.length === 0)}
-              onPress={onSend}
-              className={`min-w-[92px] rounded-full px-4 py-3 ${
-                sending || (!composerText.trim() && pendingImages.length === 0) ? "bg-secondary" : "bg-primary"
+              disabled={isResponding ? stopping : sending || (!composerText.trim() && pendingImages.length === 0)}
+              onPress={isResponding ? onStopResponse : onSend}
+              className={`h-10 w-10 items-center justify-center rounded-full ${
+                isResponding || sending || (!composerText.trim() && pendingImages.length === 0) ? "bg-secondary" : "bg-primary"
               }`}
             >
-              <View className="flex-row items-center justify-center gap-2">
-                <Ionicons name={sending ? "time-outline" : "send"} size={14} color="#d8ffd8" />
-                <Text className="text-center text-sm font-bold text-primary-foreground">{sending ? "..." : "Send"}</Text>
-              </View>
+              <Ionicons
+                name={isResponding ? (stopping ? "time-outline" : "stop-circle-outline") : sending ? "time-outline" : "arrow-up"}
+                size={20}
+                color="#d8ffd8"
+              />
             </Pressable>
           </View>
         </View>

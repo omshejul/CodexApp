@@ -488,7 +488,7 @@ final class GatewayManager: ObservableObject {
   private func appendOutput(_ raw: String) {
     let lines = raw
       .split(whereSeparator: \.isNewline)
-      .map(String.init)
+      .map { sanitizeLogLine(String($0)) }
       .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     guard !lines.isEmpty else { return }
@@ -509,6 +509,24 @@ final class GatewayManager: ObservableObject {
     if outputLines.count > 240 {
       outputLines = Array(outputLines.suffix(240))
     }
+  }
+
+  private func sanitizeLogLine(_ line: String) -> String {
+    var cleaned = line
+
+    // Remove ANSI terminal color/style escapes so logs render cleanly in SwiftUI.
+    if let ansiRegex = try? NSRegularExpression(pattern: #"\u{001B}\[[0-9;]*[A-Za-z]"#, options: []) {
+      let range = NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned)
+      cleaned = ansiRegex.stringByReplacingMatches(in: cleaned, options: [], range: range, withTemplate: "")
+    }
+
+    // Some streams may drop ESC while leaving trailing "[35m" style fragments.
+    if let danglingCodeRegex = try? NSRegularExpression(pattern: #"\[(?:\d{1,3};?)+m"#, options: []) {
+      let range = NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned)
+      cleaned = danglingCodeRegex.stringByReplacingMatches(in: cleaned, options: [], range: range, withTemplate: "")
+    }
+
+    return cleaned.replacingOccurrences(of: "\t", with: "  ")
   }
 
   private func resolveExecutablePath(for command: String, environment: [String: String]) -> String? {

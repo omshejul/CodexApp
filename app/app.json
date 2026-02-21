@@ -6,7 +6,7 @@
     "orientation": "portrait",
     "scheme": "codex-phone",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
     "plugins": [
       "expo-router",
       "expo-secure-store",

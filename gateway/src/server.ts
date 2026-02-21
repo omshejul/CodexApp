@@ -25,6 +25,8 @@ import {
   ThreadCreateRequestSchema,
   ThreadMessageRequestSchema,
   ThreadMessageResponseSchema,
+  ThreadInterruptRequestSchema,
+  ThreadInterruptResponseSchema,
   ThreadNameSetRequestSchema,
   ThreadNameSetResponseSchema,
   ThreadCreateResponseSchema,
@@ -1485,6 +1487,22 @@ async function bootstrap() {
       turnId,
     });
 
+    return reply.send(payload);
+  });
+
+  app.post("/threads/:id/interrupt", { preHandler: [requireAuth] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const parsedBody = ThreadInterruptRequestSchema.safeParse(request.body ?? {});
+    if (!parsedBody.success) {
+      return reply.code(400).send({ error: parsedBody.error.flatten() });
+    }
+
+    await codex.call("turn/interrupt", {
+      threadId: params.id,
+      ...(parsedBody.data.turnId ? { turnId: parsedBody.data.turnId } : {}),
+    });
+
+    const payload = ThreadInterruptResponseSchema.parse({ ok: true });
     return reply.send(payload);
   });
 
