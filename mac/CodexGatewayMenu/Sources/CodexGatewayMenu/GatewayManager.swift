@@ -1,17 +1,34 @@
 import AppKit
 import Foundation
 
+private let tailscaleServiceName = "codex-gateway"
+
 @MainActor
 final class GatewayManager: ObservableObject {
+  struct PairedDevice: Codable, Identifiable {
+    let id: String
+    let deviceId: String
+    let deviceName: String
+    let createdAt: Int64
+    let expiresAt: Int64
+  }
+
+  private struct DevicesResponse: Codable {
+    let devices: [PairedDevice]
+  }
+
   @Published var config: AppConfig = .default
   @Published var isRunning = false
   @Published var isFixingSetup = false
+  @Published var isLoadingDevices = false
   @Published var conflictingPID: Int32?
   @Published var statusMessage = "Idle"
   @Published var outputLines: [String] = []
+  @Published var pairedDevices: [PairedDevice] = []
 
   private var process: Process?
   private var didBootstrap = false
+  private var didConfigureServeRouteThisSession = false
   private var willTerminateObserver: NSObjectProtocol?
 
   init() {
@@ -21,7 +38,7 @@ final class GatewayManager: ObservableObject {
       queue: .main
     ) { [weak self] _ in
       Task { @MainActor in
-        self?.cleanupManagedProcess()
+        self?.performShutdownCleanup()
       }
     }
 
@@ -64,6 +81,7 @@ final class GatewayManager: ObservableObject {
     if config.autoStart {
       Task { await start() }
     }
+    Task { await refreshPairedDevices() }
   }
 
   func start() async {
@@ -73,6 +91,7 @@ final class GatewayManager: ObservableObject {
     ensureCodexBinaryConfigured()
 
     let listenPort = configuredPort()
+    _ = ensureTailscaleServeRoutesToGateway(port: listenPort)
     if let pid = listenerPID(forPort: listenPort) {
       conflictingPID = pid
       statusMessage = "Port \(listenPort) is already in use."
@@ -143,6 +162,7 @@ final class GatewayManager: ObservableObject {
       if let workingDirectory {
         appendOutput("CWD: \(workingDirectory)")
       }
+      Task { await refreshPairedDevices() }
     } catch {
       self.isRunning = false
       self.process = nil
@@ -208,6 +228,8 @@ final class GatewayManager: ObservableObject {
       nextConfig.environment["CODEX_APP_SERVER_BIN"] = codexPath
       appendOutput("Configured Codex CLI path: \(codexPath)")
     }
+
+    _ = ensureTailscaleServeRoutesToGateway(port: port)
 
     let mergedEnv = ProcessInfo.processInfo.environment.merging(nextConfig.environment) { _, new in new }
     guard let nodePath = resolveExecutablePath(for: "node", environment: mergedEnv) else {
@@ -282,10 +304,11 @@ final class GatewayManager: ObservableObject {
     cleanupManagedProcess()
     statusMessage = "Stopping..."
     appendOutput("Stopping gateway process")
+    Task { await refreshPairedDevices() }
   }
 
   func quitApplication() {
-    cleanupManagedProcess()
+    performShutdownCleanup()
     NSApplication.shared.terminate(nil)
   }
 
@@ -314,6 +337,50 @@ final class GatewayManager: ObservableObject {
       return
     }
     NSWorkspace.shared.open(url)
+  }
+
+  func refreshPairedDevices() async {
+    isLoadingDevices = true
+    defer { isLoadingDevices = false }
+
+    guard let url = URL(string: "http://127.0.0.1:\(configuredPort())/devices") else {
+      return
+    }
+
+    do {
+      let (data, response) = try await URLSession.shared.data(from: url)
+      guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+        pairedDevices = []
+        return
+      }
+      let decoded = try JSONDecoder().decode(DevicesResponse.self, from: data)
+      pairedDevices = decoded.devices
+    } catch {
+      pairedDevices = []
+    }
+  }
+
+  func revokeDevice(_ device: PairedDevice) async {
+    guard let url = URL(string: "http://127.0.0.1:\(configuredPort())/devices/\(device.id)/revoke") else {
+      statusMessage = "Invalid revoke URL."
+      return
+    }
+
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+
+    do {
+      let (_, response) = try await URLSession.shared.data(for: request)
+      guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+        statusMessage = "Failed to revoke device."
+        return
+      }
+      statusMessage = "Revoked \(device.deviceName)."
+      appendOutput("Revoked device access: \(device.deviceName) (\(device.deviceId))")
+      await refreshPairedDevices()
+    } catch {
+      statusMessage = "Failed to revoke device."
+    }
   }
 
   func saveConfig(_ newConfig: AppConfig) {
@@ -569,6 +636,55 @@ final class GatewayManager: ObservableObject {
     return nil
   }
 
+  @discardableResult
+  private func ensureTailscaleServeRoutesToGateway(port: Int) -> Bool {
+    let environment = config.environment
+    guard let tailscalePath = resolveExecutablePath(for: "tailscale", environment: environment) else {
+      appendOutput("Tailscale CLI not found; skipping serve route setup.")
+      return false
+    }
+
+    let configureResult = runSync(
+      executablePath: tailscalePath,
+      arguments: ["serve", "--service", tailscaleServiceName, "--bg", "http://127.0.0.1:\(port)"],
+      workingDirectory: nil,
+      environment: environment
+    )
+
+    if configureResult.exitCode == 0 {
+      didConfigureServeRouteThisSession = true
+      appendOutput("Configured Tailscale Serve route to 127.0.0.1:\(port).")
+      return true
+    }
+
+    appendOutput("Failed to configure Tailscale Serve route. Run: tailscale serve --bg http://127.0.0.1:\(port)")
+    if !configureResult.output.isEmpty {
+      appendOutput(configureResult.output)
+    }
+    return false
+  }
+
+  private func disableTailscaleServeIfManagedByApp() {
+    guard didConfigureServeRouteThisSession else { return }
+    let environment = config.environment
+    guard let tailscalePath = resolveExecutablePath(for: "tailscale", environment: environment) else { return }
+
+    let clearResult = runSync(
+      executablePath: tailscalePath,
+      arguments: ["serve", "clear", tailscaleServiceName],
+      workingDirectory: nil,
+      environment: environment
+    )
+
+    if clearResult.exitCode == 0 {
+      appendOutput("Removed Tailscale service route '\(tailscaleServiceName)' configured by this app.")
+    } else if !clearResult.output.isEmpty {
+      appendOutput("Could not clear Tailscale service route '\(tailscaleServiceName)' on quit.")
+      appendOutput(clearResult.output)
+    }
+    didConfigureServeRouteThisSession = false
+  }
+
   private func cleanupManagedProcess() {
     guard let process else { return }
     guard process.isRunning else {
@@ -589,6 +705,11 @@ final class GatewayManager: ObservableObject {
 
     self.process = nil
     self.isRunning = false
+  }
+
+  private func performShutdownCleanup() {
+    cleanupManagedProcess()
+    disableTailscaleServeIfManagedByApp()
   }
 
   private func resolvedWorkingDirectory() -> String? {

@@ -57,6 +57,55 @@ struct StatusMenuView: View {
       }
       .disabled(manager.outputLines.isEmpty)
 
+      Divider()
+      HStack {
+        Text("Paired Devices")
+          .font(.caption)
+          .foregroundStyle(.white.opacity(0.85))
+        Spacer()
+        Button("Refresh") {
+          Task { await manager.refreshPairedDevices() }
+        }
+        .font(.caption)
+        .disabled(manager.isLoadingDevices)
+      }
+
+      if manager.isLoadingDevices {
+        Text("Loading devices...")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+      } else if manager.pairedDevices.isEmpty {
+        Text("No active paired devices.")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+      } else {
+        VStack(alignment: .leading, spacing: 8) {
+          ForEach(manager.pairedDevices.prefix(4)) { device in
+            HStack(alignment: .top, spacing: 8) {
+              VStack(alignment: .leading, spacing: 2) {
+                Text(device.deviceName)
+                  .font(.caption)
+                  .fontWeight(.semibold)
+                Text(device.deviceId)
+                  .font(.caption2)
+                  .foregroundStyle(.secondary)
+                  .lineLimit(1)
+              }
+              Spacer()
+              Button("Revoke") {
+                Task { await manager.revokeDevice(device) }
+              }
+              .font(.caption)
+            }
+            .padding(8)
+            .background(
+              RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.white.opacity(0.06))
+            )
+          }
+        }
+      }
+
       if !manager.outputLines.isEmpty {
         Divider()
         Text("Recent Logs")
