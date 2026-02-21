@@ -15,6 +15,7 @@ import {
   getThreads,
   ReauthRequiredError,
 } from "@/lib/api";
+import { getOrCreateDeviceIdentity } from "@/lib/device";
 
 interface ThreadItem {
   id: string;
@@ -23,6 +24,29 @@ interface ThreadItem {
   updatedAt?: string;
   cwd?: string;
 }
+
+type LoadingStep = "session" | "gateway" | "threads" | "render";
+
+const loadingStepOrder: LoadingStep[] = ["session", "gateway", "threads", "render"];
+
+const loadingStepLabels: Record<LoadingStep, { title: string; detail: string }> = {
+  session: {
+    title: "Checking pairing session",
+    detail: "Reading secure token and server info from this device.",
+  },
+  gateway: {
+    title: "Connecting to gateway",
+    detail: "Opening a secure connection to your paired laptop.",
+  },
+  threads: {
+    title: "Fetching threads",
+    detail: "Requesting your latest thread list from the gateway.",
+  },
+  render: {
+    title: "Preparing UI",
+    detail: "Sorting and rendering your conversations.",
+  },
+};
 
 function formatPathForDisplay(fullPath: string | null): string {
   if (!fullPath) {
@@ -108,12 +132,35 @@ export default function ThreadsScreen() {
   const [currentDirectory, setCurrentDirectory] = useState<string | null>(null);
   const [parentDirectory, setParentDirectory] = useState<string | null>(null);
   const [folders, setFolders] = useState<Array<{ name: string; path: string }>>([]);
+  const [currentDeviceId, setCurrentDeviceId] = useState<string | null>(null);
+  const [loadingStep, setLoadingStep] = useState<LoadingStep>("session");
+  const [loadingSeconds, setLoadingSeconds] = useState(0);
+
+  useEffect(() => {
+    if (!loading) {
+      setLoadingSeconds(0);
+      return;
+    }
+
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      setLoadingSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 250);
+
+    return () => {
+      clearInterval(timer);
+    };
+  }, [loading]);
 
   const loadThreads = useCallback(async () => {
     setError(null);
+    setLoadingStep("session");
     try {
+      setLoadingStep("gateway");
       const response = await getThreads();
+      setLoadingStep("threads");
       setThreads(response.threads);
+      setLoadingStep("render");
     } catch (loadError) {
       if (loadError instanceof ReauthRequiredError) {
         await clearSession();
@@ -210,6 +257,8 @@ export default function ThreadsScreen() {
     setModelCount(0);
     setPairedDevices([]);
     try {
+      const identity = await getOrCreateDeviceIdentity();
+      setCurrentDeviceId(identity.deviceId);
       const serverBaseUrl = await getCurrentServerBaseUrl();
       setPairedServer(serverBaseUrl);
       const [optionsResult, devicesResult] = await Promise.allSettled([getGatewayOptions(), getPairedDevices()]);
@@ -268,6 +317,10 @@ export default function ThreadsScreen() {
     </MotiView>
   );
 
+  const showInitialLoading = loading && !refreshing && threads.length === 0 && !error;
+  const activeStepIndex = loadingStepOrder.indexOf(loadingStep);
+  const isSlowLoad = loadingSeconds >= 8;
+
   return (
     <SafeAreaView className="flex-1 bg-background px-4 pt-2" edges={["top", "left", "right"]}>
       <MotiView
@@ -317,27 +370,69 @@ export default function ThreadsScreen() {
         </MotiView>
       ) : null}
 
-      <FlatList
-        data={threads}
-        keyExtractor={(item) => item.id}
-        renderItem={renderItem}
-        contentContainerStyle={{ paddingBottom: 24 }}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2f7de1" />}
-        ListFooterComponent={
-          loading || refreshing ? (
-            <View className="items-center py-4">
+      {showInitialLoading ? (
+        <MotiView
+          from={{ opacity: 0, translateY: 10 }}
+          animate={{ opacity: 1, translateY: 0 }}
+          transition={{ type: "timing", duration: 260 }}
+        >
+          <View className="rounded-2xl border border-border/50 bg-card p-4">
+            <View className="mb-2 flex-row items-center gap-2">
               <ActivityIndicator size="small" color="#22c55e" />
+              <Text className="text-sm font-semibold text-card-foreground">Loading your threads</Text>
             </View>
-          ) : null
-        }
-        ListEmptyComponent={
-          !loading ? (
-            <View className="rounded-2xl border border-dashed border-border/50 bg-muted p-6">
-              <Text className="text-center text-sm text-muted-foreground">No threads returned by the gateway.</Text>
+            <Text className="mb-3 text-xs text-muted-foreground">Elapsed: {loadingSeconds}s</Text>
+            <View className="gap-3">
+              {loadingStepOrder.map((step, index) => {
+                const isDone = index < activeStepIndex;
+                const isActive = index === activeStepIndex;
+                const iconName = isDone ? "checkmark-circle" : isActive ? "sync-circle" : "ellipse-outline";
+                const iconColor = isDone ? "#22c55e" : isActive ? "#60a5fa" : "#6b7280";
+                return (
+                  <View key={step} className="flex-row items-start gap-2">
+                    <Ionicons name={iconName as "checkmark-circle" | "sync-circle" | "ellipse-outline"} size={16} color={iconColor} />
+                    <View className="flex-1">
+                      <Text className={`text-sm ${isActive || isDone ? "text-card-foreground" : "text-muted-foreground"}`}>
+                        {loadingStepLabels[step].title}
+                      </Text>
+                      <Text className="text-xs text-muted-foreground">{loadingStepLabels[step].detail}</Text>
+                    </View>
+                  </View>
+                );
+              })}
             </View>
-          ) : null
-        }
-      />
+            {isSlowLoad ? (
+              <View className="mt-3 rounded-xl border border-border/50 bg-muted p-3">
+                <Text className="text-xs text-muted-foreground">
+                  Still working. This usually means the gateway is waking up or network is slow.
+                </Text>
+              </View>
+            ) : null}
+          </View>
+        </MotiView>
+      ) : (
+        <FlatList
+          data={threads}
+          keyExtractor={(item) => item.id}
+          renderItem={renderItem}
+          contentContainerStyle={{ paddingBottom: 24 }}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2f7de1" />}
+          ListFooterComponent={
+            loading || refreshing ? (
+              <View className="items-center py-4">
+                <ActivityIndicator size="small" color="#22c55e" />
+              </View>
+            ) : null
+          }
+          ListEmptyComponent={
+            !loading ? (
+              <View className="rounded-2xl border border-dashed border-border/50 bg-muted p-6">
+                <Text className="text-center text-sm text-muted-foreground">No threads returned by the gateway.</Text>
+              </View>
+            ) : null
+          }
+        />
+      )}
 
       <Modal transparent visible={showWorkspacePicker} animationType="fade" onRequestClose={onCancelPicker}>
         <MotiView
@@ -511,17 +606,34 @@ export default function ThreadsScreen() {
               ) : (
                 <View className="mt-1 gap-2">
                   {pairedDevices.slice(0, 4).map((device) => (
-                    <View key={device.id}>
-                      <Text className="text-sm font-semibold text-foreground">{device.deviceName}</Text>
-                      <Text className="text-xs text-muted-foreground" numberOfLines={1} ellipsizeMode="middle">
+                    <View key={device.id} className="rounded-xl bg-muted/50 px-3 py-2.5">
+                      <View className="flex-row items-center justify-between">
+                        <View className="flex-1 flex-row items-center gap-2">
+                          <Text className="text-sm font-semibold text-foreground">{device.deviceName}</Text>
+                          {currentDeviceId === device.deviceId ? (
+                            <View className="rounded-full bg-primary/15 px-1.5 py-0.5">
+                              <Text className="text-[9px] font-bold tracking-wider text-primary">YOU</Text>
+                            </View>
+                          ) : null}
+                        </View>
+                      </View>
+                      <Text className="mt-1 text-[11px] text-muted-foreground" numberOfLines={1} ellipsizeMode="middle">
                         {device.deviceId}
                       </Text>
-                      <Text className="text-xs text-muted-foreground">
-                        Added {new Date(device.createdAt).toLocaleString()}
-                      </Text>
-                      <Text className="text-xs text-muted-foreground">
-                        Expires {device.expiresAt >= 253402300799000 ? "Never" : new Date(device.expiresAt).toLocaleString()}
-                      </Text>
+                      <View className="mt-2 flex-row items-center gap-4">
+                        <View className="gap-0.5">
+                          <Text className="text-[10px] uppercase tracking-wider text-muted-foreground/60">Added</Text>
+                          <Text className="text-[11px] font-medium text-muted-foreground">
+                            {new Date(device.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
+                          </Text>
+                        </View>
+                        <View className="gap-0.5">
+                          <Text className="text-[10px] uppercase tracking-wider text-muted-foreground/60">Expires</Text>
+                          <Text className="text-[11px] font-medium text-muted-foreground">
+                            {device.expiresAt >= 253402300799000 ? "Never" : new Date(device.expiresAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
+                          </Text>
+                        </View>
+                      </View>
                     </View>
                   ))}
                 </View>
