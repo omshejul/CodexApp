@@ -14,90 +14,124 @@ struct StatusMenuView: View {
     let build = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "?"
     return "Version \(shortVersion) (\(build))"
   }
+  private var pairedDevicesTitleText: String {
+    let deviceCount = manager.pairedDevices.count
+    let suffix = deviceCount == 1 ? "1 device" : "\(deviceCount) devices"
+    return "Paired Devices (\(suffix))"
+  }
 
   var body: some View {
-    ScrollView(.vertical) {
-      VStack(alignment: .leading, spacing: 10) {
+    VStack(alignment: .leading, spacing: 10) {
+      HStack {
         HStack {
-          HStack {
-            Circle()
-              .fill(manager.isRunning ? .green : .orange)
-              .frame(width: 10, height: 10)
-            Text(manager.isRunning ? "Gateway Running" : "Gateway Stopped")
-              .fontWeight(.semibold)
-          }
-          Spacer()
-          Button("Quit") {
-            manager.quitApplication()
-          }
+          Circle()
+            .fill(manager.isRunning ? .green : .orange)
+            .frame(width: 10, height: 10)
+          Text(manager.isRunning ? "Gateway Running" : "Gateway Stopped")
+            .fontWeight(.semibold)
         }
-
-        if !(manager.needsFullDiskAccess && manager.statusMessage == "Full Disk Access required") {
-          Text(manager.statusMessage)
-            .font(.caption)
-            .foregroundStyle(.secondary)
+        Spacer()
+        Button {
+          manager.quitApplication()
+        } label: {
+          Label("Quit", systemImage: "power")
         }
+      }
 
-        if manager.needsFullDiskAccess {
-          VStack(alignment: .leading, spacing: 6) {
-            Text("Full Disk Access is required for this app.")
-              .font(.caption2)
-              .foregroundStyle(.secondary)
-            Button("Grant Full Disk Access") {
-              manager.openFullDiskAccessSettings()
-            }
-            .font(.caption)
-          }
-        }
+      if !(manager.needsFullDiskAccess && manager.statusMessage == "Full Disk Access required") {
+        Text(manager.statusMessage)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
 
-        if manager.statusMessage != "Running" && manager.statusMessage != "Ready" {
-          Text("Click Start to verify Codex CLI, Tailscale auth, and route configuration.")
+      if manager.needsFullDiskAccess {
+        VStack(alignment: .leading, spacing: 6) {
+          Text("Full Disk Access is required for this app.")
             .font(.caption2)
             .foregroundStyle(.secondary)
+          Button("Grant Full Disk Access") {
+            manager.openFullDiskAccessSettings()
+          }
+          .font(.caption)
+        }
+      }
+
+      if manager.statusMessage != "Running" && manager.statusMessage != "Ready" {
+        Text("Click Start to verify Codex CLI, Tailscale auth, and route configuration.")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+      }
+
+      Divider()
+
+      VStack(spacing: 8) {
+        HStack(spacing: 8) {
+          Button {
+            Task { await manager.start() }
+          } label: {
+            Label("Start", systemImage: "play.fill")
+              .frame(maxWidth: .infinity, alignment: .center)
+          }
+          .disabled(manager.needsFullDiskAccess || manager.isRunning || manager.isFixingSetup || manager.isStarting)
+
+          Button {
+            manager.stop()
+          } label: {
+            Label("Stop", systemImage: "stop.fill")
+              .frame(maxWidth: .infinity, alignment: .center)
+          }
+          .disabled(!manager.isRunning || manager.isFixingSetup || manager.isStarting)
         }
 
-        Divider()
-
         HStack(spacing: 8) {
-          Button("Start") {
-            Task { await manager.start() }
+          Button {
+            manager.openPairPage()
+          } label: {
+            Label("Open Pair Page", systemImage: "link")
+              .frame(maxWidth: .infinity, alignment: .center)
           }
-          .disabled(manager.needsFullDiskAccess || manager.isRunning || manager.isFixingSetup)
+          .disabled(manager.needsFullDiskAccess)
 
-          Button("Stop") {
-            manager.stop()
+          Button {
+            NSApp.activate(ignoringOtherApps: true)
+            onOpenSettings()
+          } label: {
+            Label("Settings", systemImage: "gearshape.fill")
+              .frame(maxWidth: .infinity, alignment: .center)
           }
-          .disabled(!manager.isRunning || manager.isFixingSetup)
+
+          Button {
+            openHelpEmail()
+          } label: {
+            Label("Help", systemImage: "questionmark.circle.fill")
+              .frame(maxWidth: .infinity, alignment: .center)
+          }
         }
 
         if let pid = manager.conflictingPID, !manager.isRunning {
-          Button("Stop Other Process (PID \(pid))") {
+          Button {
             manager.stopConflictingProcess()
+          } label: {
+            Label("Stop Other Process (PID \(pid))", systemImage: "exclamationmark.triangle.fill")
+              .frame(maxWidth: .infinity, alignment: .center)
           }
         }
+      }
 
-        Button("Open Pair Page") {
-          manager.openPairPage()
-        }
-        .disabled(manager.needsFullDiskAccess)
-
-        Button("Settings") {
-          NSApp.activate(ignoringOtherApps: true)
-          onOpenSettings()
-        }
-
-        Button("Help") {
-          openHelpEmail()
-        }
-
-        Divider()
-        HStack {
-          Text("Paired Devices")
+      Divider()
+      HStack {
+        Label {
+          Text(pairedDevicesTitleText)
             .font(.caption)
-            .foregroundStyle(.white.opacity(0.85))
+        } icon: {
+          Image(systemName: "desktopcomputer.and.iphone")
+        }
+        .foregroundStyle(.white.opacity(0.85))
           Spacer()
-          Button("Refresh") {
+          Button {
             Task { await manager.refreshPairedDevices() }
+          } label: {
+            Label("Refresh", systemImage: "arrow.clockwise")
           }
           .font(.caption)
           .disabled(manager.isLoadingDevices)
@@ -112,49 +146,65 @@ struct StatusMenuView: View {
             .font(.caption2)
             .foregroundStyle(.secondary)
         } else {
-          VStack(alignment: .leading, spacing: 8) {
-            ForEach(manager.pairedDevices.prefix(4)) { device in
-              HStack(alignment: .top, spacing: 8) {
-                VStack(alignment: .leading, spacing: 2) {
-                  Text(device.deviceName)
+          ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+              ForEach(manager.pairedDevices) { device in
+                HStack(alignment: .top, spacing: 8) {
+                  Image(systemName: "iphone.gen3")
                     .font(.caption)
-                    .fontWeight(.semibold)
-                  Text(device.deviceId)
-                    .font(.caption2)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                  Text("Added \(formatAddedDate(device.createdAt))")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .padding(.top, 2)
+                  VStack(alignment: .leading, spacing: 2) {
+                    Text(device.deviceName)
+                      .font(.caption)
+                      .fontWeight(.semibold)
+                    Text(device.deviceId)
+                      .font(.caption2)
+                      .foregroundStyle(.secondary)
+                      .lineLimit(1)
+                    Text("Added \(formatAddedDate(device.createdAt))")
+                      .font(.caption2)
+                      .foregroundStyle(.secondary)
+                  }
+                  Spacer()
+                  Button {
+                    Task { await manager.revokeDevice(device) }
+                  } label: {
+                    Label("Revoke", systemImage: "xmark.bin.fill")
+                  }
+                  .font(.caption)
                 }
-                Spacer()
-                Button("Revoke") {
-                  Task { await manager.revokeDevice(device) }
-                }
-                .font(.caption)
+                .padding(8)
+                .background(
+                  RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.white.opacity(0.06))
+                )
               }
-              .padding(8)
-              .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                  .fill(Color.white.opacity(0.06))
-              )
             }
           }
+          .scrollIndicators(.never)
+          .frame(maxHeight: 260)
         }
 
         if !manager.outputLines.isEmpty {
           Divider()
           HStack {
-            Text("Recent Logs")
-              .font(.caption)
-              .foregroundStyle(.white.opacity(0.85))
+            Label {
+              Text("Recent Logs")
+                .font(.caption)
+            } icon: {
+              Image(systemName: "doc.text.magnifyingglass")
+            }
+            .foregroundStyle(.white.opacity(0.85))
             Spacer()
-            Button("Copy Logs") {
+            Button {
               manager.copyLogsToClipboard()
+            } label: {
+              Label("Copy Logs", systemImage: "doc.on.doc")
             }
             .font(.caption)
-            .disabled(manager.outputLines.isEmpty)
-            Text("\(manager.outputLines.count) lines")
+            .disabled(manager.recentLogsLineCount == 0)
+            Text("\(manager.recentLogsLineCount) lines")
               .font(.caption2)
               .foregroundStyle(.secondary)
           }
@@ -168,6 +218,7 @@ struct StatusMenuView: View {
               .padding(.horizontal, 10)
               .padding(.vertical, 8)
           }
+          .scrollIndicators(.never)
           .frame(minHeight: 120, maxHeight: 220)
           .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -185,16 +236,15 @@ struct StatusMenuView: View {
           )
         }
 
-        Divider()
-        Text(appVersionText)
-          .font(.caption2)
-          .foregroundStyle(.secondary)
+      Divider()
+      Text(appVersionText)
+        .font(.caption2)
+        .foregroundStyle(.secondary)
 
-      }
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .padding(12)
     }
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(12)
+    .frame(maxWidth: .infinity)
     .onAppear {
       manager.refreshFullDiskAccessStatus()
     }
