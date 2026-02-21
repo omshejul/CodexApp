@@ -18,9 +18,10 @@ import { useLocalSearchParams } from "expo-router";
 import { router } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
+import * as Clipboard from "expo-clipboard";
 import { AnimatePresence, MotiView } from "moti";
 import { Ionicons } from "@expo/vector-icons";
-import Markdown from "react-native-markdown-display";
+import Markdown, { RenderRules } from "react-native-markdown-display";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   ReauthRequiredError,
@@ -92,7 +93,7 @@ const markdownStyles = {
   ordered_list_content: { flex: 1, flexShrink: 1 },
   bullet_list_content: { flex: 1, flexShrink: 1 },
   code_inline: {
-    backgroundColor: "#1f293b",
+    backgroundColor: "#333333",
     color: "#d4e6ff",
     borderRadius: 6,
     paddingHorizontal: 6,
@@ -143,7 +144,7 @@ const userMarkdownStyles = {
   heading2: { color: "#ffffff", fontSize: 19, marginTop: 8, marginBottom: 6, fontFamily: SYSTEM_FONT },
   heading3: { color: "#ffffff", fontSize: 17, marginTop: 6, marginBottom: 4, fontFamily: SYSTEM_FONT },
   code_inline: {
-    backgroundColor: "#2a6bc0",
+    backgroundColor: "#333333",
     color: "#eff7ff",
     borderRadius: 6,
     paddingHorizontal: 6,
@@ -169,6 +170,83 @@ const userMarkdownStyles = {
     fontFamily: SYSTEM_FONT,
   },
   link: { color: "#d6ebff" },
+};
+
+const selectableMarkdownRules: RenderRules = {
+  text: (node, _children, _parent, styles, inheritedStyles = {}) => (
+    <Text key={node.key} selectable style={[inheritedStyles, styles.text]}>
+      {node.content}
+    </Text>
+  ),
+  textgroup: (node, children, _parent, styles) => (
+    <Text key={node.key} selectable style={styles.textgroup}>
+      {children}
+    </Text>
+  ),
+  strong: (node, children, _parent, styles) => (
+    <Text key={node.key} selectable style={styles.strong}>
+      {children}
+    </Text>
+  ),
+  em: (node, children, _parent, styles) => (
+    <Text key={node.key} selectable style={styles.em}>
+      {children}
+    </Text>
+  ),
+  s: (node, children, _parent, styles) => (
+    <Text key={node.key} selectable style={styles.s}>
+      {children}
+    </Text>
+  ),
+  code_inline: (node, _children, _parent, styles, inheritedStyles = {}) => (
+    <Text key={node.key} selectable style={[inheritedStyles, styles.code_inline]}>
+      {node.content}
+    </Text>
+  ),
+  code_block: (node, _children, _parent, styles, inheritedStyles = {}) => {
+    let { content } = node;
+    if (typeof node.content === "string" && node.content.charAt(node.content.length - 1) === "\n") {
+      content = node.content.substring(0, node.content.length - 1);
+    }
+
+    return (
+      <Text key={node.key} selectable style={[inheritedStyles, styles.code_block]}>
+        {content}
+      </Text>
+    );
+  },
+  fence: (node, _children, _parent, styles, inheritedStyles = {}) => {
+    let { content } = node;
+    if (typeof node.content === "string" && node.content.charAt(node.content.length - 1) === "\n") {
+      content = node.content.substring(0, node.content.length - 1);
+    }
+
+    return (
+      <Text key={node.key} selectable style={[inheritedStyles, styles.fence]}>
+        {content}
+      </Text>
+    );
+  },
+  hardbreak: (node, _children, _parent, styles) => (
+    <Text key={node.key} selectable style={styles.hardbreak}>
+      {"\n"}
+    </Text>
+  ),
+  softbreak: (node, _children, _parent, styles) => (
+    <Text key={node.key} selectable style={styles.softbreak}>
+      {"\n"}
+    </Text>
+  ),
+  inline: (node, children, _parent, styles) => (
+    <Text key={node.key} selectable style={styles.inline}>
+      {children}
+    </Text>
+  ),
+  span: (node, children, _parent, styles) => (
+    <Text key={node.key} selectable style={styles.span}>
+      {children}
+    </Text>
+  ),
 };
 
 function parseSsePayload(raw: string): CodexSseEvent | null {
@@ -1105,6 +1183,7 @@ export default function ThreadScreen() {
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
   const [headerTitle, setHeaderTitle] = useState("Chat");
   const [headerPath, setHeaderPath] = useState<string | null>(null);
+  const [lastCopiedTurnId, setLastCopiedTurnId] = useState<string | null>(null);
 
   const streamSocketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1875,6 +1954,22 @@ export default function ThreadScreen() {
     keepToBottom(true);
   };
 
+  const copyTurnText = useCallback(async (turnId: string, text?: string) => {
+    if (!text) {
+      return;
+    }
+
+    try {
+      await Clipboard.setStringAsync(text);
+      setLastCopiedTurnId(turnId);
+      setTimeout(() => {
+        setLastCopiedTurnId((existing) => (existing === turnId ? null : existing));
+      }, 1200);
+    } catch {
+      // no-op: copy action should never break turn rendering.
+    }
+  }, []);
+
   const onSend = async () => {
     if (!threadId || sending) {
       return;
@@ -2117,6 +2212,38 @@ export default function ThreadScreen() {
       : []),
   ];
 
+  const copyGroupKeyForTurn = useCallback((turn: RenderedTurn) => `${turn.role}:${turn.turnId ?? turn.id}`, []);
+
+  const copyGroups = useMemo(() => {
+    const lastIndexByKey = new Map<string, number>();
+    const textPartsByKey = new Map<string, string[]>();
+
+    allTurns.forEach((turn, idx) => {
+      if (turn.role !== "user" && turn.role !== "assistant") {
+        return;
+      }
+
+      const groupKey = copyGroupKeyForTurn(turn);
+      lastIndexByKey.set(groupKey, idx);
+
+      const normalized = turn.text.trim();
+      if (!normalized) {
+        return;
+      }
+
+      const existing = textPartsByKey.get(groupKey) ?? [];
+      existing.push(normalized);
+      textPartsByKey.set(groupKey, existing);
+    });
+
+    const textByKey = new Map<string, string>();
+    textPartsByKey.forEach((parts, key) => {
+      textByKey.set(key, parts.join("\n\n"));
+    });
+
+    return { lastIndexByKey, textByKey };
+  }, [allTurns, copyGroupKeyForTurn]);
+
   const resolveWebSearchFallback = useCallback(
     (turnIndex: number): string | null => {
       for (let index = turnIndex - 1; index >= 0; index -= 1) {
@@ -2143,7 +2270,7 @@ export default function ThreadScreen() {
       >
       <View className="flex-1 bg-background px-4 pt-1">
       <View className="-mx-4 mb-3 border-b border-border/50 pb-2 px-4">
-      <View className="relative h-11 justify-center">
+      <View className="relative h-12 justify-center">
           <View className="absolute bottom-0 left-0 top-0 z-10 justify-center">
             <Pressable
               onPress={() => router.back()}
@@ -2159,11 +2286,11 @@ export default function ThreadScreen() {
                 {headerTitle}
               </Text>
               <MotiView
-                animate={{ opacity: headerPath ? 1 : 0, translateY: headerPath ? 0 : -4, height: headerPath ? 14 : 0 }}
+                animate={{ opacity: headerPath ? 1 : 0, translateY: headerPath ? 0 : -4, height: headerPath ? 16 : 0 }}
                 transition={{ type: "timing", duration: 220 }}
                 style={{ overflow: "hidden", width: "100%", alignItems: "center" }}
               >
-                <Text className="mt-0.5 text-[11px] text-muted-foreground" numberOfLines={1}>
+                <Text className="text-[11px] leading-[14px] text-muted-foreground" numberOfLines={1}>
                   {headerPath ?? ""}
                 </Text>
               </MotiView>
@@ -2378,25 +2505,64 @@ export default function ThreadScreen() {
                 })()
               ) : (
               item.role === "user" ? (
-                <View className="max-w-[86%] rounded-2xl border border-border/10 bg-neutral-500/40 px-4 py-2 mt-3">
-                  {item.text ? <Text className="text-base leading-6 text-white">{item.text}</Text> : null}
-                  {item.images?.length ? (
-                    <View className={item.text ? "mt-2" : ""}>
-                      {item.images.map((uri, imageIndex) => (
-                        <Pressable key={`${item.id}-user-image-${imageIndex}`} onPress={() => setPreviewImageUri(uri)}>
-                          <Image
-                            source={{ uri }}
-                            resizeMode="contain"
-                            className="mb-2 h-48 w-64 rounded-xl bg-black/25"
+                <View className="mt-3 max-w-[86%]">
+                  <View className="rounded-2xl border border-border/10 bg-neutral-500/40 px-4 py-2">
+                    {item.text ? (
+                      <Text selectable className="text-base leading-6 text-white">
+                        {item.text}
+                      </Text>
+                    ) : null}
+                    {item.images?.length ? (
+                      <View className={item.text ? "mt-2" : ""}>
+                        {item.images.map((uri, imageIndex) => (
+                          <Pressable key={`${item.id}-user-image-${imageIndex}`} onPress={() => setPreviewImageUri(uri)}>
+                            <Image
+                              source={{ uri }}
+                              resizeMode="contain"
+                              className="mb-2 h-48 w-64 rounded-xl bg-black/25"
+                            />
+                          </Pressable>
+                        ))}
+                      </View>
+                    ) : null}
+                  </View>
+                  {(() => {
+                    const copyKey = copyGroupKeyForTurn(item);
+                    const isLastSection = copyGroups.lastIndexByKey.get(copyKey) === index;
+                    const copyText = copyGroups.textByKey.get(copyKey);
+                    if (!isLastSection) {
+                      return null;
+                    }
+
+                    return (
+                      <View className="mt-1 flex-row justify-end">
+                        <Pressable
+                          onPress={() => copyTurnText(copyKey, copyText)}
+                          disabled={!copyText}
+                          className={`flex-row items-center gap-1 rounded-full px-2.5 py-1 ${
+                            copyText ? "bg-black/20" : "bg-black/10"
+                          }`}
+                        >
+                          <Ionicons
+                            name={lastCopiedTurnId === copyKey ? "checkmark" : "copy-outline"}
+                            size={12}
+                            color={copyText ? "#dbeafe" : "#6b7280"}
                           />
+                          <Text className={`text-xs ${copyText ? "text-blue-100" : "text-gray-500"}`}>
+                            {lastCopiedTurnId === copyKey ? "Copied" : "Copy"}
+                          </Text>
                         </Pressable>
-                      ))}
-                    </View>
-                  ) : null}
+                      </View>
+                    );
+                  })()}
                 </View>
               ) : (
                 <View className="w-full px-1 py-1">
-                  {item.text ? <Markdown style={markdownStyles}>{item.text}</Markdown> : null}
+                  {item.text ? (
+                    <Markdown style={markdownStyles} rules={selectableMarkdownRules}>
+                      {item.text}
+                    </Markdown>
+                  ) : null}
                   {item.images?.length ? (
                     <View className={item.text ? "mt-1" : ""}>
                       {item.images.map((uri, imageIndex) => (
@@ -2410,6 +2576,35 @@ export default function ThreadScreen() {
                       ))}
                     </View>
                   ) : null}
+                  {(() => {
+                    const copyKey = copyGroupKeyForTurn(item);
+                    const isLastSection = copyGroups.lastIndexByKey.get(copyKey) === index;
+                    const copyText = copyGroups.textByKey.get(copyKey);
+                    if (!isLastSection) {
+                      return null;
+                    }
+
+                    return (
+                      <View className="mt-1 flex-row">
+                        <Pressable
+                          onPress={() => copyTurnText(copyKey, copyText)}
+                          disabled={!copyText}
+                          className={`flex-row items-center gap-1 rounded-full px-2.5 py-1 ${
+                            copyText ? "bg-black/20" : "bg-black/10"
+                          }`}
+                        >
+                          <Ionicons
+                            name={lastCopiedTurnId === copyKey ? "checkmark" : "copy-outline"}
+                            size={12}
+                            color={copyText ? "#cbd5e1" : "#6b7280"}
+                          />
+                          <Text className={`text-xs ${copyText ? "text-slate-300" : "text-gray-500"}`}>
+                            {lastCopiedTurnId === copyKey ? "Copied" : "Copy"}
+                          </Text>
+                        </Pressable>
+                      </View>
+                    );
+                  })()}
                 </View>
               )
               )

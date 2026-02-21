@@ -26,6 +26,7 @@
     },
     "android": {
       "package": "com.codex.phone",
+      "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
         "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#0f172a"
