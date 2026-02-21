@@ -1157,7 +1157,7 @@ export default function ThreadScreen() {
             </Pressable>
           </View>
           <View className="flex-1 items-center">
-            <Text className="text-3xl font-semibold text-foreground">Chat</Text>
+            <Text className="text-2 xl font-semibold text-foreground">Chat</Text>
           </View>
           <View className="w-28 items-end">
             <View className="flex-row items-center rounded-full border border-border/10 bg-card px-3 py-1.5">
@@ -1341,7 +1341,9 @@ export default function ThreadScreen() {
                 <Text className="text-sm font-semibold text-foreground">
                   {modelOptions.find((option) => option.value === resolvedSelectedModel)?.label}
                 </Text>
-                <Text className="text-sm font-semibold text-emerald-300">^</Text>
+                <View className="w-4 items-center justify-center">
+                  <Ionicons name="chevron-up" size={14} color="#86efac" />
+                </View>
               </Pressable>
               <Pressable
                 onPress={() => setOpenDropdown("reasoning")}
@@ -1350,7 +1352,9 @@ export default function ThreadScreen() {
                 <Text className="text-sm font-semibold text-foreground">
                   {currentReasoningOptions.find((option) => option.value === resolvedSelectedReasoning)?.label}
                 </Text>
-                <Text className="text-sm font-semibold text-emerald-300">^</Text>
+                <View className="w-4 items-center justify-center">
+                  <Ionicons name="chevron-up" size={14} color="#86efac" />
+                </View>
               </Pressable>
             </View>
           ) : null}
@@ -1387,7 +1391,11 @@ export default function ThreadScreen() {
         animationType="fade"
         onRequestClose={() => setOpenDropdown(null)}
       >
-        <Pressable className="flex-1 bg-background/80 px-4 pt-24" onPress={() => setOpenDropdown(null)}>
+        <Pressable
+          className="flex-1 justify-end bg-background/80 px-4"
+          style={{ paddingBottom: Math.max(insets.bottom, 8) + 96 }}
+          onPress={() => setOpenDropdown(null)}
+        >
           <Pressable
             className="rounded-xl border border-border/10 bg-muted p-2"
             onPress={(event) => {
@@ -1400,7 +1408,7 @@ export default function ThreadScreen() {
               return (
                 <Pressable
                   key={`${openDropdown}-${option.label}`}
-                  className={`rounded-lg px-3 py-3 ${active ? "bg-primary/30" : "bg-transparent"}`}
+                  className={`rounded-lg px-3 py-3 ${active ? "bg-card" : "bg-transparent"}`}
                   onPress={() => {
                     if (isModel) {
                       setSelectedModel(option.value as string);

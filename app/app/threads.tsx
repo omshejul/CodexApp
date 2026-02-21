@@ -246,39 +246,51 @@ export default function ThreadsScreen() {
 
   return (
     <SafeAreaView className="flex-1 bg-background px-4 pt-2" edges={["top", "left", "right"]}>
-      <View className="mb-4 flex-row items-center justify-between">
-        <Text className="text-3xl font-semibold text-foreground">Threads</Text>
-        <View className="flex-row gap-2">
-          <Pressable
-            className="h-10 w-10 items-center justify-center rounded-lg border border-border/50 bg-primary"
-            onPress={openWorkspacePicker}
-            disabled={creating}
-            accessibilityRole="button"
-            accessibilityLabel={creating ? "Creating new chat" : "New chat"}
-          >
-            {creating ? (
-              <ActivityIndicator size="small" color="#ffffff" />
-            ) : (
-              <Ionicons name="add" size={22} color="#ffffff" />
-            )}
-          </Pressable>
-          <Pressable
-            className="h-10 w-10 items-center justify-center rounded-lg border border-border/50 bg-muted"
-            onPress={() => {
-              openSettingsMenu().catch(() => undefined);
-            }}
-            accessibilityRole="button"
-            accessibilityLabel="Settings"
-          >
-            <Ionicons name="settings-outline" size={18} color="#e5e7eb" />
-          </Pressable>
+      <MotiView
+        from={{ opacity: 0, translateY: -10 }}
+        animate={{ opacity: 1, translateY: 0 }}
+        transition={{ type: "timing", duration: 280 }}
+      >
+        <View className="mb-4 flex-row items-center justify-between">
+          <Text className="text-3xl font-semibold text-foreground">Threads</Text>
+          <View className="flex-row gap-2">
+            <Pressable
+              className="h-10 w-10 items-center justify-center rounded-full border border-border/50 bg-primary"
+              onPress={openWorkspacePicker}
+              disabled={creating}
+              accessibilityRole="button"
+              accessibilityLabel={creating ? "Creating new chat" : "New chat"}
+            >
+              {creating ? (
+                <ActivityIndicator size="small" color="#ffffff" />
+              ) : (
+                <Ionicons name="add" size={22} color="#ffffff" />
+              )}
+            </Pressable>
+            <Pressable
+              className="h-10 w-10 items-center justify-center rounded-full border border-border/50 bg-muted"
+              onPress={() => {
+                openSettingsMenu().catch(() => undefined);
+              }}
+              accessibilityRole="button"
+              accessibilityLabel="Settings"
+            >
+              <Ionicons name="settings-outline" size={18} color="#e5e7eb" />
+            </Pressable>
+          </View>
         </View>
-      </View>
+      </MotiView>
 
       {error ? (
-        <View className="mb-4 rounded-xl border border-border/50 bg-destructive/15 p-3">
-          <Text className="text-sm text-destructive-foreground">{error}</Text>
-        </View>
+        <MotiView
+          from={{ opacity: 0, translateY: -8 }}
+          animate={{ opacity: 1, translateY: 0 }}
+          transition={{ type: "timing", duration: 220 }}
+        >
+          <View className="mb-4 rounded-xl border border-border/50 bg-destructive/15 p-3">
+            <Text className="text-sm text-destructive-foreground">{error}</Text>
+          </View>
+        </MotiView>
       ) : null}
 
       <FlatList
@@ -304,13 +316,25 @@ export default function ThreadsScreen() {
       />
 
       <Modal transparent visible={showWorkspacePicker} animationType="fade" onRequestClose={onCancelPicker}>
-        <Pressable className="flex-1 items-center justify-center bg-background/80 px-4" onPress={onCancelPicker}>
-          <Pressable
-            className="w-full rounded-2xl border border-border/50 bg-card p-4"
-            onPress={(event) => {
-              event.stopPropagation();
-            }}
-          >
+        <MotiView
+          className="flex-1"
+          from={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ type: "timing", duration: 220 }}
+        >
+          <Pressable className="flex-1 items-center justify-center bg-background/80 px-4" onPress={onCancelPicker}>
+            <MotiView
+              className="w-full"
+              from={{ opacity: 0, scale: 0.96, translateY: 14 }}
+              animate={{ opacity: 1, scale: 1, translateY: 0 }}
+              transition={{ type: "timing", duration: 260 }}
+            >
+              <Pressable
+                className="w-full rounded-2xl border border-border/50 bg-card p-4"
+                onPress={(event) => {
+                  event.stopPropagation();
+                }}
+              >
             <View className="flex-row items-center gap-2">
               <Ionicons name="folder-open-outline" size={18} color="#e5e7eb" />
               <Text className="text-lg font-semibold text-card-foreground">Choose folder</Text>
@@ -379,27 +403,29 @@ export default function ThreadsScreen() {
               )}
             </View>
 
-            <View className="mt-4 flex-row gap-2">
-              <Pressable
-                className="flex-1 rounded-xl border border-border/50 bg-muted px-3 py-3"
-                onPress={onCancelPicker}
-              >
-                <Text className="text-center text-sm font-semibold text-foreground">Cancel</Text>
+                <View className="mt-4 flex-row gap-2">
+                  <Pressable
+                    className="flex-1 rounded-xl border border-border/50 bg-muted px-3 py-3"
+                    onPress={onCancelPicker}
+                  >
+                    <Text className="text-center text-sm font-semibold text-foreground">Cancel</Text>
+                  </Pressable>
+                  <Pressable
+                    className="flex-1 rounded-xl border border-border/50 bg-primary px-3 py-3"
+                    onPress={() => {
+                      if (currentDirectory) {
+                        onCreateThread(currentDirectory).catch(() => undefined);
+                      }
+                    }}
+                    disabled={creating || !currentDirectory}
+                  >
+                    <Text className="text-center text-sm font-semibold text-primary-foreground">{creating ? "Creating..." : "Open Directory"}</Text>
+                  </Pressable>
+                </View>
               </Pressable>
-              <Pressable
-                className="flex-1 rounded-xl border border-border/50 bg-primary px-3 py-3"
-                onPress={() => {
-                  if (currentDirectory) {
-                    onCreateThread(currentDirectory).catch(() => undefined);
-                  }
-                }}
-                disabled={creating || !currentDirectory}
-              >
-                <Text className="text-center text-sm font-semibold text-primary-foreground">{creating ? "Creating..." : "Open Directory"}</Text>
-              </Pressable>
-            </View>
+            </MotiView>
           </Pressable>
-        </Pressable>
+        </MotiView>
       </Modal>
 
       <Modal
@@ -410,18 +436,30 @@ export default function ThreadsScreen() {
           setShowSettingsMenu(false);
         }}
       >
-        <Pressable
-          className="flex-1 items-center justify-center bg-background/80 px-4"
-          onPress={() => {
-            setShowSettingsMenu(false);
-          }}
+        <MotiView
+          className="flex-1"
+          from={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ type: "timing", duration: 220 }}
         >
           <Pressable
-            className="w-full rounded-2xl border border-border/50 bg-card p-4"
-            onPress={(event) => {
-              event.stopPropagation();
+            className="flex-1 items-center justify-center bg-background/80 px-4"
+            onPress={() => {
+              setShowSettingsMenu(false);
             }}
           >
+            <MotiView
+              className="w-full"
+              from={{ opacity: 0, scale: 0.96, translateY: 14 }}
+              animate={{ opacity: 1, scale: 1, translateY: 0 }}
+              transition={{ type: "timing", duration: 260 }}
+            >
+              <Pressable
+                className="w-full rounded-2xl border border-border/50 bg-card p-4"
+                onPress={(event) => {
+                  event.stopPropagation();
+                }}
+              >
             <Text className="text-lg font-semibold text-card-foreground">Settings</Text>
             <Text className="mt-1 text-xs text-muted-foreground">User info and pairing.</Text>
 
@@ -454,18 +492,23 @@ export default function ThreadsScreen() {
               </View>
             ) : null}
 
-            <Pressable
-              className="mt-3 rounded-xl border border-border/50 bg-muted px-3 py-3"
-              onPress={async () => {
-                setShowSettingsMenu(false);
-                await clearSession();
-                router.replace("/pair");
-              }}
-            >
-              <Text className="text-sm font-semibold text-foreground">Re-pair</Text>
-            </Pressable>
+                <Pressable
+                  className="mt-3 rounded-xl border border-border/50 bg-muted px-3 py-3"
+                  onPress={async () => {
+                    setShowSettingsMenu(false);
+                    await clearSession();
+                    router.replace("/pair");
+                  }}
+                >
+                  <View className="flex-row items-center justify-center gap-2">
+                    <Ionicons name="link-outline" size={16} color="#e5e7eb" />
+                    <Text className="text-sm font-semibold text-foreground">Re-Pair Device</Text>
+                  </View>
+                </Pressable>
+              </Pressable>
+            </MotiView>
           </Pressable>
-        </Pressable>
+        </MotiView>
       </Modal>
     </SafeAreaView>
   );
