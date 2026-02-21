@@ -8,8 +8,10 @@ final class StatusItemController: NSObject {
   private let popover = NSPopover()
   private let manager: GatewayManager
   private let menuIcon: NSImage?
-  private let minPopoverSize = NSSize(width: 360, height: 460)
-  private let preferredPopoverSize = NSSize(width: 520, height: 760)
+  private let minPopoverWidth: CGFloat = 360
+  private let preferredPopoverWidth: CGFloat = 520
+  private let minPopoverHeight: CGFloat = 240
+  private let maxPopoverHeight: CGFloat = 760
   private var statusCancellable: AnyCancellable?
 
   init(manager: GatewayManager, menuIcon: NSImage?, onOpenSettings: @escaping () -> Void) {
@@ -19,7 +21,7 @@ final class StatusItemController: NSObject {
 
     popover.behavior = .transient
     popover.animates = true
-    updatePopoverSize(for: nil)
+    popover.contentSize = NSSize(width: preferredPopoverWidth, height: 420)
     popover.contentViewController = NSHostingController(rootView: StatusMenuView(manager: manager, onOpenSettings: onOpenSettings))
 
     guard let button = statusItem.button else { return }
@@ -36,51 +38,96 @@ final class StatusItemController: NSObject {
   }
 
   @objc private func togglePopover(_ sender: Any?) {
-    guard let button = statusItem.button else { return }
+    guard statusItem.button != nil else { return }
     if popover.isShown {
       popover.performClose(sender)
       return
     }
-    updatePopoverSize(for: button.window?.screen)
+    showPopover()
+  }
+
+  func showPopover() {
+    guard let button = statusItem.button else { return }
+    updatePopoverSize(for: button.window?.screen, relativeTo: button)
     NSApp.activate(ignoringOtherApps: true)
     popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
     popover.contentViewController?.view.window?.makeKey()
     Task { await manager.refreshPairedDevices() }
   }
 
-  private func updatePopoverSize(for screen: NSScreen?) {
-    guard let visibleFrame = (screen ?? NSScreen.main)?.visibleFrame else {
-      popover.contentSize = preferredPopoverSize
+  private func updatePopoverSize(for screen: NSScreen?, relativeTo button: NSStatusBarButton?) {
+    let visibleFrame = (screen ?? NSScreen.main)?.visibleFrame
+    let widthLimit = (visibleFrame?.width ?? preferredPopoverWidth) - 24
+    let width = max(minPopoverWidth, min(preferredPopoverWidth, widthLimit))
+
+    guard let view = popover.contentViewController?.view else {
+      popover.contentSize = NSSize(width: width, height: 420)
       return
     }
+    _ = view.window
+    view.layoutSubtreeIfNeeded()
+    let fittingHeight = view.fittingSize.height + 4
 
-    let width = max(minPopoverSize.width, min(preferredPopoverSize.width, visibleFrame.width - 24))
-    let height = max(minPopoverSize.height, min(preferredPopoverSize.height, visibleFrame.height - 36))
+    let screenHeightCap = maxPopoverHeight
+    let visibleHeightCap: CGFloat
+    if let visibleFrame, let buttonFrame = button?.window?.frame {
+      // Cap to available room below/around status bar on the active screen.
+      let topInset = max(visibleFrame.maxY - buttonFrame.minY, 0)
+      visibleHeightCap = max(300, visibleFrame.height - topInset - 16)
+    } else if let visibleFrame {
+      visibleHeightCap = visibleFrame.height - 36
+    } else {
+      visibleHeightCap = maxPopoverHeight
+    }
+    let heightCap = min(screenHeightCap, visibleHeightCap)
+    let height = max(minPopoverHeight, min(fittingHeight, heightCap))
     popover.contentSize = NSSize(width: width, height: height)
   }
 
   private func updateStatusIndicator(isRunning: Bool) {
     guard let button = statusItem.button else { return }
     button.title = ""
+    button.contentTintColor = nil
+    button.image = buildStatusImage(isRunning: isRunning)
+  }
 
-    if isRunning {
-      button.contentTintColor = nil
-      if let menuIcon {
-        menuIcon.isTemplate = true
-        button.image = menuIcon
-        button.image?.size = NSSize(width: 24, height: 24)
-      } else {
-        button.image = NSImage(systemSymbolName: "bolt.horizontal.circle", accessibilityDescription: "CodexGateway")
-        button.image?.isTemplate = true
-      }
-      return
+  private func buildStatusImage(isRunning: Bool) -> NSImage? {
+    let baseSize = NSSize(width: 22, height: 22)
+    let baseImage: NSImage
+    if let menuIcon {
+      baseImage = menuIcon.copy() as? NSImage ?? menuIcon
+    } else if let symbol = NSImage(systemSymbolName: "bolt.horizontal.circle", accessibilityDescription: "CodexGateway") {
+      baseImage = symbol
+    } else {
+      return nil
     }
 
-    let dot = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "Gateway not running")
-    dot?.isTemplate = true
-    dot?.size = NSSize(width: 11, height: 11)
-    button.image = dot
-    button.contentTintColor = .systemRed
+    baseImage.isTemplate = true
+    baseImage.size = baseSize
+
+    guard !isRunning else {
+      return baseImage
+    }
+
+    let composed = NSImage(size: baseSize)
+    composed.lockFocus()
+    baseImage.draw(in: NSRect(origin: .zero, size: baseSize))
+
+    let dotDiameter = baseSize.width * 0.36
+    let dotRect = NSRect(
+      x: baseSize.width - dotDiameter - 0.5,
+      y: 0.5,
+      width: dotDiameter,
+      height: dotDiameter
+    )
+
+    NSColor.black.setFill()
+    NSBezierPath(ovalIn: dotRect.insetBy(dx: -1.0, dy: -1.0)).fill()
+    NSColor.systemRed.setFill()
+    NSBezierPath(ovalIn: dotRect).fill()
+    composed.unlockFocus()
+    composed.isTemplate = false
+    return composed
   }
 }
 
@@ -141,6 +188,11 @@ final class CodexGatewayAppDelegate: NSObject, NSApplicationDelegate {
         self?.settingsWindowController?.show()
       }
     )
+  }
+
+  func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+    statusItemController?.showPopover()
+    return true
   }
 }
 

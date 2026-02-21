@@ -36,6 +36,7 @@ final class GatewayManager: ObservableObject {
 
   @Published var config: AppConfig = .default
   @Published var isRunning = false
+  @Published var isStarting = false
   @Published var isFixingSetup = false
   @Published var isLoadingDevices = false
   @Published var conflictingPID: Int32?
@@ -43,15 +44,19 @@ final class GatewayManager: ObservableObject {
   @Published var outputLines: [String] = []
   @Published var pairedDevices: [PairedDevice] = []
   @Published var needsFullDiskAccess = false
+  @Published private(set) var launchdRuntimeLogTail = ""
 
   private static let filesAndFoldersPrimeDefaultsKey = "codexgateway.files-and-folders-primed.v1"
   private static let filesAndFoldersPrimePendingDefaultsKey = "codexgateway.files-and-folders-prime-pending.v1"
+  private static let helperFilesAndFoldersPrimeDefaultsKey = "codexgateway.helper-files-and-folders-primed.v1"
+  private static let helperFilesAndFoldersPrimePendingDefaultsKey = "codexgateway.helper-files-and-folders-prime-pending.v1"
   private var process: Process?
   private var didBootstrap = false
   private var didShowFullDiskAccessPrompt = false
   private var didConfigureServeRouteThisSession = false
   private var didConfigureLegacyServeRouteThisSession = false
   private var willTerminateObserver: NSObjectProtocol?
+  private var runtimeLogTailTask: Task<Void, Never>?
 
   init() {
     willTerminateObserver = NotificationCenter.default.addObserver(
@@ -76,13 +81,28 @@ final class GatewayManager: ObservableObject {
   }
 
   deinit {
+    runtimeLogTailTask?.cancel()
     if let willTerminateObserver {
       NotificationCenter.default.removeObserver(willTerminateObserver)
     }
   }
 
   var recentLogsText: String {
-    outputLines.suffix(300).joined(separator: "\n")
+    let managerLines = outputLines.suffix(220).joined(separator: "\n")
+    let runtimeLines = launchdRuntimeLogTail.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !runtimeLines.isEmpty else {
+      return managerLines
+    }
+    if managerLines.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      return runtimeLines
+    }
+    return "\(managerLines)\n\n\(runtimeLines)"
+  }
+
+  var recentLogsLineCount: Int {
+    recentLogsText
+      .split(whereSeparator: \.isNewline)
+      .count
   }
 
   func bootstrap() {
@@ -90,14 +110,15 @@ final class GatewayManager: ObservableObject {
     didBootstrap = true
 
     refreshFullDiskAccessStatus()
-    if needsFullDiskAccess {
-      UserDefaults.standard.set(true, forKey: Self.filesAndFoldersPrimePendingDefaultsKey)
-      guard enforceFullDiskAccessRequirement() else { return }
-    } else {
-      guard ensureFilesAndFoldersAccessIfNeeded() else { return }
-    }
-    refreshSetupStatus()
+    startRuntimeLogTailingIfNeeded()
     Task {
+      if needsFullDiskAccess {
+        UserDefaults.standard.set(true, forKey: Self.filesAndFoldersPrimePendingDefaultsKey)
+        guard enforceFullDiskAccessRequirement() else { return }
+      } else {
+        guard await ensureFilesAndFoldersAccessIfNeeded() else { return }
+      }
+      refreshSetupStatus()
       if config.autoStart {
         await start()
       }
@@ -149,10 +170,14 @@ final class GatewayManager: ObservableObject {
 
   func start() async {
     guard !isRunning else { return }
+    guard !isStarting else { return }
+    isStarting = true
+    defer { isStarting = false }
+    statusMessage = "Starting..."
     guard enforceFullDiskAccessRequirement() else { return }
-    guard ensureFilesAndFoldersAccessIfNeeded() else { return }
+    guard await ensureFilesAndFoldersAccessIfNeeded() else { return }
 
-    let diagnostics = diagnoseSetup(includeNetworkChecks: true)
+    let diagnostics = await diagnoseSetupForStart()
     conflictingPID = nil
 
     guard diagnostics.bundledNodeReady, diagnostics.bundledGatewayReady else {
@@ -196,9 +221,9 @@ final class GatewayManager: ObservableObject {
       return
     }
 
-    _ = ensureTailscaleServeRoutesToGateway(port: port)
+    _ = await ensureTailscaleServeRoutesToGatewayAsync(port: port)
 
-    guard upsertAndStartLaunchAgent(port: port) else {
+    guard await upsertAndStartLaunchAgentAsync(port: port) else {
       statusMessage = "Start failed. Check details."
       return
     }
@@ -208,6 +233,7 @@ final class GatewayManager: ObservableObject {
       isRunning = true
       statusMessage = "Running"
       appendOutput("Gateway service is running under launchd.")
+      refreshLaunchdRuntimeLogs()
       Task { await refreshPairedDevices() }
     } else {
       isRunning = false
@@ -217,6 +243,7 @@ final class GatewayManager: ObservableObject {
         appendOutput("Recent launchd stderr:")
         appendOutput(tail)
       }
+      refreshLaunchdRuntimeLogs()
     }
   }
 
@@ -443,6 +470,23 @@ final class GatewayManager: ObservableObject {
       tailscaleAuthenticated: tailscaleAuthenticated,
       serveConfigured: serveConfigured,
       portListener: listenerInfo(forPort: port)
+    )
+  }
+
+  private func diagnoseSetupForStart() async -> SetupDiagnostics {
+    let port = configuredPort()
+    let env = config.environment
+    let tailscalePath = resolveExecutablePath(for: "tailscale", environment: env)
+    let tailscaleAuthenticated = tailscalePath != nil ? await isTailscaleAuthenticatedAsync(environment: env) : false
+
+    return SetupDiagnostics(
+      bundledNodeReady: bundledNodePath() != nil,
+      bundledGatewayReady: bundledGatewayEntryPath() != nil,
+      codexReady: resolvedCodexBinaryPath(environment: env) != nil,
+      tailscaleAvailable: tailscalePath != nil,
+      tailscaleAuthenticated: tailscaleAuthenticated,
+      serveConfigured: false,
+      portListener: await listenerInfoAsync(forPort: port)
     )
   }
 
@@ -737,6 +781,124 @@ final class GatewayManager: ObservableObject {
   }
 
   @discardableResult
+  private func upsertAndStartLaunchAgentAsync(port: Int) async -> Bool {
+    guard let bundledNode = bundledNodePath(),
+          let gatewayEntry = bundledGatewayEntryPath(),
+          let gatewayRoot = bundledGatewayRoot()
+    else {
+      appendOutput("Bundled Node or gateway entrypoint is missing.")
+      return false
+    }
+
+    let env = runtimeEnvironment(port: port)
+    let logsDir = appSupportDirectory().appendingPathComponent("logs", isDirectory: true)
+    let stdoutPath = logsDir.appendingPathComponent("launchd-stdout.log").path
+    let stderrPath = logsDir.appendingPathComponent("launchd-stderr.log").path
+    let plistPath = launchAgentPlistURL()
+
+    try? FileManager.default.createDirectory(
+      at: plistPath.deletingLastPathComponent(),
+      withIntermediateDirectories: true
+    )
+
+    let plist: [String: Any] = [
+      "Label": launchAgentLabel,
+      "ProgramArguments": [bundledNode, gatewayEntry],
+      "WorkingDirectory": gatewayRoot,
+      "EnvironmentVariables": env,
+      "RunAtLoad": true,
+      "KeepAlive": true,
+      "ThrottleInterval": 5,
+      "StandardOutPath": stdoutPath,
+      "StandardErrorPath": stderrPath
+    ]
+
+    do {
+      let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+      try data.write(to: plistPath, options: .atomic)
+    } catch {
+      appendOutput("Failed to write launch agent plist: \(error.localizedDescription)")
+      return false
+    }
+
+    let wasLoaded = isLaunchAgentLoaded()
+    if !wasLoaded {
+      let bootstrap = await runSyncAsync(
+        executablePath: "/bin/launchctl",
+        arguments: ["bootstrap", "gui/\(getuid())", plistPath.path],
+        workingDirectory: nil,
+        environment: [:]
+      )
+      if bootstrap.exitCode != 0 {
+        appendOutput("Failed to bootstrap launch agent '\(launchAgentLabel)'.")
+        if !bootstrap.output.isEmpty {
+          appendOutput(bootstrap.output)
+        }
+        return false
+      }
+    }
+
+    _ = await runSyncAsync(
+      executablePath: "/bin/launchctl",
+      arguments: ["enable", launchAgentTarget()],
+      workingDirectory: nil,
+      environment: [:]
+    )
+
+    let kickstart = await runSyncAsync(
+      executablePath: "/bin/launchctl",
+      arguments: ["kickstart", "-k", launchAgentTarget()],
+      workingDirectory: nil,
+      environment: [:]
+    )
+    if kickstart.exitCode != 0 {
+      if wasLoaded {
+        let bootout = await runSyncAsync(
+          executablePath: "/bin/launchctl",
+          arguments: ["bootout", launchAgentTarget()],
+          workingDirectory: nil,
+          environment: [:]
+        )
+        if bootout.exitCode == 0 {
+          let retryBootstrap = await runSyncAsync(
+            executablePath: "/bin/launchctl",
+            arguments: ["bootstrap", "gui/\(getuid())", plistPath.path],
+            workingDirectory: nil,
+            environment: [:]
+          )
+          if retryBootstrap.exitCode == 0 {
+            let retryKickstart = await runSyncAsync(
+              executablePath: "/bin/launchctl",
+              arguments: ["kickstart", "-k", launchAgentTarget()],
+              workingDirectory: nil,
+              environment: [:]
+            )
+            if retryKickstart.exitCode == 0 {
+              appendOutput("LaunchAgent '\(launchAgentLabel)' is active.")
+              return true
+            }
+            if !retryKickstart.output.isEmpty {
+              appendOutput(retryKickstart.output)
+            }
+          } else if !retryBootstrap.output.isEmpty {
+            appendOutput(retryBootstrap.output)
+          }
+        } else if !bootout.output.isEmpty {
+          appendOutput(bootout.output)
+        }
+      }
+      appendOutput("Failed to start launch agent '\(launchAgentLabel)'.")
+      if !kickstart.output.isEmpty {
+        appendOutput(kickstart.output)
+      }
+      return false
+    }
+
+    appendOutput("LaunchAgent '\(launchAgentLabel)' is active.")
+    return true
+  }
+
+  @discardableResult
   private func stopLaunchAgent(removePlist: Bool) -> Bool {
     let bootout = runSync(
       executablePath: "/bin/launchctl",
@@ -768,6 +930,34 @@ final class GatewayManager: ObservableObject {
       command: command,
       isManagedGateway: isManagedGatewayCommand(command)
     )
+  }
+
+  private func listenerInfoAsync(forPort port: Int) async -> PortListener? {
+    let output = await runSyncAsync(
+      executablePath: "/usr/sbin/lsof",
+      arguments: ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-t"],
+      workingDirectory: nil,
+      environment: [:]
+    ).output
+
+    let lines = output
+      .split(whereSeparator: \.isNewline)
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty }
+
+    guard let pidLine = lines.first, let pid = Int32(pidLine), pid > 0 else { return nil }
+
+    let command = await runSyncAsync(
+      executablePath: "/bin/ps",
+      arguments: ["-p", String(pid), "-o", "command="],
+      workingDirectory: nil,
+      environment: [:]
+    ).output
+      .split(whereSeparator: \.isNewline)
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .first ?? ""
+
+    return PortListener(pid: pid, command: command, isManagedGateway: isManagedGatewayCommand(command))
   }
 
   private func processCommand(forPID pid: Int32) -> String {
@@ -819,12 +1009,50 @@ final class GatewayManager: ObservableObject {
     let logPath = appSupportDirectory()
       .appendingPathComponent("logs", isDirectory: true)
       .appendingPathComponent("launchd-stderr.log", isDirectory: false).path
-    guard let text = try? String(contentsOfFile: logPath, encoding: .utf8) else { return nil }
+    return tailFile(atPath: logPath, maxLines: maxLines)
+  }
+
+  private func launchdStdoutTail(maxLines: Int) -> String? {
+    let logPath = appSupportDirectory()
+      .appendingPathComponent("logs", isDirectory: true)
+      .appendingPathComponent("launchd-stdout.log", isDirectory: false).path
+    return tailFile(atPath: logPath, maxLines: maxLines)
+  }
+
+  private func tailFile(atPath path: String, maxLines: Int) -> String? {
+    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
     let lines = text
       .split(whereSeparator: \.isNewline)
       .map(String.init)
     guard !lines.isEmpty else { return nil }
     return lines.suffix(max(maxLines, 1)).joined(separator: "\n")
+  }
+
+  private func startRuntimeLogTailingIfNeeded() {
+    guard runtimeLogTailTask == nil else { return }
+    runtimeLogTailTask = Task { [weak self] in
+      guard let self else { return }
+      while !Task.isCancelled {
+        await MainActor.run {
+          self.refreshLaunchdRuntimeLogs()
+        }
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+      }
+    }
+  }
+
+  private func refreshLaunchdRuntimeLogs() {
+    let stdoutTail = launchdStdoutTail(maxLines: 80)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let stderrTail = launchdStderrTail(maxLines: 80)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+    var sections: [String] = []
+    if !stdoutTail.isEmpty {
+      sections.append("[launchd stdout]\n\(stdoutTail)")
+    }
+    if !stderrTail.isEmpty {
+      sections.append("[launchd stderr]\n\(stderrTail)")
+    }
+    launchdRuntimeLogTail = sections.joined(separator: "\n\n")
   }
 
   private func bundledNodePath() -> String? {
@@ -871,14 +1099,18 @@ final class GatewayManager: ObservableObject {
   }
 
   @discardableResult
-  private func ensureFilesAndFoldersAccessIfNeeded() -> Bool {
+  private func ensureFilesAndFoldersAccessIfNeeded() async -> Bool {
     let defaults = UserDefaults.standard
     let shouldPrimeAfterRestart = defaults.bool(forKey: Self.filesAndFoldersPrimePendingDefaultsKey)
     let alreadyPrimed = defaults.bool(forKey: Self.filesAndFoldersPrimeDefaultsKey)
+    let shouldPrimeHelperAfterRestart = defaults.bool(forKey: Self.helperFilesAndFoldersPrimePendingDefaultsKey)
+    let helperAlreadyPrimed = defaults.bool(forKey: Self.helperFilesAndFoldersPrimeDefaultsKey)
 
     // If this is the first launch after granting Full Disk Access, or if never primed,
     // trigger Files & Folders consent before the gateway starts.
-    guard shouldPrimeAfterRestart || !alreadyPrimed else { return true }
+    let shouldRunAppPrime = shouldPrimeAfterRestart || !alreadyPrimed
+    let shouldRunHelperPrime = shouldPrimeHelperAfterRestart || !helperAlreadyPrimed
+    guard shouldRunAppPrime || shouldRunHelperPrime else { return true }
 
     let home = FileManager.default.homeDirectoryForCurrentUser
     let protectedFolders = [
@@ -887,27 +1119,102 @@ final class GatewayManager: ObservableObject {
       home.appendingPathComponent("Downloads", isDirectory: true)
     ]
 
-    var deniedFolders: [String] = []
-    for folder in protectedFolders where FileManager.default.fileExists(atPath: folder.path) {
-      do {
-        _ = try FileManager.default.contentsOfDirectory(atPath: folder.path)
-      } catch {
-        deniedFolders.append(folder.lastPathComponent)
+    if shouldRunAppPrime {
+      var deniedFolders: [String] = []
+      for folder in protectedFolders where FileManager.default.fileExists(atPath: folder.path) {
+        do {
+          _ = try FileManager.default.contentsOfDirectory(atPath: folder.path)
+        } catch {
+          deniedFolders.append(folder.lastPathComponent)
+        }
+      }
+
+      guard deniedFolders.isEmpty else {
+        defaults.set(false, forKey: Self.filesAndFoldersPrimeDefaultsKey)
+        defaults.set(true, forKey: Self.filesAndFoldersPrimePendingDefaultsKey)
+        statusMessage = "Folder access required"
+        appendOutput("Folder access denied for: \(deniedFolders.joined(separator: ", ")). Allow access and try again.")
+        return false
       }
     }
 
-    guard deniedFolders.isEmpty else {
-      defaults.set(false, forKey: Self.filesAndFoldersPrimeDefaultsKey)
-      defaults.set(true, forKey: Self.filesAndFoldersPrimePendingDefaultsKey)
-      statusMessage = "Folder access required"
-      appendOutput("Folder access denied for: \(deniedFolders.joined(separator: ", ")). Allow access and try again.")
-      return false
+    if shouldRunAppPrime {
+      defaults.set(true, forKey: Self.filesAndFoldersPrimeDefaultsKey)
+      defaults.set(false, forKey: Self.filesAndFoldersPrimePendingDefaultsKey)
+      appendOutput("Ran one-time macOS folder-access onboarding check.")
     }
 
-    defaults.set(true, forKey: Self.filesAndFoldersPrimeDefaultsKey)
-    defaults.set(false, forKey: Self.filesAndFoldersPrimePendingDefaultsKey)
-    appendOutput("Ran one-time macOS folder-access onboarding check.")
+    if shouldRunHelperPrime {
+      let deniedHelperFolders = await helperDeniedProtectedFolders(protectedFolders)
+      guard deniedHelperFolders.isEmpty else {
+        defaults.set(false, forKey: Self.helperFilesAndFoldersPrimeDefaultsKey)
+        defaults.set(true, forKey: Self.helperFilesAndFoldersPrimePendingDefaultsKey)
+        statusMessage = "Folder access required"
+        appendOutput("Gateway helper access denied for: \(deniedHelperFolders.joined(separator: ", ")). Allow access and retry Start.")
+        return false
+      }
+      defaults.set(true, forKey: Self.helperFilesAndFoldersPrimeDefaultsKey)
+      defaults.set(false, forKey: Self.helperFilesAndFoldersPrimePendingDefaultsKey)
+      appendOutput("Ran one-time gateway helper folder-access onboarding check.")
+    }
+
     return true
+  }
+
+  private func helperDeniedProtectedFolders(_ folders: [URL]) async -> [String] {
+    guard let bundledNode = bundledNodePath() else {
+      return folders
+        .filter { FileManager.default.fileExists(atPath: $0.path) }
+        .map(\.lastPathComponent)
+    }
+
+    let existingPaths = folders
+      .filter { FileManager.default.fileExists(atPath: $0.path) }
+      .map(\.path)
+    guard !existingPaths.isEmpty else { return [] }
+
+    let probeScript = """
+    const fs = require('fs');
+    const folders = (process.env.CODEX_PROTECTED_FOLDERS || '').split('\\n').filter(Boolean);
+    const denied = [];
+    for (const folder of folders) {
+      try {
+        fs.readdirSync(folder);
+      } catch {
+        denied.push(folder);
+      }
+    }
+    if (denied.length > 0) {
+      console.log(JSON.stringify({ denied }));
+      process.exit(3);
+    }
+    console.log('ok');
+    """
+
+    let probeResult = await runSyncAsync(
+      executablePath: bundledNode,
+      arguments: ["-e", probeScript],
+      workingDirectory: nil,
+      environment: ["CODEX_PROTECTED_FOLDERS": existingPaths.joined(separator: "\n")]
+    )
+
+    if probeResult.exitCode == 0 {
+      return []
+    }
+
+    if let data = probeResult.output.data(using: .utf8),
+       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+       let deniedPaths = json["denied"] as? [String]
+    {
+      let deniedSet = Set(deniedPaths)
+      return folders
+        .filter { deniedSet.contains($0.path) }
+        .map(\.lastPathComponent)
+    }
+
+    return folders
+      .filter { FileManager.default.fileExists(atPath: $0.path) }
+      .map(\.lastPathComponent)
   }
 
   private func discoverTailscaleMagicBaseURL(environment: [String: String]) -> String? {
@@ -953,6 +1260,23 @@ final class GatewayManager: ObservableObject {
     return hasSelfNode && backendState != "NeedsLogin"
   }
 
+  private func isTailscaleAuthenticatedAsync(environment: [String: String]) async -> Bool {
+    guard let tailscalePath = resolveExecutablePath(for: "tailscale", environment: environment) else {
+      return false
+    }
+    let result = await runSyncAsync(
+      executablePath: tailscalePath,
+      arguments: ["status", "--json"],
+      workingDirectory: nil,
+      environment: environment
+    )
+    guard result.exitCode == 0, let data = result.output.data(using: .utf8) else { return false }
+    guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+    let backendState = json["BackendState"] as? String
+    let hasSelfNode = (json["Self"] as? [String: Any]) != nil
+    return hasSelfNode && backendState != "NeedsLogin"
+  }
+
   private func isServeRouteConfigured(port: Int, environment: [String: String]) -> Bool {
     guard let tailscalePath = resolveExecutablePath(for: "tailscale", environment: environment) else {
       return false
@@ -973,7 +1297,42 @@ final class GatewayManager: ObservableObject {
     executablePath: String,
     arguments: [String],
     workingDirectory: String?,
-    environment: [String: String]
+    environment: [String: String],
+    timeoutSeconds: TimeInterval = 12
+  ) -> (exitCode: Int32, output: String) {
+    Self.runSyncCore(
+      executablePath: executablePath,
+      arguments: arguments,
+      workingDirectory: workingDirectory,
+      environment: environment,
+      timeoutSeconds: timeoutSeconds
+    )
+  }
+
+  private func runSyncAsync(
+    executablePath: String,
+    arguments: [String],
+    workingDirectory: String?,
+    environment: [String: String],
+    timeoutSeconds: TimeInterval = 12
+  ) async -> (exitCode: Int32, output: String) {
+    await Task.detached(priority: .userInitiated) {
+      Self.runSyncCore(
+        executablePath: executablePath,
+        arguments: arguments,
+        workingDirectory: workingDirectory,
+        environment: environment,
+        timeoutSeconds: timeoutSeconds
+      )
+    }.value
+  }
+
+  nonisolated private static func runSyncCore(
+    executablePath: String,
+    arguments: [String],
+    workingDirectory: String?,
+    environment: [String: String],
+    timeoutSeconds: TimeInterval
   ) -> (exitCode: Int32, output: String) {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: executablePath)
@@ -997,7 +1356,25 @@ final class GatewayManager: ObservableObject {
 
     do {
       try process.run()
-      process.waitUntilExit()
+      let deadline = Date().addingTimeInterval(timeoutSeconds)
+      while process.isRunning && Date() < deadline {
+        usleep(50_000)
+      }
+      if process.isRunning {
+        process.terminate()
+        usleep(150_000)
+        if process.isRunning {
+          process.interrupt()
+          usleep(150_000)
+        }
+        if process.isRunning {
+          process.terminate()
+        }
+        try? fileHandle.close()
+        try? FileManager.default.removeItem(at: tempURL)
+        let commandText = ([executablePath] + arguments).joined(separator: " ")
+        return (124, "Process timed out after \(Int(timeoutSeconds))s: \(commandText)")
+      }
     } catch {
       try? fileHandle.close()
       return (1, "Process execution failed: \(error.localizedDescription)")
@@ -1063,6 +1440,59 @@ final class GatewayManager: ObservableObject {
     // Older/newer Tailscale variants may reject service names; fall back to node-level serve.
     if configureResult.output.contains("invalid service name") || configureResult.output.contains("flag -service") {
       let legacyResult = runSync(
+        executablePath: tailscalePath,
+        arguments: ["serve", "--bg", "http://127.0.0.1:\(port)"],
+        workingDirectory: nil,
+        environment: environment
+      )
+      if legacyResult.exitCode == 0 {
+        didConfigureServeRouteThisSession = false
+        didConfigureLegacyServeRouteThisSession = true
+        appendOutput("Configured Tailscale route in node mode (service mode unsupported by this Tailscale CLI).")
+        return true
+      }
+      appendOutput("Failed to configure Tailscale route in fallback mode.")
+      if !legacyResult.output.isEmpty {
+        appendOutput(legacyResult.output)
+      }
+      return false
+    }
+
+    appendOutput("Failed to configure Tailscale route. Sign in to Tailscale and click Start again.")
+    if !configureResult.output.isEmpty {
+      appendOutput(configureResult.output)
+    }
+    return false
+  }
+
+  @discardableResult
+  private func ensureTailscaleServeRoutesToGatewayAsync(port: Int) async -> Bool {
+    let environment = config.environment
+    guard let tailscalePath = resolveExecutablePath(for: "tailscale", environment: environment) else {
+      appendOutput("Tailscale CLI not found; skipping route setup.")
+      return false
+    }
+    guard await isTailscaleAuthenticatedAsync(environment: environment) else {
+      appendOutput("Tailscale is not authenticated. Sign in and click Start.")
+      return false
+    }
+
+    let configureResult = await runSyncAsync(
+      executablePath: tailscalePath,
+      arguments: ["serve", "--service", tailscaleServiceName, "--bg", "http://127.0.0.1:\(port)"],
+      workingDirectory: nil,
+      environment: environment
+    )
+
+    if configureResult.exitCode == 0 {
+      didConfigureServeRouteThisSession = true
+      didConfigureLegacyServeRouteThisSession = false
+      appendOutput("Configured Tailscale Serve route to 127.0.0.1:\(port).")
+      return true
+    }
+
+    if configureResult.output.contains("invalid service name") || configureResult.output.contains("flag -service") {
+      let legacyResult = await runSyncAsync(
         executablePath: tailscalePath,
         arguments: ["serve", "--bg", "http://127.0.0.1:\(port)"],
         workingDirectory: nil,

@@ -835,6 +835,18 @@ function isUnmaterializedThreadError(error: unknown): boolean {
   );
 }
 
+function isCodexDisconnectedError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("codex app-server is not connected") ||
+    message.includes("connection closed") ||
+    message.includes("json-rpc timeout")
+  );
+}
+
 function normalizeGatewayOptions(result: unknown) {
   const asObject = result && typeof result === "object" ? (result as Record<string, unknown>) : null;
   const modelArray = Array.isArray(asObject?.data)
@@ -1405,11 +1417,25 @@ async function bootstrap() {
     const primaryCwd = await resolveThreadCwd(params.id);
     const query = parsedQuery.data.query?.trim() ?? "";
     const limit = parsedQuery.data.limit ?? 250;
-    const result = await codex.call("fuzzyFileSearch", {
-      query,
-      roots: [primaryCwd],
-      cancellationToken: null,
-    });
+    let result: unknown;
+    try {
+      result = await codex.call("fuzzyFileSearch", {
+        query,
+        roots: [primaryCwd],
+        cancellationToken: null,
+      });
+    } catch (error) {
+      if (isCodexDisconnectedError(error)) {
+        return reply.code(503).send({
+          error: "Codex app-server disconnected. Open/restart the macOS gateway app, then retry.",
+          detail: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return reply.code(502).send({
+        error: "fuzzyFileSearch failed.",
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    }
 
     const filesRaw =
       result && typeof result === "object" && Array.isArray((result as Record<string, unknown>).files)
