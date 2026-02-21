@@ -10,6 +10,9 @@
   ],
   "scripts": {
     "build": "bun run build:shared && bun run build:gateway",
+    "build:mac": "bun run build:mac:signed",
+    "build:mac:signed": "SIGN_IDENTITY=\"$SIGN_IDENTITY\" NOTARYTOOL_PROFILE=\"$NOTARYTOOL_PROFILE\" /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/scripts/build_app.sh --release",
+    "build:mac:unsigned": "/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/scripts/build_app.sh",
     "build:shared": "cd shared && bun run build",
     "build:gateway": "cd gateway && bun run build",
     "typecheck": "bun run build:shared && bun run typecheck:shared && bun run typecheck:gateway && bun run typecheck:app",

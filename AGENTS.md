@@ -33,12 +33,18 @@ Guidelines for coding agents working in this repository.
 ## macOS App Build Policy
 
 - In this repo, `build` means **signed + notarized release build**.
-- Use:
+- Preferred command:
+
+```bash
+cd /Users/omshejul/Code/CodexApp
+bun run build:mac
+```
+
+- Required env vars (set in `.env`, see `.env.example`):
 
 ```bash
 SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
-NOTARYTOOL_PROFILE="codex-notary" \
-/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/scripts/build_app.sh --release
+NOTARYTOOL_PROFILE="codex-notary"
 ```
 
 - Do not use unsigned build output for normal release/distribution workflows.
