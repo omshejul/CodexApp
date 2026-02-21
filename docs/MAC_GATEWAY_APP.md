@@ -43,12 +43,17 @@ User-editable settings are intentionally small:
 
 Runtime command, args, and working directory are managed by the app.
 
-## Build App + DMG
+## Build (Always Signed + Notarized)
+
+In this project, `build` means a signed + notarized release build.
+Do not use the unsigned build path for normal builds.
 
 From repo root:
 
 ```bash
-/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/scripts/build_app.sh
+SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+NOTARYTOOL_PROFILE="codex-notary" \
+/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/scripts/build_app.sh --release
 ```
 
 Outputs:
