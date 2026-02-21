@@ -32,33 +32,41 @@ interface ThreadSection {
   data: ThreadItem[];
 }
 
-function groupThreadsByDate(threads: ThreadItem[]): ThreadSection[] {
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const yesterday = new Date(today.getTime() - 86400000);
-  const thisWeek = new Date(today.getTime() - 7 * 86400000);
-  const thisMonth = new Date(today.getTime() - 30 * 86400000);
-
-  const buckets: [string, ThreadItem[]][] = [
-    ["Today", []],
-    ["Yesterday", []],
-    ["This Week", []],
-    ["This Month", []],
-    ["Older", []],
-  ];
-
-  for (const thread of threads) {
-    const d = thread.updatedAt ? new Date(thread.updatedAt) : new Date(0);
-    if (d >= today) buckets[0][1].push(thread);
-    else if (d >= yesterday) buckets[1][1].push(thread);
-    else if (d >= thisWeek) buckets[2][1].push(thread);
-    else if (d >= thisMonth) buckets[3][1].push(thread);
-    else buckets[4][1].push(thread);
+function getUpdatedAtTimestamp(updatedAt?: string): number {
+  if (!updatedAt) {
+    return 0;
   }
 
-  return buckets
-    .filter(([, items]) => items.length > 0)
-    .map(([title, data]) => ({ title, data }));
+  const timestamp = new Date(updatedAt).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function groupThreadsByDirectory(threads: ThreadItem[]): ThreadSection[] {
+  const sortedByTime = [...threads].sort((left, right) => {
+    const timeDiff = getUpdatedAtTimestamp(right.updatedAt) - getUpdatedAtTimestamp(left.updatedAt);
+    if (timeDiff !== 0) {
+      return timeDiff;
+    }
+
+    return left.id.localeCompare(right.id);
+  });
+
+  const sections = new Map<string, ThreadItem[]>();
+  for (const thread of sortedByTime) {
+    const directory = thread.cwd?.trim() ?? "";
+    const section = sections.get(directory);
+    if (section) {
+      section.push(thread);
+      continue;
+    }
+
+    sections.set(directory, [thread]);
+  }
+
+  return Array.from(sections.entries()).map(([directory, data]) => ({
+    title: directory ? formatPathForDisplay(directory) : "No directory",
+    data,
+  }));
 }
 
 type LoadingStep = "session" | "gateway" | "threads" | "render";
@@ -94,34 +102,27 @@ function formatRelativeTime(updatedAt?: string): string {
     return "Unknown update time";
   }
 
-  const diffSeconds = Math.round((timestamp - Date.now()) / 1000);
-  const absSeconds = Math.abs(diffSeconds);
-  const suffix = diffSeconds < 0 ? "ago" : "from now";
+  const absSeconds = Math.abs(Math.round((timestamp - Date.now()) / 1000));
 
-  if (absSeconds < 5) {
-    return "just now";
-  }
-
-  const format = (value: number, unit: string) => `${value} ${unit}${value === 1 ? "" : "s"} ${suffix}`;
   if (absSeconds < 60) {
-    return format(absSeconds, "second");
+    return "now";
   }
   if (absSeconds < 3600) {
-    return format(Math.round(absSeconds / 60), "minute");
+    return `${Math.round(absSeconds / 60)}m`;
   }
   if (absSeconds < 86400) {
-    return format(Math.round(absSeconds / 3600), "hour");
+    return `${Math.round(absSeconds / 3600)}h`;
   }
   if (absSeconds < 604800) {
-    return format(Math.round(absSeconds / 86400), "day");
+    return `${Math.round(absSeconds / 86400)}d`;
   }
   if (absSeconds < 2629800) {
-    return format(Math.round(absSeconds / 604800), "week");
+    return `${Math.round(absSeconds / 604800)}w`;
   }
   if (absSeconds < 31557600) {
-    return format(Math.round(absSeconds / 2629800), "month");
+    return `${Math.round(absSeconds / 2629800)}mo`;
   }
-  return format(Math.round(absSeconds / 31557600), "year");
+  return `${Math.round(absSeconds / 31557600)}y`;
 }
 
 export default function ThreadsScreen() {
@@ -156,7 +157,16 @@ export default function ThreadsScreen() {
   const [loadingStep, setLoadingStep] = useState<LoadingStep>("session");
   const [loadingSeconds, setLoadingSeconds] = useState(0);
   const hasLoadedThreadsOnceRef = useRef(false);
-  const sections = useMemo(() => groupThreadsByDate(threads), [threads]);
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
+  const allSections = useMemo(() => groupThreadsByDirectory(threads), [threads]);
+  const sections = useMemo(
+    () =>
+      allSections.map((section) => ({
+        ...section,
+        data: collapsedSections.has(section.title) ? [] : section.data,
+      })),
+    [allSections, collapsedSections],
+  );
 
   useEffect(() => {
     if (!loading) {
@@ -268,7 +278,8 @@ export default function ThreadsScreen() {
 
     setShowWorkspacePicker(true);
     setPickerError(null);
-    await loadDirectory();
+    const lastCwd = allSections[0]?.data[0]?.cwd?.trim() || undefined;
+    await loadDirectory(lastCwd);
   };
 
   const onCancelPicker = () => {
@@ -336,43 +347,56 @@ export default function ThreadsScreen() {
     >
       <Pressable
         onPress={() => router.push(`/thread/${item.id}`)}
-        className="flex-row items-center gap-3 px-1 py-3 active:opacity-70"
+        className="flex-row items-center gap-3 py-3 pl-6 active:opacity-70"
       >
-        <View className="h-9 w-9 items-center justify-center rounded-xl bg-primary/10">
-          <Ionicons name="chatbubble-outline" size={16} className="text-primary" />
-        </View>
-        <View className="min-w-0 flex-1">
-          <Text className="text-[15px] font-medium text-card-foreground" numberOfLines={2} ellipsizeMode="tail">
-            {item.name || item.title || item.id}
-          </Text>
-          <View className="mt-1 flex-row items-center gap-2">
-            <View className="min-w-0 flex-1 flex-row items-center gap-1">
-              <Ionicons name="folder-outline" size={11} className="text-muted-foreground" />
-              <Text className="flex-1 text-[11px] text-muted-foreground" numberOfLines={1} ellipsizeMode="middle">
-                {item.cwd ? formatPathForDisplay(item.cwd) : "No directory"}
-              </Text>
-            </View>
-            <Text className="text-[11px] text-muted-foreground">{formatRelativeTime(item.updatedAt)}</Text>
-          </View>
-        </View>
-        <Ionicons name="chevron-forward" size={15} className="text-muted-foreground/40" />
+        <Text className="min-w-0 flex-1 text-[15px] font-medium text-card-foreground" numberOfLines={2} ellipsizeMode="tail">
+          {item.name || item.title || item.id}
+        </Text>
+        <Text className="text-sm text-muted-foreground">{formatRelativeTime(item.updatedAt)}</Text>
       </Pressable>
     </MotiView>
   );
 
-  const ItemSeparator = () => <View className="ml-14 h-px bg-border/30" />;
+  const ItemSeparator = () => <View className="ml-6 h-px bg-border/30" />;
 
-  const renderSectionHeader = ({ section }: { section: { title: string } }) => (
-    <MotiView
-      from={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ type: "timing", duration: 200 }}
-    >
-      <Text className="pb-2 pt-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-        {section.title}
-      </Text>
-    </MotiView>
-  );
+  const toggleSection = (title: string) => {
+    setCollapsedSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(title)) {
+        next.delete(title);
+      } else {
+        next.add(title);
+      }
+      return next;
+    });
+  };
+
+  const renderSectionHeader = ({ section }: { section: ThreadSection }) => {
+    const isCollapsed = collapsedSections.has(section.title);
+
+    return (
+      <MotiView
+        from={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ type: "timing", duration: 200 }}
+      >
+        <Pressable
+          onPress={() => toggleSection(section.title)}
+          className="flex-row items-center gap-3 rounded-xl bg-muted/50 px-4 py-4 mt-4 active:opacity-70"
+        >
+          <Ionicons name="folder-open-outline" size={18} className="text-foreground" />
+          <Text className="min-w-0 flex-1 text-base font-bold text-foreground" numberOfLines={1} ellipsizeMode="middle">
+            {section.title}
+          </Text>
+          <Ionicons
+            name={isCollapsed ? "chevron-forward" : "chevron-down"}
+            size={16}
+            className="text-muted-foreground"
+          />
+        </Pressable>
+      </MotiView>
+    );
+  };
 
   const showInitialLoading = loading && !refreshing && threads.length === 0 && !error;
   const activeStepIndex = loadingStepOrder.indexOf(loadingStep);
@@ -381,13 +405,13 @@ export default function ThreadsScreen() {
   const devicesListMaxHeight = Math.floor(Math.min(windowHeight * 0.32, 260));
 
   return (
-    <SafeAreaView className="flex-1 bg-background px-4 pt-2" edges={["top", "left", "right"]}>
+    <SafeAreaView className="flex-1 bg-background pt-2" edges={["top", "left", "right"]}>
       <MotiView
         from={{ opacity: 0, translateY: -10 }}
         animate={{ opacity: 1, translateY: 0 }}
         transition={{ type: "timing", duration: 280 }}
       >
-        <View className="mb-4 flex-row items-center justify-between">
+        <View className="mb-4 flex-row items-center justify-between px-4">
           <Text className="text-3xl font-semibold text-foreground">Threads</Text>
           <View className="flex-row gap-2">
             <Pressable
@@ -423,7 +447,7 @@ export default function ThreadsScreen() {
           animate={{ opacity: 1, translateY: 0 }}
           transition={{ type: "timing", duration: 220 }}
         >
-          <View className="mb-4 rounded-xl border border-border/50 bg-destructive/15 p-3">
+          <View className="mx-4 mb-4 rounded-xl border border-border/50 bg-destructive/15 p-3">
             <Text className="text-sm text-destructive-foreground">{error}</Text>
           </View>
         </MotiView>
@@ -435,7 +459,7 @@ export default function ThreadsScreen() {
           animate={{ opacity: 1, translateY: 0 }}
           transition={{ type: "timing", duration: 260 }}
         >
-          <View className="rounded-2xl border border-border/50 bg-card p-4">
+          <View className="mx-4 rounded-2xl border border-border/50 bg-card p-4">
             <View className="mb-2 flex-row items-center gap-2">
               <ActivityIndicator size="small" className="text-primary" />
               <Text className="text-sm font-semibold text-card-foreground">Loading your threads</Text>
@@ -477,7 +501,8 @@ export default function ThreadsScreen() {
           renderSectionHeader={renderSectionHeader}
           ItemSeparatorComponent={ItemSeparator}
           stickySectionHeadersEnabled={false}
-          contentContainerStyle={{ paddingBottom: 24 }}
+          showsVerticalScrollIndicator
+          contentContainerStyle={{ paddingBottom: 24, paddingHorizontal: 16 }}
           refreshControl={
             <RefreshControl
               refreshing={refreshing}
