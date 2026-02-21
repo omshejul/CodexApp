@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { ActivityIndicator, FlatList, Modal, Pressable, RefreshControl, Text, View } from "react-native";
+import { ActivityIndicator, FlatList, Modal, Pressable, RefreshControl, ScrollView, Text, useWindowDimensions, View } from "react-native";
 import { router } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { MotiView } from "moti";
@@ -108,6 +108,7 @@ function formatRelativeTime(updatedAt?: string): string {
 }
 
 export default function ThreadsScreen() {
+  const { height: windowHeight } = useWindowDimensions();
   const [threads, setThreads] = useState<ThreadItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -320,6 +321,7 @@ export default function ThreadsScreen() {
   const showInitialLoading = loading && !refreshing && threads.length === 0 && !error;
   const activeStepIndex = loadingStepOrder.indexOf(loadingStep);
   const isSlowLoad = loadingSeconds >= 8;
+  const settingsPanelMaxHeight = Math.floor(windowHeight * 0.8);
 
   return (
     <SafeAreaView className="flex-1 bg-background px-4 pt-2" edges={["top", "left", "right"]}>
@@ -561,26 +563,28 @@ export default function ThreadsScreen() {
           animate={{ opacity: 1 }}
           transition={{ type: "timing", duration: 220 }}
         >
-          <Pressable
-            className="flex-1 items-center justify-center bg-background/80 px-4"
-            onPress={() => {
-              setShowSettingsMenu(false);
-            }}
-          >
+          <View className="flex-1 items-center justify-center px-4">
+            <Pressable
+              className="absolute inset-0 bg-background/80"
+              onPress={() => {
+                setShowSettingsMenu(false);
+              }}
+            />
             <MotiView
               className="w-full"
               from={{ opacity: 0, scale: 0.96, translateY: 14 }}
               animate={{ opacity: 1, scale: 1, translateY: 0 }}
               transition={{ type: "timing", duration: 260 }}
             >
-              <Pressable
-                className="w-full rounded-2xl border border-border/50 bg-card p-4"
-                onPress={(event) => {
-                  event.stopPropagation();
-                }}
-              >
-            <Text className="text-lg font-semibold text-card-foreground">Settings</Text>
-            <Text className="mt-1 text-xs text-muted-foreground">User info and pairing.</Text>
+              <View className="w-full rounded-2xl border border-border/50 bg-card" style={{ maxHeight: settingsPanelMaxHeight }}>
+                <ScrollView
+                  className="p-4"
+                  contentContainerStyle={{ paddingBottom: 8 }}
+                  showsVerticalScrollIndicator
+                  nestedScrollEnabled
+                >
+                  <Text className="text-lg font-semibold text-card-foreground">Settings</Text>
+                  <Text className="mt-1 text-xs text-muted-foreground">User info and pairing.</Text>
 
             <View className="mt-4 px-1">
               <Text className="text-xs text-muted-foreground">Paired server</Text>
@@ -652,22 +656,23 @@ export default function ThreadsScreen() {
               </View>
             ) : null}
 
-                <Pressable
-                  className="mt-3 rounded-xl border border-border/50 bg-muted px-3 py-3"
-                  onPress={async () => {
-                    setShowSettingsMenu(false);
-                    await clearSession();
-                    router.replace("/pair");
-                  }}
-                >
-                  <View className="flex-row items-center justify-center gap-2">
-                    <Ionicons name="link-outline" size={16} color="#e5e7eb" />
-                    <Text className="text-sm font-semibold text-foreground">Re-Pair Device</Text>
-                  </View>
-                </Pressable>
-              </Pressable>
+                  <Pressable
+                    className="mt-3 rounded-xl border border-border/50 bg-muted px-3 py-3"
+                    onPress={async () => {
+                      setShowSettingsMenu(false);
+                      await clearSession();
+                      router.replace("/pair");
+                    }}
+                  >
+                    <View className="flex-row items-center justify-center gap-2">
+                      <Ionicons name="link-outline" size={16} color="#e5e7eb" />
+                      <Text className="text-sm font-semibold text-foreground">Re-Pair Device</Text>
+                    </View>
+                  </Pressable>
+                </ScrollView>
+              </View>
             </MotiView>
-          </Pressable>
+          </View>
         </MotiView>
       </Modal>
     </SafeAreaView>
