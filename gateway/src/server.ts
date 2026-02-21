@@ -1,8 +1,9 @@
 import path from "node:path";
 import fs from "node:fs";
+import os from "node:os";
 import type { IncomingMessage } from "node:http";
 import { ChildProcess, execFileSync, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import dotenv from "dotenv";
 import Fastify, { FastifyReply, FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
@@ -55,6 +56,7 @@ const dbPath = process.env.DB_PATH ?? path.resolve(__dirname, "../data/gateway.s
 const autoStartCodexAppServer = (process.env.AUTO_START_CODEX_APP_SERVER ?? "1") !== "0";
 const codexAppServerBin = process.env.CODEX_APP_SERVER_BIN ?? "codex";
 const codexAppServerListenUrl = process.env.CODEX_APP_SERVER_LISTEN ?? codexWsUrl;
+const HOME_DIR = os.homedir();
 
 const db = new GatewayDatabase(dbPath);
 const jwtSecret = process.env.JWT_SECRET ?? db.getOrCreateJwtSecret();
@@ -68,7 +70,6 @@ const prettyLogsEnabled = (process.env.LOG_PRETTY ?? "1") !== "0";
 
 const codex = new CodexRpcClient(codexWsUrl, GATEWAY_NAME, GATEWAY_VERSION);
 let managedCodexProcess: ChildProcess | null = null;
-const threadDiffHashes = new Map<string, string>();
 
 let cachedDetectedBaseUrl: string | null = null;
 
@@ -535,80 +536,6 @@ function extractThreadIdFromParams(value: unknown): string | null {
   return null;
 }
 
-function runGitDiffAllowExitOne(args: string[]): string {
-  try {
-    return execFileSync("git", args, {
-      encoding: "utf8",
-      maxBuffer: 1024 * 1024 * 8,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-  } catch (error) {
-    if (error && typeof error === "object" && "stdout" in error) {
-      const stdout = (error as { stdout?: unknown }).stdout;
-      if (typeof stdout === "string") {
-        return stdout;
-      }
-      if (Buffer.isBuffer(stdout)) {
-        return stdout.toString("utf8");
-      }
-    }
-    return "";
-  }
-}
-
-function buildThreadDiffSnapshotEvent(threadId: string): { method: string; params: { threadId: string; cwd: string; diff: string } } | null {
-  const threadCwd = db.getThreadCwd(threadId);
-  const cwd = threadCwd?.cwd?.trim();
-  if (!cwd) {
-    return null;
-  }
-
-  try {
-    const trackedDiff = execFileSync("git", ["-C", cwd, "diff", "--no-color", "--no-ext-diff", "--", "."], {
-      encoding: "utf8",
-      maxBuffer: 1024 * 1024 * 8,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const untrackedRaw = execFileSync("git", ["-C", cwd, "ls-files", "--others", "--exclude-standard", "--", "."], {
-      encoding: "utf8",
-      maxBuffer: 1024 * 1024 * 2,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const untrackedFiles = untrackedRaw
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
-
-    const untrackedDiffs = untrackedFiles
-      .map((relativePath) =>
-        runGitDiffAllowExitOne(["-C", cwd, "diff", "--no-color", "--no-ext-diff", "--no-index", "--", "/dev/null", relativePath])
-      )
-      .filter((chunk) => chunk.trim().length > 0);
-
-    const diff = [trackedDiff, ...untrackedDiffs].filter((chunk) => chunk.trim().length > 0).join("\n").trim();
-    if (!diff.includes("diff --git")) {
-      return null;
-    }
-
-    const hash = createHash("sha1").update(diff).digest("hex");
-    const previous = threadDiffHashes.get(threadId);
-    if (previous === hash) {
-      return null;
-    }
-    threadDiffHashes.set(threadId, hash);
-    return {
-      method: "gateway/diff/snapshot",
-      params: {
-        threadId,
-        cwd,
-        diff,
-      },
-    };
-  } catch {
-    return null;
-  }
-}
-
 function normalizeThreads(result: unknown): Array<{ id: string; name?: string; title?: string; updatedAt?: string; cwd?: string }> {
   const pickNonEmptyString = (...values: unknown[]): string | undefined => {
     for (const value of values) {
@@ -707,17 +634,17 @@ function buildWorkspaceSuggestions(): { defaultCwd: string; workspaces: string[]
 
 function normalizeBrowsePath(raw: unknown): string {
   if (typeof raw !== "string" || raw.trim().length === 0) {
-    return process.cwd();
+    return HOME_DIR;
   }
   const resolved = path.resolve(raw.trim());
   if (!fs.existsSync(resolved)) {
-    return process.cwd();
+    return HOME_DIR;
   }
   try {
     const stats = fs.statSync(resolved);
     return stats.isDirectory() ? resolved : path.dirname(resolved);
   } catch {
-    return process.cwd();
+    return HOME_DIR;
   }
 }
 
@@ -807,13 +734,19 @@ function normalizeGatewayOptions(result: unknown) {
     const displayName = typeof row.displayName === "string" && row.displayName.trim().length > 0 ? row.displayName : model;
     const isDefault = row.isDefault === true;
 
-    const reasoningFromModel = Array.isArray(row.supportedReasoningEfforts) ? row.supportedReasoningEfforts : [];
+    const reasoningFromModel = Array.isArray(row.supportedReasoningEfforts)
+      ? row.supportedReasoningEfforts
+      : Array.isArray(row.reasoningEfforts)
+      ? row.reasoningEfforts
+      : [];
     const supportedReasoningEfforts = reasoningFromModel
       .map((entry) => {
-        if (!entry || typeof entry !== "object") {
-          return null;
-        }
-        const effort = (entry as Record<string, unknown>).reasoningEffort;
+        const effort =
+          typeof entry === "string"
+            ? entry
+            : entry && typeof entry === "object"
+            ? (entry as Record<string, unknown>).reasoningEffort
+            : null;
         if (
           effort === "none" ||
           effort === "minimal" ||
@@ -849,7 +782,7 @@ function normalizeGatewayOptions(result: unknown) {
     return acc;
   }, []);
 
-  const defaultModel = models.find((model) => model.isDefault)?.model;
+  const defaultModel = models.find((model) => model.isDefault)?.model ?? models[0]?.model;
   const defaultReasoningEffort = models.find((model) => model.isDefault)?.defaultReasoningEffort;
 
   return {
@@ -897,13 +830,6 @@ async function bootstrap() {
     if (threadId) {
       try {
         db.insertThreadEvent(threadId, method, JSON.stringify(params ?? null), Date.now());
-        if (method === "turn/completed") {
-          const snapshot = buildThreadDiffSnapshotEvent(threadId);
-          if (snapshot) {
-            db.insertThreadEvent(threadId, snapshot.method, JSON.stringify(snapshot.params), Date.now());
-            runtimeLogs.event("thread.events.synthetic_diff", { threadId, source: "notification" });
-          }
-        }
       } catch (error) {
         runtimeLogs.error("thread.events.persist_failed", error, { threadId, method });
       }
@@ -1067,17 +993,7 @@ async function bootstrap() {
     return reply.send(payload);
   });
 
-  app.post(
-    "/pair/claim",
-    {
-      config: {
-        rateLimit: {
-          max: 10,
-          timeWindow: "1 minute",
-        },
-      },
-    },
-    async (request, reply) => {
+  app.post("/pair/claim", async (request, reply) => {
       const parsedBody = PairClaimRequestSchema.safeParse(request.body);
       if (!parsedBody.success) {
         return reply.code(400).send({ error: parsedBody.error.flatten() });
@@ -1119,8 +1035,7 @@ async function bootstrap() {
       });
 
       return reply.send(payload);
-    }
-  );
+    });
 
   app.post("/auth/refresh", async (request, reply) => {
     const parsedBody = AuthRefreshRequestSchema.safeParse(request.body);
@@ -1427,17 +1342,15 @@ async function bootstrap() {
 
     const sendEvent = (payload: { method: string; params: unknown }) => {
       runtimeLogs.event("stream.sse.event", { threadId: params.id, method: payload.method });
-      reply.raw.write(`event: codex\n`);
-      reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
-      if (payload.method === "turn/completed") {
-        const snapshot = buildThreadDiffSnapshotEvent(params.id);
-        if (snapshot) {
-          db.insertThreadEvent(params.id, snapshot.method, JSON.stringify(snapshot.params), Date.now());
-          runtimeLogs.event("thread.events.synthetic_diff", { threadId: params.id });
-          reply.raw.write(`event: codex\n`);
-          reply.raw.write(`data: ${JSON.stringify(snapshot)}\n\n`);
+      if (payload.method === "turn/diff/updated") {
+        try {
+          db.insertThreadEvent(params.id, payload.method, JSON.stringify(payload.params ?? null), Date.now());
+        } catch (error) {
+          runtimeLogs.error("thread.events.persist_failed", error, { threadId: params.id, method: payload.method });
         }
       }
+      reply.raw.write(`event: codex\n`);
+      reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
     };
 
     sendEvent({
@@ -1461,12 +1374,23 @@ async function bootstrap() {
   });
 
   app.setErrorHandler((error, _request, reply) => {
-    requestLogSafeError(error);
-    runtimeLogs.error("http.error", error);
+    const statusCode = getErrorStatusCode(error);
+    if (statusCode >= 500) {
+      requestLogSafeError(error);
+      runtimeLogs.error("http.error", error, { statusCode });
+    } else {
+      runtimeLogs.event("http.error.client", {
+        statusCode,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+
     if (reply.sent) {
       return;
     }
-    reply.code(500).send({ error: "Internal server error" });
+
+    applyErrorHeaders(error, reply);
+    reply.code(statusCode).send({ error: getErrorMessageForClient(error, statusCode) });
   });
 
   const shutdown = async () => {
@@ -1521,15 +1445,14 @@ async function bootstrap() {
           return;
         }
         runtimeLogs.event("stream.ws.event", { threadId, method: payload.method });
-        ws.send(JSON.stringify(payload));
-        if (payload.method === "turn/completed") {
-          const snapshot = buildThreadDiffSnapshotEvent(threadId);
-          if (snapshot) {
-            db.insertThreadEvent(threadId, snapshot.method, JSON.stringify(snapshot.params), Date.now());
-            runtimeLogs.event("thread.events.synthetic_diff", { threadId });
-            ws.send(JSON.stringify(snapshot));
+        if (payload.method === "turn/diff/updated") {
+          try {
+            db.insertThreadEvent(threadId, payload.method, JSON.stringify(payload.params ?? null), Date.now());
+          } catch (error) {
+            runtimeLogs.error("thread.events.persist_failed", error, { threadId, method: payload.method });
           }
         }
+        ws.send(JSON.stringify(payload));
       };
 
       sendPayload({
@@ -1574,6 +1497,48 @@ function requestLogSafeError(error: unknown) {
     return;
   }
   app.log.error({ error }, "request failed");
+}
+
+function getErrorStatusCode(error: unknown): number {
+  if (error && typeof error === "object" && "statusCode" in error) {
+    const candidate = (error as { statusCode?: unknown }).statusCode;
+    if (typeof candidate === "number" && Number.isInteger(candidate) && candidate >= 400 && candidate <= 599) {
+      return candidate;
+    }
+  }
+  return 500;
+}
+
+function getErrorMessageForClient(error: unknown, statusCode: number): string {
+  if (statusCode >= 500) {
+    return "Internal server error";
+  }
+
+  if (error && typeof error === "object" && "message" in error) {
+    const candidate = (error as { message?: unknown }).message;
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate;
+    }
+  }
+
+  return "Request failed";
+}
+
+function applyErrorHeaders(error: unknown, reply: FastifyReply) {
+  if (!error || typeof error !== "object" || !("headers" in error)) {
+    return;
+  }
+
+  const headers = (error as { headers?: unknown }).headers;
+  if (!headers || typeof headers !== "object" || Array.isArray(headers)) {
+    return;
+  }
+
+  for (const [key, value] of Object.entries(headers)) {
+    if (typeof value === "string" || typeof value === "number") {
+      reply.header(key, value);
+    }
+  }
 }
 
 bootstrap().catch(async (error) => {

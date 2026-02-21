@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -40,16 +40,15 @@ type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 interface ModelOption {
   label: string;
-  value: string | null;
+  value: string;
 }
 
 interface ReasoningOption {
   label: string;
-  value: ReasoningEffort | null;
+  value: ReasoningEffort;
 }
 
 const DEFAULT_REASONING_OPTIONS: ReasoningOption[] = [
-  { label: "Auto", value: null },
   { label: "Minimal", value: "minimal" },
   { label: "Low", value: "low" },
   { label: "Medium", value: "medium" },
@@ -251,6 +250,17 @@ function parseFilesFromUnifiedDiff(diffText: string): Array<{
   }));
 }
 
+function isLikelyUnifiedDiff(value: string): boolean {
+  const text = value.trim();
+  if (text.length === 0) {
+    return false;
+  }
+  if (text.includes("diff --git")) {
+    return true;
+  }
+  return text.includes("@@") && text.includes("--- ") && text.includes("+++ ");
+}
+
 function extractChangeSummaryFromEvent(method: string, params: unknown): RenderedTurn["summary"] | null {
   const lower = method.toLowerCase();
   if (!lower.includes("diff") && !lower.includes("filechange") && !lower.includes("file_change")) {
@@ -278,33 +288,44 @@ function extractChangeSummaryFromEvent(method: string, params: unknown): Rendere
     const pathValue = record.path ?? record.filePath ?? record.file ?? record.filename;
     const additionsValue = record.additions ?? record.added ?? record.linesAdded;
     const deletionsValue = record.deletions ?? record.removed ?? record.linesRemoved;
+    const additions =
+      typeof additionsValue === "number"
+        ? additionsValue
+        : typeof additionsValue === "string"
+        ? Number.parseInt(additionsValue, 10)
+        : NaN;
+    const deletions =
+      typeof deletionsValue === "number"
+        ? deletionsValue
+        : typeof deletionsValue === "string"
+        ? Number.parseInt(deletionsValue, 10)
+        : NaN;
 
     if (
       typeof pathValue === "string" &&
-      typeof additionsValue === "number" &&
-      typeof deletionsValue === "number" &&
-      Number.isFinite(additionsValue) &&
-      Number.isFinite(deletionsValue)
+      Number.isFinite(additions) &&
+      Number.isFinite(deletions)
     ) {
-      const key = `${pathValue}:${additionsValue}:${deletionsValue}`;
+      const key = `${pathValue}:${additions}:${deletions}`;
       if (!seen.has(key)) {
         seen.add(key);
         files.push({
           path: pathValue,
-          additions: additionsValue,
-          deletions: deletionsValue,
+          additions,
+          deletions,
         });
       }
     }
 
-    const diffText = typeof record.diff === "string" ? record.diff : typeof record.delta === "string" ? record.delta : null;
-    if (diffText && diffText.includes("diff --git")) {
-      const parsedFiles = parseFilesFromUnifiedDiff(diffText);
-      for (const parsed of parsedFiles) {
-        const key = `${parsed.path}:${parsed.additions}:${parsed.deletions}:${parsed.diff.length}`;
-        if (!seen.has(key)) {
-          seen.add(key);
-          files.push(parsed);
+    for (const valueEntry of Object.values(record)) {
+      if (typeof valueEntry === "string" && isLikelyUnifiedDiff(valueEntry)) {
+        const parsedFiles = parseFilesFromUnifiedDiff(valueEntry);
+        for (const parsed of parsedFiles) {
+          const key = `${parsed.path}:${parsed.additions}:${parsed.deletions}:${parsed.diff.length}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            files.push(parsed);
+          }
         }
       }
     }
@@ -395,7 +416,7 @@ function extractActivityFromEvent(method: string, params: unknown): RenderedTurn
         kind: "activity",
         activity: {
           title: "Ran command",
-          detail: command ? command.slice(0, 140) : undefined,
+          detail: command || undefined,
         },
       };
     }
@@ -480,7 +501,7 @@ function extractActivityFromEvent(method: string, params: unknown): RenderedTurn
       kind: "activity",
       activity: {
         title: "Ran command",
-        detail: command.slice(0, 140),
+        detail: command || undefined,
       },
     };
   }
@@ -587,17 +608,21 @@ export default function ThreadScreen() {
   const [selectedReasoning, setSelectedReasoning] = useState<ReasoningEffort | null>(null);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const [expandedActivityIds, setExpandedActivityIds] = useState<Set<string>>(new Set());
   const [streamStatus, setStreamStatus] = useState<{ tone: StreamStatusTone; text: string }>({
     tone: "warn",
     text: "Connecting",
   });
-  const [modelOptions, setModelOptions] = useState<ModelOption[]>([{ label: "Auto", value: null }]);
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const [reasoningOptionsByModel, setReasoningOptionsByModel] = useState<Record<string, ReasoningOption[]>>({});
+  const [optionsLoaded, setOptionsLoaded] = useState(false);
   const [openDropdown, setOpenDropdown] = useState<OpenDropdown>(null);
 
   const streamSocketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptRef = useRef(0);
+  const optionsRefreshPromiseRef = useRef<Promise<void> | null>(null);
+  const selectedModelRef = useRef<string | null>(null);
   const listRef = useRef<FlatList<RenderedTurn>>(null);
   const followBottomRef = useRef(true);
   const draggingRef = useRef(false);
@@ -608,10 +633,23 @@ export default function ThreadScreen() {
 
   const currentReasoningOptions = useMemo(() => {
     if (!selectedModel) {
-      return DEFAULT_REASONING_OPTIONS;
+      return [] as ReasoningOption[];
     }
-    return reasoningOptionsByModel[selectedModel] ?? DEFAULT_REASONING_OPTIONS;
+    return reasoningOptionsByModel[selectedModel] ?? [];
   }, [reasoningOptionsByModel, selectedModel]);
+
+  const resolvedSelectedModel = useMemo(
+    () => (modelOptions.some((option) => option.value === selectedModel) ? selectedModel : null),
+    [modelOptions, selectedModel]
+  );
+
+  const resolvedSelectedReasoning = useMemo(
+    () =>
+      currentReasoningOptions.some((option) => option.value === selectedReasoning)
+        ? selectedReasoning
+        : null,
+    [currentReasoningOptions, selectedReasoning]
+  );
 
   useEffect(() => {
     const showEvent = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
@@ -635,6 +673,115 @@ export default function ThreadScreen() {
   }, [currentReasoningOptions, selectedReasoning]);
 
   useEffect(() => {
+    if (selectedModel === null) {
+      return;
+    }
+    const allowed = modelOptions.some((option) => option.value === selectedModel);
+    if (!allowed) {
+      setSelectedModel(null);
+    }
+  }, [modelOptions, selectedModel]);
+
+  useEffect(() => {
+    selectedModelRef.current = selectedModel;
+  }, [selectedModel]);
+
+  const loadGatewayOptions = useCallback(async () => {
+    const payload = await getGatewayOptions();
+
+    const nextModelOptions: ModelOption[] = [];
+    const nextReasoningByModel: Record<string, ReasoningOption[]> = {};
+
+    for (const model of payload.models) {
+      nextModelOptions.push({
+        label: model.label,
+        value: model.model,
+      });
+
+      const modelReasoningOptions: ReasoningOption[] = [];
+      for (const effort of model.supportedReasoningEfforts) {
+        if (effort === "none") {
+          continue;
+        }
+        const label = effort.charAt(0).toUpperCase() + effort.slice(1);
+        modelReasoningOptions.push({
+          label,
+          value: effort,
+        });
+      }
+
+      if (modelReasoningOptions.length === 0) {
+        modelReasoningOptions.push(...DEFAULT_REASONING_OPTIONS);
+      }
+
+      nextReasoningByModel[model.model] = modelReasoningOptions;
+    }
+
+    setModelOptions(nextModelOptions);
+    setReasoningOptionsByModel(nextReasoningByModel);
+
+    const nextModelValue = (() => {
+      const currentSelectedModel = selectedModelRef.current;
+      if (currentSelectedModel && nextModelOptions.some((option) => option.value === currentSelectedModel)) {
+        return currentSelectedModel;
+      }
+      if (payload.defaultModel && nextModelOptions.some((option) => option.value === payload.defaultModel)) {
+        return payload.defaultModel;
+      }
+      return nextModelOptions[0]?.value ?? null;
+    })();
+
+    setSelectedModel((current) => {
+      if (current && nextModelOptions.some((option) => option.value === current)) {
+        return current;
+      }
+      if (payload.defaultModel && nextModelOptions.some((option) => option.value === payload.defaultModel)) {
+        return payload.defaultModel;
+      }
+      const firstRealModel = nextModelOptions[0]?.value ?? null;
+      if (firstRealModel) {
+        return firstRealModel;
+      }
+      return null;
+    });
+
+    setSelectedReasoning((current) => {
+      if (current && current !== "none") {
+        return current;
+      }
+      if (payload.defaultReasoningEffort && payload.defaultReasoningEffort !== "none") {
+        return payload.defaultReasoningEffort;
+      }
+      const modelReasoning =
+        (nextModelValue && nextReasoningByModel[nextModelValue]) || DEFAULT_REASONING_OPTIONS;
+      return modelReasoning[0]?.value ?? null;
+    });
+    setOptionsLoaded(nextModelOptions.length > 0);
+  }, []);
+
+  const refreshGatewayOptionsIfNeeded = useCallback(async () => {
+    if (optionsLoaded) {
+      return;
+    }
+    if (optionsRefreshPromiseRef.current) {
+      return optionsRefreshPromiseRef.current;
+    }
+    const refreshPromise = loadGatewayOptions().finally(() => {
+      optionsRefreshPromiseRef.current = null;
+    });
+    optionsRefreshPromiseRef.current = refreshPromise;
+    return refreshPromise;
+  }, [loadGatewayOptions, optionsLoaded]);
+
+  const markConnectionRecovered = useCallback(() => {
+    setError(null);
+    setStreamStatus((current) => (current.tone === "ok" && current.text === "Live" ? current : { tone: "ok", text: "Live" }));
+    refreshGatewayOptionsIfNeeded().catch(() => {
+      // Keep current options state if options endpoint is temporarily unavailable.
+    });
+  }, [refreshGatewayOptionsIfNeeded]);
+
+  useEffect(() => {
     if (!threadId) {
       return;
     }
@@ -647,6 +794,7 @@ export default function ThreadScreen() {
     setStreamingAssistant("");
     setIsThinking(false);
     setTurns([]);
+    setExpandedActivityIds(new Set());
     turnsSignatureRef.current = "";
     setStreamStatus({ tone: "warn", text: "Connecting" });
     reconnectAttemptRef.current = 0;
@@ -687,8 +835,7 @@ export default function ThreadScreen() {
 
         socket.onopen = () => {
           reconnectAttemptRef.current = 0;
-          setStreamStatus({ tone: "ok", text: "Live" });
-          setError((current) => (current?.startsWith("Stream disconnected") ? null : current));
+          markConnectionRecovered();
         };
 
         socket.onmessage = (event) => {
@@ -768,7 +915,8 @@ export default function ThreadScreen() {
         };
 
         socket.onerror = () => {
-          setStreamStatus({ tone: "warn", text: "Connection issue" });
+          // Wait for onclose before transitioning to reconnect state.
+          // Some environments can emit transient socket errors before stabilizing.
         };
 
         socket.onclose = () => {
@@ -792,6 +940,7 @@ export default function ThreadScreen() {
         const initialTurns = toRenderedTurns(thread.turns);
         const withPersistedEvents = toPersistedEventTurns(eventsResponse.events, initialTurns);
         setTurns(withPersistedEvents);
+        setError(null);
         turnsSignatureRef.current = turnsSignature(withPersistedEvents);
         seenChangeHashesRef.current = new Set(
           withPersistedEvents
@@ -858,6 +1007,7 @@ export default function ThreadScreen() {
           setStreamingAssistant("");
           setTurns(rendered);
         }
+        markConnectionRecovered();
       } catch {
         // no-op: stream reconnect status already indicates issues
       }
@@ -867,58 +1017,26 @@ export default function ThreadScreen() {
       active = false;
       clearInterval(timer);
     };
-  }, [threadId, loading, isThinking, streamStatus.tone]);
+  }, [threadId, loading, isThinking, streamStatus.tone, markConnectionRecovered]);
 
   useEffect(() => {
     let active = true;
 
     const loadOptions = async () => {
       try {
-        const payload = await getGatewayOptions();
+        await loadGatewayOptions();
         if (!active) {
           return;
         }
-
-        const nextModelOptions: ModelOption[] = [{ label: "Auto", value: null }];
-        const nextReasoningByModel: Record<string, ReasoningOption[]> = {};
-
-        for (const model of payload.models) {
-          nextModelOptions.push({
-            label: model.label,
-            value: model.model,
-          });
-
-          const modelReasoningOptions: ReasoningOption[] = [{ label: "Auto", value: null }];
-          for (const effort of model.supportedReasoningEfforts) {
-            if (effort === "none") {
-              continue;
-            }
-            const label = effort.charAt(0).toUpperCase() + effort.slice(1);
-            modelReasoningOptions.push({
-              label,
-              value: effort,
-            });
-          }
-
-          if (modelReasoningOptions.length === 1) {
-            modelReasoningOptions.push(...DEFAULT_REASONING_OPTIONS.filter((opt) => opt.value !== null));
-          }
-
-          nextReasoningByModel[model.model] = modelReasoningOptions;
-        }
-
-        setModelOptions(nextModelOptions);
-        setReasoningOptionsByModel(nextReasoningByModel);
-
-        if (payload.defaultModel && nextModelOptions.some((model) => model.value === payload.defaultModel)) {
-          setSelectedModel(payload.defaultModel);
-        }
-
-        if (payload.defaultReasoningEffort && payload.defaultReasoningEffort !== "none") {
-          setSelectedReasoning(payload.defaultReasoningEffort);
-        }
       } catch {
-        // fall back to static options if model/list is unavailable
+        if (!active) {
+          return;
+        }
+        setOptionsLoaded(false);
+        setModelOptions([]);
+        setReasoningOptionsByModel({});
+        setSelectedModel(null);
+        setSelectedReasoning(null);
       }
     };
 
@@ -929,7 +1047,7 @@ export default function ThreadScreen() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [loadGatewayOptions]);
 
   const keepToBottom = (animated: boolean) => {
     listRef.current?.scrollToEnd({ animated });
@@ -994,8 +1112,8 @@ export default function ThreadScreen() {
     try {
       await sendThreadMessage(threadId, {
         text,
-        model: selectedModel ?? undefined,
-        reasoningEffort: selectedReasoning ?? undefined,
+        model: resolvedSelectedModel ?? undefined,
+        reasoningEffort: resolvedSelectedReasoning ?? undefined,
       });
     } catch (sendError) {
       if (sendError instanceof ReauthRequiredError) {
@@ -1029,8 +1147,8 @@ export default function ThreadScreen() {
         keyboardVerticalOffset={0}
       >
       <View className="flex-1 bg-background px-4 pt-1">
-        <View className="mb-3 flex-row items-center">
-          <View className="w-28">
+      <View className="-mx-4 mb-3 flex-row items-center border-b border-border/50 pb-2 px-4">
+      <View className="w-28">
             <Pressable
               onPress={() => router.back()}
               className="self-start h-10 w-10 items-center justify-center"
@@ -1062,7 +1180,10 @@ export default function ThreadScreen() {
           data={allTurns}
           keyExtractor={(item) => item.id}
           className="flex-1"
-          contentContainerStyle={{ paddingBottom: 16 }}
+          style={{ marginHorizontal: -16 }}
+          contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 16 }}
+          indicatorStyle="white"
+          scrollIndicatorInsets={{ right: 1 }}
           keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
           keyboardShouldPersistTaps="handled"
           onScroll={onListScroll}
@@ -1117,30 +1238,52 @@ export default function ThreadScreen() {
                 </View>
               ) : (
               item.kind === "activity" && item.activity ? (
-                <View className="w-full py-1">
-                  <Text className="text-center text-base font-medium text-muted-foreground">{item.activity.title}</Text>
-                  {item.activity.detail ? (
-                    <Text className="mt-0.5 text-center text-sm text-muted-foreground" numberOfLines={1}>
-                      {item.activity.detail}
-                    </Text>
-                  ) : null}
+                item.activity.title === "Ran command" && item.activity.detail ? (
+                  <Pressable
+                    className="w-full py-1"
+                    onPress={() => {
+                      setExpandedActivityIds((existing) => {
+                        const next = new Set(existing);
+                        if (next.has(item.id)) {
+                          next.delete(item.id);
+                        } else {
+                          next.add(item.id);
+                        }
+                        return next;
+                      });
+                    }}
+                  >
+                    <Text className="text-center text-base font-medium text-muted-foreground">{item.activity.title}</Text>
+                    {expandedActivityIds.has(item.id) ? (
+                      <Text className="mt-0.5 text-center text-sm text-muted-foreground">
+                        {item.activity.detail}
+                      </Text>
+                    ) : (
+                      <Text className="mt-0.5 text-center text-sm text-muted-foreground" numberOfLines={1}>
+                        {item.activity.detail}
+                      </Text>
+                    )}
+                  </Pressable>
+                ) : (
+                  <View className="w-full py-1">
+                    <Text className="text-center text-base font-medium text-muted-foreground">{item.activity.title}</Text>
+                    {item.activity.detail ? (
+                      <Text className="mt-0.5 text-center text-sm text-muted-foreground" numberOfLines={1}>
+                        {item.activity.detail}
+                      </Text>
+                    ) : null}
+                  </View>
+                )
+              ) : (
+              item.role === "user" ? (
+                <View className="max-w-[86%] rounded-2xl border border-border/10 bg-neutral-500/40 px-4 py-2 mt-3">
+                  <Text className="text-base leading-6 text-white">{item.text}</Text>
                 </View>
               ) : (
-              <View
-                className={`rounded-2xl px-3 py-3 ${
-                  item.role === "user"
-                    ? "max-w-[86%] border border-border/10 bg-emerald-950/40"
-                    : item.streaming
-                    ? "w-[86%] border border-border/10 bg-card"
-                    : "w-[86%] border border-border/10 bg-card"
-                }`}
-              >
-                {item.role === "user" ? (
-                  <Text className="text-sm leading-6 text-emerald-100">{item.text}</Text>
-                ) : (
+                <View className="w-full px-1 py-1">
                   <Markdown style={markdownStyles}>{item.text}</Markdown>
-                )}
-              </View>
+                </View>
+              )
               )
               )}
             </MotiView>
@@ -1174,7 +1317,7 @@ export default function ThreadScreen() {
         ) : null}
 
         <View
-          className="border-t border-border/50 bg-background pt-2"
+          className="-mx-4 border-t border-border/50 bg-background px-4 pt-2"
           style={{
             paddingBottom: Math.max(insets.bottom, 8),
           }}
@@ -1189,26 +1332,28 @@ export default function ThreadScreen() {
               </Pressable>
             </View>
           ) : null}
-          <View className="mb-2 flex-row gap-2">
-            <Pressable
-              onPress={() => setOpenDropdown("model")}
-              className="h-9 flex-1 flex-row items-center justify-between rounded-full border border-border/10 bg-muted px-3"
-            >
-              <Text className="text-sm font-semibold text-foreground">
-                {modelOptions.find((option) => option.value === selectedModel)?.label ?? "Auto"}
-              </Text>
-              <Text className="text-sm font-semibold text-emerald-300">^</Text>
-            </Pressable>
-            <Pressable
-              onPress={() => setOpenDropdown("reasoning")}
-              className="h-9 flex-1 flex-row items-center justify-between rounded-full border border-border/10 bg-muted px-3"
-            >
-              <Text className="text-sm font-semibold text-foreground">
-                {currentReasoningOptions.find((option) => option.value === selectedReasoning)?.label ?? "Auto"}
-              </Text>
-              <Text className="text-sm font-semibold text-emerald-300">^</Text>
-            </Pressable>
-          </View>
+          {optionsLoaded && resolvedSelectedModel && currentReasoningOptions.length > 0 ? (
+            <View className="mb-2 flex-row gap-2">
+              <Pressable
+                onPress={() => setOpenDropdown("model")}
+                className="h-9 flex-1 flex-row items-center justify-between rounded-full border border-border/10 bg-muted px-3"
+              >
+                <Text className="text-sm font-semibold text-foreground">
+                  {modelOptions.find((option) => option.value === resolvedSelectedModel)?.label}
+                </Text>
+                <Text className="text-sm font-semibold text-emerald-300">^</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => setOpenDropdown("reasoning")}
+                className="h-9 flex-1 flex-row items-center justify-between rounded-full border border-border/10 bg-muted px-3"
+              >
+                <Text className="text-sm font-semibold text-foreground">
+                  {currentReasoningOptions.find((option) => option.value === resolvedSelectedReasoning)?.label}
+                </Text>
+                <Text className="text-sm font-semibold text-emerald-300">^</Text>
+              </Pressable>
+            </View>
+          ) : null}
 
           <View className="flex-row items-end gap-2">
             <TextInput
@@ -1236,7 +1381,12 @@ export default function ThreadScreen() {
       </View>
       </KeyboardAvoidingView>
 
-      <Modal transparent visible={openDropdown !== null} animationType="fade" onRequestClose={() => setOpenDropdown(null)}>
+      <Modal
+        transparent
+        visible={openDropdown !== null && optionsLoaded}
+        animationType="fade"
+        onRequestClose={() => setOpenDropdown(null)}
+      >
         <Pressable className="flex-1 bg-background/80 px-4 pt-24" onPress={() => setOpenDropdown(null)}>
           <Pressable
             className="rounded-xl border border-border/10 bg-muted p-2"
@@ -1246,16 +1396,16 @@ export default function ThreadScreen() {
           >
             {(openDropdown === "model" ? modelOptions : currentReasoningOptions).map((option) => {
               const isModel = openDropdown === "model";
-              const active = isModel ? selectedModel === option.value : selectedReasoning === option.value;
+              const active = isModel ? resolvedSelectedModel === option.value : resolvedSelectedReasoning === option.value;
               return (
                 <Pressable
                   key={`${openDropdown}-${option.label}`}
                   className={`rounded-lg px-3 py-3 ${active ? "bg-primary/30" : "bg-transparent"}`}
                   onPress={() => {
                     if (isModel) {
-                      setSelectedModel(option.value as string | null);
+                      setSelectedModel(option.value as string);
                     } else {
-                      setSelectedReasoning(option.value as ReasoningEffort | null);
+                      setSelectedReasoning(option.value as ReasoningEffort);
                     }
                     setOpenDropdown(null);
                   }}

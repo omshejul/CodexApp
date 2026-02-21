@@ -1,9 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import { ActivityIndicator, FlatList, Modal, Pressable, RefreshControl, Text, View } from "react-native";
 import { router } from "expo-router";
+import { Ionicons } from "@expo/vector-icons";
 import { MotiView } from "moti";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { clearSession, createThread, getDirectories, getThreads, ReauthRequiredError } from "@/lib/api";
+import {
+  clearSession,
+  createThread,
+  getCurrentServerBaseUrl,
+  getDirectories,
+  getGatewayOptions,
+  getThreads,
+  ReauthRequiredError,
+} from "@/lib/api";
 
 interface ThreadItem {
   id: string;
@@ -11,6 +20,25 @@ interface ThreadItem {
   title?: string;
   updatedAt?: string;
   cwd?: string;
+}
+
+function formatPathForDisplay(fullPath: string | null): string {
+  if (!fullPath) {
+    return "Loading...";
+  }
+
+  const homeMatch = fullPath.match(/^\/Users\/[^/]+(?:\/|$)/);
+  if (homeMatch) {
+    const home = homeMatch[0].endsWith("/") ? homeMatch[0].slice(0, -1) : homeMatch[0];
+    if (fullPath === home) {
+      return "~/";
+    }
+    if (fullPath.startsWith(`${home}/`)) {
+      return `~/${fullPath.slice(home.length + 1)}`;
+    }
+  }
+
+  return fullPath;
 }
 
 function formatRelativeTime(updatedAt?: string): string {
@@ -60,6 +88,12 @@ export default function ThreadsScreen() {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showWorkspacePicker, setShowWorkspacePicker] = useState(false);
+  const [showSettingsMenu, setShowSettingsMenu] = useState(false);
+  const [settingsInfoLoading, setSettingsInfoLoading] = useState(false);
+  const [settingsInfoError, setSettingsInfoError] = useState<string | null>(null);
+  const [pairedServer, setPairedServer] = useState<string | null>(null);
+  const [defaultModel, setDefaultModel] = useState<string | null>(null);
+  const [modelCount, setModelCount] = useState<number | null>(null);
   const [loadingDirectories, setLoadingDirectories] = useState(false);
   const [pickerError, setPickerError] = useState<string | null>(null);
   const [currentDirectory, setCurrentDirectory] = useState<string | null>(null);
@@ -159,16 +193,28 @@ export default function ThreadsScreen() {
     setPickerError(null);
   };
 
-  const breadcrumb = (() => {
-    if (!currentDirectory) {
-      return "Loading...";
+  const openSettingsMenu = async () => {
+    setShowSettingsMenu(true);
+    setSettingsInfoLoading(true);
+    setSettingsInfoError(null);
+    try {
+      const [serverBaseUrl, options] = await Promise.all([getCurrentServerBaseUrl(), getGatewayOptions()]);
+      setPairedServer(serverBaseUrl);
+      setDefaultModel(options.defaultModel ?? null);
+      setModelCount(options.models.length);
+    } catch (settingsError) {
+      if (settingsError instanceof ReauthRequiredError) {
+        await clearSession();
+        router.replace("/pair");
+        return;
+      }
+      setSettingsInfoError(settingsError instanceof Error ? settingsError.message : "Unable to load settings info");
+    } finally {
+      setSettingsInfoLoading(false);
     }
-    const parts = currentDirectory.split("/").filter((part) => part.length > 0);
-    if (parts.length === 0) {
-      return "Root";
-    }
-    return `Root / ${parts.join(" / ")}`;
-  })();
+  };
+
+  const breadcrumb = formatPathForDisplay(currentDirectory);
 
   const renderItem = ({ item, index }: { item: ThreadItem; index: number }) => (
     <MotiView
@@ -204,20 +250,27 @@ export default function ThreadsScreen() {
         <Text className="text-3xl font-semibold text-foreground">Threads</Text>
         <View className="flex-row gap-2">
           <Pressable
-            className="rounded-lg border border-border/50 bg-primary px-3 py-2"
+            className="h-10 w-10 items-center justify-center rounded-lg border border-border/50 bg-primary"
             onPress={openWorkspacePicker}
             disabled={creating}
+            accessibilityRole="button"
+            accessibilityLabel={creating ? "Creating new chat" : "New chat"}
           >
-            <Text className="text-xs font-semibold text-primary-foreground">{creating ? "Creating..." : "New Chat"}</Text>
+            {creating ? (
+              <ActivityIndicator size="small" color="#ffffff" />
+            ) : (
+              <Ionicons name="add" size={22} color="#ffffff" />
+            )}
           </Pressable>
           <Pressable
-            className="rounded-lg border border-border/50 bg-muted px-3 py-2"
-            onPress={async () => {
-              await clearSession();
-              router.replace("/pair");
+            className="h-10 w-10 items-center justify-center rounded-lg border border-border/50 bg-muted"
+            onPress={() => {
+              openSettingsMenu().catch(() => undefined);
             }}
+            accessibilityRole="button"
+            accessibilityLabel="Settings"
           >
-            <Text className="text-xs font-semibold text-foreground">Re-pair</Text>
+            <Ionicons name="settings-outline" size={18} color="#e5e7eb" />
           </Pressable>
         </View>
       </View>
@@ -258,9 +311,32 @@ export default function ThreadsScreen() {
               event.stopPropagation();
             }}
           >
-            <Text className="text-lg font-semibold text-card-foreground">Select working directory</Text>
-            <Text className="mt-1 text-xs text-muted-foreground">Navigate folders, then select the current folder.</Text>
-            <Text className="mt-2 text-xs text-foreground">{breadcrumb}</Text>
+            <View className="flex-row items-center gap-2">
+              <Ionicons name="folder-open-outline" size={18} color="#e5e7eb" />
+              <Text className="text-lg font-semibold text-card-foreground">Choose folder</Text>
+            </View>
+            <Text className="mt-1 text-xs text-muted-foreground">Navigate folders, then open the current folder.</Text>
+
+            <View className="mt-3 flex-row items-center justify-between rounded-xl border border-border/50 bg-muted px-3 py-2">
+              <View className="flex-row items-center gap-2">
+                <Ionicons name="home-outline" size={14} color="#9ca3af" />
+                <Text className="text-xs text-foreground" numberOfLines={1} ellipsizeMode="middle">
+                  {breadcrumb}
+                </Text>
+              </View>
+              <Pressable
+                className="flex-row items-center gap-1 rounded-lg border border-border/50 bg-card px-2 py-1"
+                onPress={() => {
+                  if (parentDirectory) {
+                    loadDirectory(parentDirectory).catch(() => undefined);
+                  }
+                }}
+                disabled={!parentDirectory || loadingDirectories}
+              >
+                <Ionicons name="arrow-up-outline" size={14} color={parentDirectory ? "#e5e7eb" : "#6b7280"} />
+                <Text className={`text-xs font-semibold ${parentDirectory ? "text-foreground" : "text-muted-foreground"}`}>Up</Text>
+              </Pressable>
+            </View>
 
             {pickerError ? (
               <View className="mt-2 rounded-xl border border-border/50 bg-destructive/15 px-3 py-2">
@@ -285,7 +361,13 @@ export default function ThreadsScreen() {
                         loadDirectory(item.path).catch(() => undefined);
                       }}
                     >
-                      <Text className="text-foreground">{item.name}</Text>
+                      <View className="flex-row items-center justify-between">
+                        <View className="flex-row items-center gap-2">
+                          <Ionicons name="folder-outline" size={14} color="#d1d5db" />
+                          <Text className="text-foreground">{item.name}</Text>
+                        </View>
+                        <Ionicons name="chevron-forward" size={14} color="#6b7280" />
+                      </View>
                     </Pressable>
                   )}
                   ListEmptyComponent={
@@ -298,17 +380,6 @@ export default function ThreadsScreen() {
             </View>
 
             <View className="mt-4 flex-row gap-2">
-              <Pressable
-                className="flex-1 rounded-xl border border-border/50 bg-muted px-3 py-3"
-                onPress={() => {
-                  if (parentDirectory) {
-                    loadDirectory(parentDirectory).catch(() => undefined);
-                  }
-                }}
-                disabled={!parentDirectory || loadingDirectories}
-              >
-                <Text className="text-center text-sm font-semibold text-foreground">Up</Text>
-              </Pressable>
               <Pressable
                 className="flex-1 rounded-xl border border-border/50 bg-muted px-3 py-3"
                 onPress={onCancelPicker}
@@ -324,9 +395,75 @@ export default function ThreadsScreen() {
                 }}
                 disabled={creating || !currentDirectory}
               >
-                <Text className="text-center text-sm font-semibold text-primary-foreground">{creating ? "Creating..." : "Select"}</Text>
+                <Text className="text-center text-sm font-semibold text-primary-foreground">{creating ? "Creating..." : "Open Directory"}</Text>
               </Pressable>
             </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        transparent
+        visible={showSettingsMenu}
+        animationType="fade"
+        onRequestClose={() => {
+          setShowSettingsMenu(false);
+        }}
+      >
+        <Pressable
+          className="flex-1 items-center justify-center bg-background/80 px-4"
+          onPress={() => {
+            setShowSettingsMenu(false);
+          }}
+        >
+          <Pressable
+            className="w-full rounded-2xl border border-border/50 bg-card p-4"
+            onPress={(event) => {
+              event.stopPropagation();
+            }}
+          >
+            <Text className="text-lg font-semibold text-card-foreground">Settings</Text>
+            <Text className="mt-1 text-xs text-muted-foreground">User info and pairing.</Text>
+
+            <View className="mt-4 px-1">
+              <Text className="text-xs text-muted-foreground">Paired server</Text>
+              <Text className="mt-1 text-sm text-foreground" numberOfLines={1} ellipsizeMode="middle">
+                {pairedServer ?? "Unknown"}
+              </Text>
+            </View>
+
+            <View className="mt-3 px-1">
+              <Text className="text-xs text-muted-foreground">Default model</Text>
+              <Text className="mt-1 text-sm text-foreground">{defaultModel ?? "Unknown"}</Text>
+            </View>
+
+            <View className="mt-3 px-1">
+              <Text className="text-xs text-muted-foreground">Available models</Text>
+              <Text className="mt-1 text-sm text-foreground">{modelCount ?? 0}</Text>
+            </View>
+
+            {settingsInfoLoading ? (
+              <View className="mt-3 px-1">
+                <Text className="text-xs text-muted-foreground">Loading user info...</Text>
+              </View>
+            ) : null}
+
+            {settingsInfoError ? (
+              <View className="mt-3 px-1">
+                <Text className="text-xs text-destructive-foreground">{settingsInfoError}</Text>
+              </View>
+            ) : null}
+
+            <Pressable
+              className="mt-3 rounded-xl border border-border/50 bg-muted px-3 py-3"
+              onPress={async () => {
+                setShowSettingsMenu(false);
+                await clearSession();
+                router.replace("/pair");
+              }}
+            >
+              <Text className="text-sm font-semibold text-foreground">Re-pair</Text>
+            </Pressable>
           </Pressable>
         </Pressable>
       </Modal>

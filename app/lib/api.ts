@@ -34,6 +34,32 @@ export class ReauthRequiredError extends Error {
   }
 }
 
+export class GatewayConnectionError extends Error {
+  constructor(message = "Unable to reach your Codex gateway. Make sure Tailscale is ON on both devices, then try again.") {
+    super(message);
+  }
+}
+
+function isLikelyNetworkUnreachableError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("network request failed") ||
+    message.includes("failed to fetch") ||
+    message.includes("fetch failed") ||
+    message.includes("internet connection appears to be offline")
+  );
+}
+
+function toGatewayConnectionError(error: unknown): never {
+  if (isLikelyNetworkUnreachableError(error)) {
+    throw new GatewayConnectionError();
+  }
+  throw error;
+}
+
 function normalizeBaseUrl(value: string): string {
   return value.replace(/\/+$/, "");
 }
@@ -108,18 +134,23 @@ export async function claimPairing(
   pairing: { serverBaseUrl: string; pairId: string; code: string },
   payload: Pick<PairClaimRequest, "deviceId" | "deviceName">
 ) {
-  const response = await fetch(`${pairing.serverBaseUrl}/pair/claim`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      pairId: pairing.pairId,
-      code: pairing.code,
-      deviceId: payload.deviceId,
-      deviceName: payload.deviceName,
-    }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${pairing.serverBaseUrl}/pair/claim`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        pairId: pairing.pairId,
+        code: pairing.code,
+        deviceId: payload.deviceId,
+        deviceName: payload.deviceName,
+      }),
+    });
+  } catch (error) {
+    toGatewayConnectionError(error);
+  }
 
   if (!response.ok) {
     if (response.status === 405) {
@@ -152,15 +183,20 @@ async function refreshAccessToken(): Promise<string> {
   }
 
   refreshPromise = (async () => {
-    const response = await fetch(`${current.serverBaseUrl}/auth/refresh`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        refreshToken: current.refreshToken,
-      }),
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${current.serverBaseUrl}/auth/refresh`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          refreshToken: current.refreshToken,
+        }),
+      });
+    } catch (error) {
+      toGatewayConnectionError(error);
+    }
 
     if (!response.ok) {
       await clearSession();
@@ -210,14 +246,19 @@ export async function authenticatedRequest<T>(
   const url = await buildUrl(pathname);
   let accessToken = await getValidAccessToken();
 
-  const doRequest = (token: string) =>
-    fetch(url, {
-      ...options,
-      headers: {
-        ...(options.headers ?? {}),
-        Authorization: `Bearer ${token}`,
-      },
-    });
+  const doRequest = async (token: string) => {
+    try {
+      return await fetch(url, {
+        ...options,
+        headers: {
+          ...(options.headers ?? {}),
+          Authorization: `Bearer ${token}`,
+        },
+      });
+    } catch (error) {
+      toGatewayConnectionError(error);
+    }
+  };
 
   let response = await doRequest(accessToken);
 

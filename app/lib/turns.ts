@@ -200,7 +200,7 @@ function toCommandActivity(record: Record<string, unknown>, id: string): Rendere
     kind: "activity",
     activity: {
       title: "Ran command",
-      detail: command ? command.slice(0, 140) : undefined,
+      detail: command || undefined,
     },
   };
 }
