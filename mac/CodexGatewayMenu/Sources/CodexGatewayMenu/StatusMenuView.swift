@@ -79,6 +79,10 @@ struct StatusMenuView: View {
         onOpenSettings()
       }
 
+      Button("Help") {
+        openHelpEmail()
+      }
+
       Button("Copy Logs") {
         manager.copyLogsToClipboard()
       }
@@ -193,5 +197,10 @@ struct StatusMenuView: View {
   private func formatAddedDate(_ createdAtMillis: Int64) -> String {
     let date = Date(timeIntervalSince1970: TimeInterval(createdAtMillis) / 1000)
     return Self.addedDateFormatter.string(from: date)
+  }
+
+  private func openHelpEmail() {
+    guard let emailURL = URL(string: "mailto:contact@omshejul.com") else { return }
+    NSWorkspace.shared.open(emailURL)
   }
 }

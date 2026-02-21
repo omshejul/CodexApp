@@ -4,6 +4,8 @@ export interface RenderedTurn {
   text: string;
   images?: string[];
   streaming?: boolean;
+  createdAtMs?: number;
+  turnId?: string;
   kind?: "message" | "changeSummary" | "activity";
   summary?: {
     filesChanged: number;
@@ -82,6 +84,64 @@ function extractImageUris(content: unknown[]): string[] {
   }
 
   return uniqueNonEmpty(urls);
+}
+
+function parseTimestampMs(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    const direct = Number(value);
+    if (Number.isFinite(direct)) {
+      return direct;
+    }
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function extractItemTimestampMs(item: Record<string, unknown>): number | null {
+  const directKeys: Array<keyof typeof item> = [
+    "createdAt",
+    "created_at",
+    "timestamp",
+    "time",
+    "ts",
+    "startedAt",
+    "updatedAt",
+  ];
+
+  for (const key of directKeys) {
+    const parsed = parseTimestampMs(item[key]);
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
+
+  const timing = item.timing;
+  if (timing && typeof timing === "object") {
+    const timingRecord = timing as Record<string, unknown>;
+    const nested = parseTimestampMs(timingRecord.startedAt) ?? parseTimestampMs(timingRecord.createdAt);
+    if (nested !== null) {
+      return nested;
+    }
+  }
+
+  return null;
+}
+
+function renderPriorityForItemType(type: unknown): number {
+  if (type === "userMessage") {
+    return 0;
+  }
+  if (type === "agentMessage") {
+    return 2;
+  }
+  // commandExecution/fileChange/webSearch/contextCompaction and other system items.
+  return 1;
 }
 
 function flattenText(value: unknown): string {
@@ -223,7 +283,7 @@ function snippetFromUnifiedDiff(diff: string): string[] {
     .slice(0, 400);
 }
 
-function toCommandActivity(record: Record<string, unknown>, id: string): RenderedTurn {
+function toCommandActivity(record: Record<string, unknown>, id: string, createdAtMs?: number | null): RenderedTurn {
   const actions = Array.isArray(record.commandActions) ? (record.commandActions as Array<Record<string, unknown>>) : [];
   const readAction = actions.find((action) => action?.type === "read" && typeof action.path === "string");
   if (readAction && typeof readAction.path === "string") {
@@ -231,6 +291,7 @@ function toCommandActivity(record: Record<string, unknown>, id: string): Rendere
       id,
       role: "system",
       text: "",
+      createdAtMs: createdAtMs ?? undefined,
       kind: "activity",
       activity: {
         title: `Read ${readAction.path}`,
@@ -245,6 +306,7 @@ function toCommandActivity(record: Record<string, unknown>, id: string): Rendere
       id,
       role: "system",
       text: "",
+      createdAtMs: createdAtMs ?? undefined,
       kind: "activity",
       activity: {
         title: path ? `Explored files in ${path}` : "Explored files",
@@ -257,6 +319,7 @@ function toCommandActivity(record: Record<string, unknown>, id: string): Rendere
     id,
     role: "system",
     text: "",
+    createdAtMs: createdAtMs ?? undefined,
     kind: "activity",
     activity: {
       title: "Ran command",
@@ -265,7 +328,7 @@ function toCommandActivity(record: Record<string, unknown>, id: string): Rendere
   };
 }
 
-function toFileChangeSummary(record: Record<string, unknown>, id: string): RenderedTurn | null {
+function toFileChangeSummary(record: Record<string, unknown>, id: string, createdAtMs?: number | null): RenderedTurn | null {
   const changes = Array.isArray(record.changes) ? (record.changes as Array<Record<string, unknown>>) : [];
   if (!changes.length) {
     return null;
@@ -298,6 +361,7 @@ function toFileChangeSummary(record: Record<string, unknown>, id: string): Rende
     id,
     role: "system",
     text: "",
+    createdAtMs: createdAtMs ?? undefined,
     kind: "changeSummary",
     summary: {
       filesChanged: files.length,
@@ -306,15 +370,15 @@ function toFileChangeSummary(record: Record<string, unknown>, id: string): Rende
   };
 }
 
-function fromThreadItem(item: Record<string, unknown>, id: string): RenderedTurn | null {
+function fromThreadItem(item: Record<string, unknown>, id: string, createdAtMs?: number | null): RenderedTurn | null {
   const type = item.type;
 
   if (type === "commandExecution") {
-    return toCommandActivity(item, id);
+    return toCommandActivity(item, id, createdAtMs);
   }
 
   if (type === "fileChange") {
-    return toFileChangeSummary(item, id);
+    return toFileChangeSummary(item, id, createdAtMs);
   }
 
   if (type === "contextCompaction") {
@@ -322,6 +386,7 @@ function fromThreadItem(item: Record<string, unknown>, id: string): RenderedTurn
       id,
       role: "system",
       text: "",
+      createdAtMs: createdAtMs ?? undefined,
       kind: "activity",
       activity: {
         title: "Context automatically compacted",
@@ -337,20 +402,39 @@ export function toRenderedTurns(turns: unknown[]): RenderedTurn[] {
 
   for (let turnIndex = 0; turnIndex < turns.length; turnIndex += 1) {
     const turn = turns[turnIndex];
-    const items = turn && typeof turn === "object" ? (turn as Record<string, unknown>).items : null;
+    const turnRecord = turn && typeof turn === "object" ? (turn as Record<string, unknown>) : null;
+    const turnId = turnRecord && typeof turnRecord.id === "string" ? turnRecord.id : undefined;
+    const items = turnRecord ? turnRecord.items : null;
 
     if (!Array.isArray(items)) {
       continue;
     }
 
-    for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
-      const item = items[itemIndex];
-      if (!item || typeof item !== "object") {
-        continue;
-      }
+    const orderedItems = items
+      .map((item, index) => ({ item, index }))
+      .filter((entry): entry is { item: Record<string, unknown>; index: number } => {
+        return !!entry.item && typeof entry.item === "object";
+      })
+      .sort((a, b) => {
+        const aTime = extractItemTimestampMs(a.item);
+        const bTime = extractItemTimestampMs(b.item);
+        if (aTime !== null && bTime !== null && aTime !== bTime) {
+          return aTime - bTime;
+        }
 
-      const record = item as Record<string, unknown>;
+        const aPriority = renderPriorityForItemType(a.item.type);
+        const bPriority = renderPriorityForItemType(b.item.type);
+        if (aPriority !== bPriority) {
+          return aPriority - bPriority;
+        }
+
+        return a.index - b.index;
+      });
+
+    for (let itemIndex = 0; itemIndex < orderedItems.length; itemIndex += 1) {
+      const record = orderedItems[itemIndex].item;
       const type = record.type;
+      const createdAtMs = extractItemTimestampMs(record);
 
       if (type === "userMessage") {
         const content = Array.isArray(record.content) ? record.content : [];
@@ -375,6 +459,8 @@ export function toRenderedTurns(turns: unknown[]): RenderedTurn[] {
           role: "user",
           text,
           images: imageUris.length > 0 ? imageUris : undefined,
+          createdAtMs: createdAtMs ?? undefined,
+          turnId,
         });
         continue;
       }
@@ -406,6 +492,8 @@ export function toRenderedTurns(turns: unknown[]): RenderedTurn[] {
             id: typeof record.id === "string" ? record.id : `turn-${turnIndex}-item-${itemIndex}`,
             role: "system",
             text: "",
+            createdAtMs: createdAtMs ?? undefined,
+            turnId,
             kind: "changeSummary",
             summary,
           });
@@ -417,15 +505,19 @@ export function toRenderedTurns(turns: unknown[]): RenderedTurn[] {
           role: "assistant",
           text,
           images: imageUris.length > 0 ? imageUris : undefined,
+          createdAtMs: createdAtMs ?? undefined,
+          turnId,
           kind: "message",
         });
       }
 
       const derived = fromThreadItem(
         record,
-        typeof record.id === "string" ? record.id : `turn-${turnIndex}-item-${itemIndex}`
+        typeof record.id === "string" ? record.id : `turn-${turnIndex}-item-${itemIndex}`,
+        createdAtMs
       );
       if (derived) {
+        derived.turnId = turnId;
         rendered.push(derived);
       }
     }

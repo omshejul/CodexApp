@@ -565,6 +565,42 @@ function extractThreadIdFromParams(value: unknown): string | null {
   return null;
 }
 
+function extractTurnIdFromParams(value: unknown): string | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const found = extractTurnIdFromParams(entry);
+      if (found) {
+        return found;
+      }
+    }
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const candidates = [record.turnId, record.turn_id, record.turnID];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate.trim();
+    }
+  }
+  const nestedTurn = record.turn;
+  if (nestedTurn && typeof nestedTurn === "object" && typeof (nestedTurn as Record<string, unknown>).id === "string") {
+    const turnId = ((nestedTurn as Record<string, unknown>).id as string).trim();
+    if (turnId.length > 0) {
+      return turnId;
+    }
+  }
+  for (const nested of Object.values(record)) {
+    const found = extractTurnIdFromParams(nested);
+    if (found) {
+      return found;
+    }
+  }
+  return null;
+}
+
 function normalizeThreads(result: unknown): Array<{ id: string; name?: string; title?: string; updatedAt?: string; cwd?: string }> {
   const pickNonEmptyString = (...values: unknown[]): string | undefined => {
     for (const value of values) {
@@ -842,6 +878,7 @@ const app = Fastify({
 
 async function bootstrap() {
   runtimeLogs.event("gateway.bootstrap.start", { host, port, codexWsUrl, eventsLogPath, errorsLogPath });
+  const activeTurnIdByThread = new Map<string, string>();
 
   if (!isLocalHost(host)) {
     throw new Error(`Refusing to start gateway on non-local HOST='${host}'. Use 127.0.0.1 or localhost.`);
@@ -856,13 +893,28 @@ async function bootstrap() {
   });
 
   codex.onNotification((method, params) => {
+    const lowerMethod = method.toLowerCase();
     const threadId = extractThreadIdFromParams(params);
+    const turnId = extractTurnIdFromParams(params);
+    if (threadId && turnId && lowerMethod === "turn/started") {
+      activeTurnIdByThread.set(threadId, turnId);
+    }
     if (threadId) {
       try {
-        db.insertThreadEvent(threadId, method, JSON.stringify(params ?? null), Date.now());
+        db.insertThreadEvent(
+          threadId,
+          turnId ?? activeTurnIdByThread.get(threadId) ?? null,
+          method,
+          JSON.stringify(params ?? null),
+          Date.now()
+        );
       } catch (error) {
         runtimeLogs.error("thread.events.persist_failed", error, { threadId, method });
       }
+    }
+
+    if (threadId && (lowerMethod === "turn/completed" || lowerMethod === "turn/failed" || lowerMethod === "turn/cancelled")) {
+      activeTurnIdByThread.delete(threadId);
     }
 
     const update = parseThreadNameUpdate(method, params);
@@ -1365,6 +1417,7 @@ async function bootstrap() {
         return {
           id: row.id,
           threadId: row.threadId,
+          turnId: row.turnId ?? undefined,
           method: row.method,
           params: parsedParams,
           createdAt: new Date(row.createdAt).toISOString(),
@@ -1522,7 +1575,13 @@ async function bootstrap() {
       runtimeLogs.event("stream.sse.event", { threadId: params.id, method: payload.method });
       if (payload.method === "turn/diff/updated") {
         try {
-          db.insertThreadEvent(params.id, payload.method, JSON.stringify(payload.params ?? null), Date.now());
+          db.insertThreadEvent(
+            params.id,
+            extractTurnIdFromParams(payload.params) ?? activeTurnIdByThread.get(params.id) ?? null,
+            payload.method,
+            JSON.stringify(payload.params ?? null),
+            Date.now()
+          );
         } catch (error) {
           runtimeLogs.error("thread.events.persist_failed", error, { threadId: params.id, method: payload.method });
         }
@@ -1625,7 +1684,13 @@ async function bootstrap() {
         runtimeLogs.event("stream.ws.event", { threadId, method: payload.method });
         if (payload.method === "turn/diff/updated") {
           try {
-            db.insertThreadEvent(threadId, payload.method, JSON.stringify(payload.params ?? null), Date.now());
+            db.insertThreadEvent(
+              threadId,
+              extractTurnIdFromParams(payload.params) ?? activeTurnIdByThread.get(threadId) ?? null,
+              payload.method,
+              JSON.stringify(payload.params ?? null),
+              Date.now()
+            );
           } catch (error) {
             runtimeLogs.error("thread.events.persist_failed", error, { threadId, method: payload.method });
           }

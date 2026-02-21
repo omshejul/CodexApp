@@ -35,6 +35,7 @@ export interface ThreadCwdRow {
 export interface ThreadEventRow {
   id: number;
   threadId: string;
+  turnId: string | null;
   method: string;
   paramsJson: string;
   createdAt: number;
@@ -97,6 +98,7 @@ export class GatewayDatabase {
       CREATE TABLE IF NOT EXISTS thread_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         threadId TEXT NOT NULL,
+        turnId TEXT NULL,
         method TEXT NOT NULL,
         paramsJson TEXT NOT NULL,
         createdAt INTEGER NOT NULL
@@ -109,6 +111,12 @@ export class GatewayDatabase {
       CREATE INDEX IF NOT EXISTS idx_thread_cwds_updated ON thread_cwds (updatedAt);
       CREATE INDEX IF NOT EXISTS idx_thread_events_thread_created ON thread_events (threadId, createdAt);
     `);
+
+    // Forward-compatible migration for existing installs.
+    const threadEventColumns = this.db.prepare("PRAGMA table_info(thread_events)").all() as Array<{ name: string }>;
+    if (!threadEventColumns.some((column) => column.name === "turnId")) {
+      this.db.exec("ALTER TABLE thread_events ADD COLUMN turnId TEXT NULL");
+    }
   }
 
   close() {
@@ -252,16 +260,17 @@ export class GatewayDatabase {
     return result;
   }
 
-  insertThreadEvent(threadId: string, method: string, paramsJson: string, createdAt: number) {
+  insertThreadEvent(threadId: string, turnId: string | null, method: string, paramsJson: string, createdAt: number) {
     this.db
-      .prepare("INSERT INTO thread_events (threadId, method, paramsJson, createdAt) VALUES (?, ?, ?, ?)")
-      .run(threadId, method, paramsJson, createdAt);
+      .prepare("INSERT INTO thread_events (threadId, turnId, method, paramsJson, createdAt) VALUES (?, ?, ?, ?, ?)")
+      .run(threadId, turnId, method, paramsJson, createdAt);
   }
 
   listThreadEvents(threadId: string, limit = 500): ThreadEventRow[] {
     return this.db
       .prepare(
         `SELECT id, threadId, method, paramsJson, createdAt
+         , turnId
          FROM thread_events
          WHERE threadId = ?
          ORDER BY id ASC

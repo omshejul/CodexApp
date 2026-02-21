@@ -276,7 +276,209 @@ function turnsSignature(items: RenderedTurn[]): string {
     .join("|");
 }
 
+function parseTimestampMs(value: unknown): number | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function firstNonEmptyString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string") {
+      const normalized = value.trim();
+      if (normalized.length > 0) {
+        return normalized;
+      }
+    }
+  }
+  return null;
+}
+
+function isLikelyWebSearchToolName(value: string): boolean {
+  const lower = value.trim().toLowerCase();
+  if (!lower) {
+    return false;
+  }
+  if (
+    lower.includes("fuzzyfilesearch") ||
+    lower.includes("fuzzy_file_search") ||
+    lower.includes("file_search") ||
+    lower.includes("filesearch")
+  ) {
+    return false;
+  }
+  return (
+    lower.includes("web_search") ||
+    lower.includes("websearch") ||
+    lower.includes("search_query") ||
+    lower.includes("internet_search")
+  );
+}
+
+function extractWebSearchQueries(value: unknown): string[] {
+  const collected: string[] = [];
+  const seenObjects = new Set<object>();
+  const QUERY_KEY_PATTERN = /(query|search|term|keyword|prompt|input)/i;
+
+  const push = (candidate: unknown) => {
+    if (typeof candidate !== "string") {
+      return;
+    }
+    const normalized = candidate.replace(/[ \t]+/g, " ").trim().replace(/^["'`]|["'`]$/g, "");
+    if (normalized.length < 2) {
+      return;
+    }
+    if (normalized.length > 240) {
+      return;
+    }
+    if (normalized.startsWith("{") || normalized.startsWith("[") || normalized.startsWith("http://") || normalized.startsWith("https://")) {
+      return;
+    }
+    collected.push(normalized);
+  };
+
+  const parseFromUrl = (candidate: unknown) => {
+    if (typeof candidate !== "string") {
+      return;
+    }
+    if (!(candidate.startsWith("http://") || candidate.startsWith("https://"))) {
+      return;
+    }
+    try {
+      const url = new URL(candidate);
+      push(url.searchParams.get("q"));
+      push(url.searchParams.get("query"));
+      push(url.searchParams.get("search_query"));
+    } catch {
+      // Ignore invalid URLs.
+    }
+  };
+
+  const visit = (node: unknown, depth = 0) => {
+    if (!node || depth > 7) {
+      return;
+    }
+
+    if (Array.isArray(node)) {
+      for (const entry of node) {
+        visit(entry, depth + 1);
+      }
+      return;
+    }
+
+    if (typeof node !== "object") {
+      return;
+    }
+
+    if (seenObjects.has(node)) {
+      return;
+    }
+    seenObjects.add(node);
+
+    const record = node as Record<string, unknown>;
+
+    push(record.query);
+    push(record.q);
+    push(record.searchQuery);
+    push(record.search_query);
+    push(record.searchTerm);
+    push(record.search_term);
+    push(record.keyword);
+    push(record.keywords);
+    push(record.prompt);
+    push(record.input);
+    parseFromUrl(record.url);
+    parseFromUrl(record.uri);
+    parseFromUrl(record.link);
+
+    for (const [key, entry] of Object.entries(record)) {
+      if (typeof entry === "string" && QUERY_KEY_PATTERN.test(key)) {
+        push(entry);
+      }
+    }
+
+    const queries = record.queries;
+    if (Array.isArray(queries)) {
+      for (const entry of queries) {
+        if (typeof entry === "string") {
+          push(entry);
+          continue;
+        }
+        if (entry && typeof entry === "object") {
+          const queryEntry = entry as Record<string, unknown>;
+          push(queryEntry.query);
+          push(queryEntry.q);
+          push(queryEntry.searchQuery);
+          push(queryEntry.search_query);
+          push(queryEntry.searchTerm);
+          push(queryEntry.search_term);
+          push(queryEntry.keyword);
+          push(queryEntry.keywords);
+          push(queryEntry.prompt);
+          push(queryEntry.input);
+          push(queryEntry.text);
+          parseFromUrl(queryEntry.url);
+          parseFromUrl(queryEntry.uri);
+          parseFromUrl(queryEntry.link);
+        }
+      }
+    }
+
+    const parseNestedJson = (raw: unknown) => {
+      if (typeof raw !== "string") {
+        return;
+      }
+      try {
+        const parsedArgs = JSON.parse(raw) as unknown;
+        visit(parsedArgs, depth + 1);
+      } catch {
+        // Ignore non-JSON argument payloads.
+      }
+    };
+
+    parseNestedJson(record.arguments);
+    parseNestedJson(record.args);
+    parseNestedJson(record.input);
+    parseNestedJson(record.payload);
+    parseNestedJson(record.data);
+
+    for (const entry of Object.values(record)) {
+      parseFromUrl(entry);
+    }
+
+    for (const nested of Object.values(record)) {
+      if (nested && typeof nested === "object") {
+        visit(nested, depth + 1);
+      }
+    }
+  };
+
+  visit(value);
+  return Array.from(new Set(collected));
+}
+
+function toWebSearchActivity(queries: string[]): { title: string; detail?: string } {
+  if (!queries.length) {
+    return { title: "Web search" };
+  }
+
+  if (queries.length === 1) {
+    return {
+      title: "Web search",
+      detail: queries[0],
+    };
+  }
+
+  return {
+    title: `Web search (${queries.length})`,
+    detail: queries.map((query) => `- ${query}`).join("\n"),
+  };
+}
+
 function turnContentSignature(item: RenderedTurn): string {
+  const turnAnchor = item.turnId ?? "";
   if (item.kind === "changeSummary" && item.summary) {
     const files = item.summary.files
       .map(
@@ -284,12 +486,12 @@ function turnContentSignature(item: RenderedTurn): string {
           `${file.path}:${file.additions}:${file.deletions}:${file.diff?.length ?? 0}:${(file.snippets ?? []).join("|")}`
       )
       .join(";");
-    return `change:${files}`;
+    return `change:${turnAnchor}:${files}`;
   }
   if (item.kind === "activity" && item.activity) {
-    return `activity:${item.activity.title}:${item.activity.detail ?? ""}`;
+    return `activity:${turnAnchor}:${item.activity.title}:${item.activity.detail ?? ""}`;
   }
-  return `msg:${item.role}:${item.text}:${(item.images ?? []).join(",")}`;
+  return `msg:${turnAnchor}:${item.role}:${item.text}:${(item.images ?? []).join(",")}`;
 }
 
 function parseFilesFromUnifiedDiff(diffText: string): Array<{
@@ -487,26 +689,34 @@ function extractActivityFromEvent(method: string, params: unknown): RenderedTurn
     }
     const responseItem = item as Record<string, unknown>;
     const type = typeof responseItem.type === "string" ? responseItem.type : "";
+    const typeLower = type.toLowerCase();
+    const responseToolName = firstNonEmptyString(
+      responseItem.name,
+      responseItem.toolName,
+      responseItem.tool_name,
+      responseItem.serverToolName,
+      responseItem.server_tool_name,
+      responseItem.callName,
+      responseItem.call_name
+    );
     const responseId = `raw-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 
-    if (type === "web_search_call") {
-      const action = responseItem.action && typeof responseItem.action === "object" ? (responseItem.action as Record<string, unknown>) : null;
-      const queries = action && Array.isArray(action.queries) ? action.queries : [];
-      const query =
-        (action && typeof action.query === "string" && action.query.trim()) ||
-        (queries[0] && typeof queries[0] === "string" ? queries[0] : "");
+    if (
+      typeLower === "web_search_call" ||
+      isLikelyWebSearchToolName(typeLower) ||
+      isLikelyWebSearchToolName(responseToolName ?? "")
+    ) {
+      const queries = extractWebSearchQueries(responseItem.action ?? responseItem);
       return {
         id: responseId,
         role: "system",
         text: "",
         kind: "activity",
-        activity: {
-          title: query ? `Searched web for ${query}` : "Searched web",
-        },
+        activity: toWebSearchActivity(queries),
       };
     }
 
-    if (type === "local_shell_call") {
+    if (typeLower === "local_shell_call") {
       const action = responseItem.action && typeof responseItem.action === "object" ? (responseItem.action as Record<string, unknown>) : null;
       const command = action && Array.isArray(action.command) ? action.command.filter((part) => typeof part === "string").join(" ") : "";
       return {
@@ -521,7 +731,7 @@ function extractActivityFromEvent(method: string, params: unknown): RenderedTurn
       };
     }
 
-    if (type === "compaction") {
+    if (typeLower === "compaction") {
       return {
         id: responseId,
         role: "system",
@@ -534,7 +744,12 @@ function extractActivityFromEvent(method: string, params: unknown): RenderedTurn
     }
   }
 
-  if (lower !== "item/completed" && lower !== "item/started") {
+  if (
+    lower !== "item/completed" &&
+    lower !== "item/started" &&
+    lower !== "codex/event/item_started" &&
+    lower !== "codex/event/item_completed"
+  ) {
     return null;
   }
 
@@ -543,16 +758,18 @@ function extractActivityFromEvent(method: string, params: unknown): RenderedTurn
   }
 
   const record = params as Record<string, unknown>;
-  const item = record.item;
+  const nestedMsg = record.msg && typeof record.msg === "object" ? (record.msg as Record<string, unknown>) : null;
+  const item = record.item ?? nestedMsg?.item;
   if (!item || typeof item !== "object") {
     return null;
   }
 
   const threadItem = item as Record<string, unknown>;
   const itemType = typeof threadItem.type === "string" ? threadItem.type : "";
+  const itemTypeLower = itemType.toLowerCase();
   const itemId = typeof threadItem.id === "string" ? threadItem.id : `${Date.now()}`;
 
-  if (itemType === "contextCompaction") {
+  if (itemTypeLower === "contextcompaction") {
     return {
       id: `activity-${itemId}`,
       role: "system",
@@ -564,7 +781,7 @@ function extractActivityFromEvent(method: string, params: unknown): RenderedTurn
     };
   }
 
-  if (itemType === "commandExecution") {
+  if (itemTypeLower === "commandexecution") {
     const actions = Array.isArray(threadItem.commandActions) ? (threadItem.commandActions as Array<Record<string, unknown>>) : [];
     const readAction = actions.find((action) => action?.type === "read" && typeof action.path === "string");
     if (readAction && typeof readAction.path === "string") {
@@ -606,43 +823,123 @@ function extractActivityFromEvent(method: string, params: unknown): RenderedTurn
     };
   }
 
-  if (itemType === "webSearch") {
-    const query = typeof threadItem.query === "string" ? threadItem.query.trim() : "";
+  if (itemTypeLower === "websearch") {
+    const queries = extractWebSearchQueries(threadItem);
     return {
       id: `activity-${itemId}`,
       role: "system",
       text: "",
       kind: "activity",
-      activity: {
-        title: query ? `Searched web for ${query}` : "Searched web",
-      },
+      activity: toWebSearchActivity(queries),
     };
+  }
+
+  if (itemTypeLower === "mcptoolcall" || itemTypeLower === "toolcall") {
+    const toolName = firstNonEmptyString(
+      threadItem.name,
+      threadItem.toolName,
+      threadItem.tool_name,
+      threadItem.serverToolName,
+      threadItem.server_tool_name,
+      threadItem.callName,
+      threadItem.call_name
+    );
+    const queries = extractWebSearchQueries(threadItem);
+    if (isLikelyWebSearchToolName(toolName ?? "") || queries.length > 0) {
+      return {
+        id: `activity-${itemId}`,
+        role: "system",
+        text: "",
+        kind: "activity",
+        activity: toWebSearchActivity(queries),
+      };
+    }
   }
 
   return null;
 }
 
 function toPersistedEventTurns(
-  events: Array<{ id: number; method: string; params?: unknown }>,
+  events: Array<{ id: number; method: string; params?: unknown; createdAt?: string; turnId?: string }>,
   existing: RenderedTurn[]
 ): RenderedTurn[] {
   const merged = [...existing];
   const seen = new Set(merged.map((item) => turnContentSignature(item)));
+  const insertCandidate = (candidate: RenderedTurn) => {
+    if (candidate.turnId) {
+      let firstAssistantInTurn = -1;
+      for (let index = 0; index < merged.length; index += 1) {
+        const item = merged[index];
+        if (item.turnId === candidate.turnId && item.role === "assistant") {
+          firstAssistantInTurn = index;
+          break;
+        }
+      }
+      if (firstAssistantInTurn >= 0) {
+        merged.splice(firstAssistantInTurn, 0, candidate);
+        return;
+      }
+
+      let lastInTurn = -1;
+      for (let index = merged.length - 1; index >= 0; index -= 1) {
+        if (merged[index].turnId === candidate.turnId) {
+          lastInTurn = index;
+          break;
+        }
+      }
+      if (lastInTurn >= 0) {
+        merged.splice(lastInTurn + 1, 0, candidate);
+        return;
+      }
+    }
+
+    const candidateMs = typeof candidate.createdAtMs === "number" && Number.isFinite(candidate.createdAtMs) ? candidate.createdAtMs : null;
+    if (candidateMs !== null) {
+      const firstLaterIndex = merged.findIndex((item) => {
+        const itemMs = typeof item.createdAtMs === "number" && Number.isFinite(item.createdAtMs) ? item.createdAtMs : null;
+        return itemMs !== null && itemMs > candidateMs;
+      });
+      if (firstLaterIndex >= 0) {
+        merged.splice(firstLaterIndex, 0, candidate);
+        return;
+      }
+
+      let lastTimestampedIndex = -1;
+      for (let index = merged.length - 1; index >= 0; index -= 1) {
+        const itemMs = typeof merged[index].createdAtMs === "number" && Number.isFinite(merged[index].createdAtMs)
+          ? merged[index].createdAtMs
+          : null;
+        if (itemMs !== null) {
+          lastTimestampedIndex = index;
+          break;
+        }
+      }
+      if (lastTimestampedIndex >= 0) {
+        merged.splice(lastTimestampedIndex + 1, 0, candidate);
+        return;
+      }
+    }
+
+    merged.push(candidate);
+  };
 
   for (const event of events) {
+    const createdAtMs = parseTimestampMs(event.createdAt);
     const summary = extractChangeSummaryFromEvent(event.method, event.params ?? null);
     if (summary) {
       const candidate: RenderedTurn = {
         id: `persisted-change-${event.id}`,
         role: "system",
         text: "",
+        createdAtMs: createdAtMs ?? undefined,
+        turnId: event.turnId,
         kind: "changeSummary",
         summary,
       };
       const signature = turnContentSignature(candidate);
       if (!seen.has(signature)) {
         seen.add(signature);
-        merged.push(candidate);
+        insertCandidate(candidate);
       }
       continue;
     }
@@ -652,16 +949,53 @@ function toPersistedEventTurns(
       const candidate: RenderedTurn = {
         ...activity,
         id: `persisted-activity-${event.id}`,
+        createdAtMs: createdAtMs ?? undefined,
+        turnId: event.turnId,
       };
       const signature = turnContentSignature(candidate);
       if (!seen.has(signature)) {
         seen.add(signature);
-        merged.push(candidate);
+        insertCandidate(candidate);
       }
     }
   }
 
   return merged;
+}
+
+function useSmoothedFlag(value: boolean, exitDelayMs = 180): boolean {
+  const [smoothed, setSmoothed] = useState(value);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+
+    if (value) {
+      setSmoothed(true);
+      return;
+    }
+
+    if (!smoothed) {
+      return;
+    }
+
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      setSmoothed(false);
+    }, exitDelayMs);
+
+    return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, [exitDelayMs, smoothed, value]);
+
+  return smoothed;
 }
 
 function ThinkingShinyPill() {
@@ -673,56 +1007,62 @@ function ThinkingShinyPill() {
       transition={{ type: "timing", duration: 300 }}
       className="pb-4 pt-2"
     >
-      <View className="relative self-start overflow-hidden rounded-full border border-white/20 bg-white/5 px-4 py-2">
-        <MotiView
-          from={{ translateX: -160, opacity: 0 }}
-          animate={{ translateX: 240, opacity: 0.6 }}
-          transition={{ type: "timing", duration: 1400, loop: true, repeatReverse: false }}
-          className="absolute -bottom-8 -top-8 w-20 bg-white/30"
-          style={{
-            transform: [{ rotate: "18deg" }],
-          }}
-        />
-        <MotiView
-          from={{ translateX: -100, opacity: 0 }}
-          animate={{ translateX: 240, opacity: 0.3 }}
-          transition={{ type: "timing", duration: 1800, loop: true, repeatReverse: false, delay: 400 }}
-          className="absolute -bottom-8 -top-8 w-10 bg-white/20"
-          style={{
-            transform: [{ rotate: "18deg" }],
-          }}
-        />
-        <View className="relative flex-row items-center gap-2">
+      <MotiView
+        from={{ translateY: 0 }}
+        animate={{ translateY: -3 }}
+        transition={{ type: "timing", duration: 1400, loop: true, repeatReverse: true }}
+      >
+        <View className="relative self-start overflow-hidden rounded-full border border-white/20 bg-white/5 px-4 py-2">
           <MotiView
-            from={{ opacity: 0.4 }}
-            animate={{ opacity: 1 }}
-            transition={{ type: "timing", duration: 800, loop: true, repeatReverse: true }}
-          >
-            <Ionicons name="sparkles-outline" size={14} color="#ffffff" />
-          </MotiView>
-          <Text className="text-sm font-semibold text-white">Thinking</Text>
-          <View className="flex-row items-center gap-1">
+            from={{ translateX: -160, opacity: 0 }}
+            animate={{ translateX: 240, opacity: 0.6 }}
+            transition={{ type: "timing", duration: 1400, loop: true, repeatReverse: false }}
+            className="absolute -bottom-8 -top-8 w-20 bg-white/30"
+            style={{
+              transform: [{ rotate: "18deg" }],
+            }}
+          />
+          <MotiView
+            from={{ translateX: -100, opacity: 0 }}
+            animate={{ translateX: 240, opacity: 0.3 }}
+            transition={{ type: "timing", duration: 1800, loop: true, repeatReverse: false, delay: 400 }}
+            className="absolute -bottom-8 -top-8 w-10 bg-white/20"
+            style={{
+              transform: [{ rotate: "18deg" }],
+            }}
+          />
+          <View className="relative flex-row items-center gap-2">
             <MotiView
-              from={{ opacity: 0.2, scale: 0.7 }}
-              animate={{ opacity: 1, scale: 1 }}
-              transition={{ type: "timing", duration: 500, loop: true, repeatReverse: true, delay: 0 }}
-              className="h-1.5 w-1.5 rounded-full bg-white"
-            />
-            <MotiView
-              from={{ opacity: 0.2, scale: 0.7 }}
-              animate={{ opacity: 1, scale: 1 }}
-              transition={{ type: "timing", duration: 500, loop: true, repeatReverse: true, delay: 150 }}
-              className="h-1.5 w-1.5 rounded-full bg-white"
-            />
-            <MotiView
-              from={{ opacity: 0.2, scale: 0.7 }}
-              animate={{ opacity: 1, scale: 1 }}
-              transition={{ type: "timing", duration: 500, loop: true, repeatReverse: true, delay: 300 }}
-              className="h-1.5 w-1.5 rounded-full bg-white"
-            />
+              from={{ opacity: 0.4 }}
+              animate={{ opacity: 1 }}
+              transition={{ type: "timing", duration: 800, loop: true, repeatReverse: true }}
+            >
+              <Ionicons name="sparkles-outline" size={14} color="#ffffff" />
+            </MotiView>
+            <Text className="text-sm font-semibold text-white">Thinking</Text>
+            <View className="flex-row items-center gap-1">
+              <MotiView
+                from={{ opacity: 0.2, scale: 0.7 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ type: "timing", duration: 500, loop: true, repeatReverse: true, delay: 0 }}
+                className="h-1.5 w-1.5 rounded-full bg-white"
+              />
+              <MotiView
+                from={{ opacity: 0.2, scale: 0.7 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ type: "timing", duration: 500, loop: true, repeatReverse: true, delay: 150 }}
+                className="h-1.5 w-1.5 rounded-full bg-white"
+              />
+              <MotiView
+                from={{ opacity: 0.2, scale: 0.7 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ type: "timing", duration: 500, loop: true, repeatReverse: true, delay: 300 }}
+                className="h-1.5 w-1.5 rounded-full bg-white"
+              />
+            </View>
           </View>
         </View>
-      </View>
+      </MotiView>
     </MotiView>
   );
 }
@@ -1261,6 +1601,35 @@ export default function ThreadScreen() {
           }
 
           if (method.includes("item/mcptoolcall/progress")) {
+            const progressRecord = payload.params && typeof payload.params === "object" ? (payload.params as Record<string, unknown>) : null;
+            const progressToolName = firstNonEmptyString(
+              progressRecord?.toolName,
+              progressRecord?.tool_name,
+              progressRecord?.name,
+              progressRecord?.callName,
+              progressRecord?.call_name
+            );
+            const progressQueries = extractWebSearchQueries(payload.params);
+            if (progressQueries.length > 0 || isLikelyWebSearchToolName(progressToolName ?? "")) {
+              const candidate: RenderedTurn = {
+                id: `web-search-progress-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+                role: "system",
+                text: "",
+                kind: "activity",
+                activity: toWebSearchActivity(progressQueries),
+              };
+              const candidateSignature = turnContentSignature(candidate);
+              setTurns((existing) => {
+                const alreadyPresent = existing.some(
+                  (item) => item.kind === "activity" && item.activity && turnContentSignature(item) === candidateSignature
+                );
+                if (alreadyPresent) {
+                  return existing;
+                }
+                return [...existing, candidate];
+              });
+            }
+
             const delta = extractDeltaText(payload.params);
             const chunk =
               delta ||
@@ -1394,7 +1763,7 @@ export default function ThreadScreen() {
       return;
     }
 
-    const shouldSync = isThinking || streamStatus.tone !== "ok";
+    const shouldSync = streamStatus.tone !== "ok";
     if (!shouldSync) {
       return;
     }
@@ -1402,12 +1771,13 @@ export default function ThreadScreen() {
     let active = true;
     const timer = setInterval(async () => {
       try {
-        const thread = await getThread(threadId);
+        const [thread, eventsResponse] = await Promise.all([getThread(threadId), getThreadEvents(threadId)]);
         if (!active) {
           return;
         }
         const rendered = toRenderedTurns(thread.turns);
-        const nextSignature = turnsSignature(rendered);
+        const withPersistedEvents = toPersistedEventTurns(eventsResponse.events, rendered);
+        const nextSignature = turnsSignature(withPersistedEvents);
         if (nextSignature !== turnsSignatureRef.current) {
           turnsSignatureRef.current = nextSignature;
           setStreamingAssistant("");
@@ -1416,7 +1786,12 @@ export default function ThreadScreen() {
           setStreamingPlan("");
           setStreamingFileChanges("");
           setStreamingToolProgress("");
-          setTurns(rendered);
+          setTurns(withPersistedEvents);
+          seenChangeHashesRef.current = new Set(
+            withPersistedEvents
+              .filter((item) => item.kind === "changeSummary" && item.summary)
+              .map((item) => JSON.stringify(item.summary))
+          );
         }
         markConnectionRecovered();
       } catch {
@@ -1428,7 +1803,7 @@ export default function ThreadScreen() {
       active = false;
       clearInterval(timer);
     };
-  }, [threadId, loading, isThinking, streamStatus.tone, markConnectionRecovered]);
+  }, [threadId, loading, streamStatus.tone, markConnectionRecovered]);
 
   useEffect(() => {
     let active = true;
@@ -1553,10 +1928,14 @@ export default function ThreadScreen() {
     if (!threadId || stopping) {
       return;
     }
+    if (!activeTurnId) {
+      setError("Unable to stop response right now. Please try again in a moment.");
+      return;
+    }
 
     setStopping(true);
     try {
-      await interruptThreadTurn(threadId, activeTurnId ? { turnId: activeTurnId } : undefined);
+      await interruptThreadTurn(threadId, { turnId: activeTurnId });
       setIsThinking(false);
       setActiveTurnId(null);
       flushStreamingAssistant();
@@ -1639,6 +2018,15 @@ export default function ThreadScreen() {
     streamingPlan.trim().length > 0 ||
     streamingFileChanges.trim().length > 0 ||
     streamingToolProgress.trim().length > 0;
+  const smoothIsThinking = useSmoothedFlag(isThinking, 240);
+  const composerHasDraft = composerText.trim().length > 0 || pendingImages.length > 0;
+  const composerActionIconName = isResponding
+    ? stopping
+      ? "time-outline"
+      : "stop-circle-outline"
+    : sending
+    ? "time-outline"
+    : "arrow-up";
 
   const allTurns = [
     ...turns,
@@ -1728,6 +2116,23 @@ export default function ThreadScreen() {
         ]
       : []),
   ];
+
+  const resolveWebSearchFallback = useCallback(
+    (turnIndex: number): string | null => {
+      for (let index = turnIndex - 1; index >= 0; index -= 1) {
+        const candidate = allTurns[index];
+        if (candidate.role !== "user") {
+          continue;
+        }
+        const text = candidate.text.trim();
+        if (text.length > 0) {
+          return text;
+        }
+      }
+      return null;
+    },
+    [allTurns]
+  );
 
   return (
     <SafeAreaView className="flex-1 bg-background" edges={["top", "left", "right"]}>
@@ -1894,13 +2299,24 @@ export default function ThreadScreen() {
                     (item.activity.title === "Reasoning" ||
                       item.activity.title === "Plan" ||
                       item.activity.title === "File changes" ||
-                      item.activity.title === "Tool progress") &&
-                    item.activity.detail
+                      item.activity.title === "Tool progress" ||
+                      item.activity.title.startsWith("Web search"))
                   ) {
+                    const webSearchFallback =
+                      item.activity.title.startsWith("Web search") && !item.activity.detail
+                        ? resolveWebSearchFallback(index)
+                        : null;
                     const activityDetail =
                       item.activity.title === "Reasoning"
-                        ? formatReasoningDetail(item.activity.detail)
-                        : item.activity.detail;
+                        ? formatReasoningDetail(item.activity.detail ?? "")
+                        : item.activity.detail ?? (webSearchFallback ? `From prompt: ${webSearchFallback}` : "");
+                    if (!activityDetail) {
+                      return (
+                        <View className="w-full py-1">
+                          <Text className="text-center text-base font-medium text-muted-foreground">{item.activity.title}</Text>
+                        </View>
+                      );
+                    }
                     return (
                       <View className="w-full rounded-xl border border-border/20 bg-black/35 px-3 py-2">
                         <Text className="mb-1 text-xs font-semibold uppercase tracking-[0.8px] text-muted-foreground">
@@ -2014,7 +2430,7 @@ export default function ThreadScreen() {
           }
           ListFooterComponent={
             <AnimatePresence>
-              {isThinking ? <ThinkingShinyPill key="thinking" /> : null}
+              {smoothIsThinking ? <ThinkingShinyPill key="thinking" /> : null}
             </AnimatePresence>
           }
         />
@@ -2121,17 +2537,24 @@ export default function ThreadScreen() {
               className="max-h-36 flex-1 rounded-3xl border border-border/10 bg-muted px-4 py-3 text-foreground"
             />
             <Pressable
-              disabled={isResponding ? stopping : sending || (!composerText.trim() && pendingImages.length === 0)}
+              disabled={isResponding ? stopping || !activeTurnId : sending || !composerHasDraft}
               onPress={isResponding ? onStopResponse : onSend}
               className={`h-10 w-10 items-center justify-center rounded-full ${
-                isResponding || sending || (!composerText.trim() && pendingImages.length === 0) ? "bg-secondary" : "bg-primary"
+                isResponding || sending || !composerHasDraft ? "bg-secondary" : "bg-primary"
               }`}
             >
-              <Ionicons
-                name={isResponding ? (stopping ? "time-outline" : "stop-circle-outline") : sending ? "time-outline" : "arrow-up"}
-                size={20}
-                color="#d8ffd8"
-              />
+              <AnimatePresence>
+                <MotiView
+                  key={`${composerActionIconName}-${isResponding ? "responding" : "idle"}-${stopping ? "stopping" : "active"}`}
+                  from={{ opacity: 0, scale: 0.78, rotate: "-10deg" }}
+                  animate={{ opacity: 1, scale: 1, rotate: "0deg" }}
+                  exit={{ opacity: 0, scale: 0.78, rotate: "10deg" }}
+                  transition={{ type: "timing", duration: 140 }}
+                  style={{ width: 20, height: 20, alignItems: "center", justifyContent: "center" }}
+                >
+                  <Ionicons name={composerActionIconName} size={20} color="#d8ffd8" />
+                </MotiView>
+              </AnimatePresence>
             </Pressable>
           </View>
         </View>

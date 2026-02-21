@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { ActivityIndicator, FlatList, Modal, Pressable, RefreshControl, ScrollView, Text, useWindowDimensions, View } from "react-native";
+import { ActivityIndicator, FlatList, Linking, Modal, Pressable, RefreshControl, ScrollView, Text, useWindowDimensions, View } from "react-native";
 import { router } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { MotiView } from "moti";
@@ -285,6 +285,14 @@ export default function ThreadsScreen() {
       setSettingsInfoError(settingsError instanceof Error ? settingsError.message : "Unable to load settings info");
     } finally {
       setSettingsInfoLoading(false);
+    }
+  };
+
+  const openHelpEmail = async () => {
+    const helpUrl = "mailto:contact@omshejul.com";
+    const canOpen = await Linking.canOpenURL(helpUrl);
+    if (canOpen) {
+      await Linking.openURL(helpUrl);
     }
   };
 
@@ -688,6 +696,18 @@ export default function ThreadsScreen() {
                     <View className="flex-row items-center justify-center gap-2">
                       <Ionicons name="link-outline" size={16} className="text-foreground" />
                       <Text className="text-sm font-semibold text-foreground">Re-Pair Device</Text>
+                    </View>
+                  </Pressable>
+
+                  <Pressable
+                    className="mt-3 rounded-xl border border-border/50 bg-muted px-3 py-3"
+                    onPress={() => {
+                      openHelpEmail().catch(() => undefined);
+                    }}
+                  >
+                    <View className="flex-row items-center justify-center gap-2">
+                      <Ionicons name="help-circle-outline" size={16} className="text-foreground" />
+                      <Text className="text-sm font-semibold text-foreground">Help</Text>
                     </View>
                   </Pressable>
                 </ScrollView>

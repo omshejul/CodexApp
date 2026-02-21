@@ -123,6 +123,15 @@ cd app/ios
 pod install --repo-update
 ```
 
+## Android APK Build (EAS)
+
+Build an installable Android APK with the `preview` profile:
+
+```bash
+cd app
+bunx eas-cli build --platform android --profile preview
+```
+
 ## Security Model
 
 - Codex app-server is local-only (`127.0.0.1`).

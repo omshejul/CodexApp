@@ -75,6 +75,7 @@ export const ThreadResponseSchema = z.object({
 export const ThreadEventSchema = z.object({
   id: z.number().int().positive(),
   threadId: z.string().min(1),
+  turnId: z.string().min(1).optional(),
   method: z.string().min(1),
   params: z.unknown(),
   createdAt: z.string().datetime(),
