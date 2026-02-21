@@ -3,7 +3,7 @@
 This guide covers the packaged menu bar app that bundles the gateway runtime and Node.js so it can run outside this repo checkout.
 
 Project location:
-- `/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu`
+- `./mac/CodexGatewayMenu`
 
 ## What Is Bundled
 
@@ -53,12 +53,12 @@ From repo root:
 ```bash
 SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
 NOTARYTOOL_PROFILE="codex-notary" \
-/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/scripts/build_app.sh --release
+./mac/CodexGatewayMenu/scripts/build_app.sh --release
 ```
 
 Outputs:
-- `/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGateway.app`
-- `/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGateway.dmg`
+- `./mac/CodexGatewayMenu/build/CodexGateway.app`
+- `./mac/CodexGatewayMenu/build/CodexGateway.dmg`
 
 ## Signed + Notarized Release
 
@@ -66,20 +66,12 @@ Set:
 - `SIGN_IDENTITY` (Developer ID Application certificate name)
 - `NOTARYTOOL_PROFILE` (saved keychain profile for `xcrun notarytool`)
 
-Quick command (current project setup):
-
-```bash
-SIGN_IDENTITY="Developer ID Application: Om Shejul (M4K84L4TKR)" \
-NOTARYTOOL_PROFILE="codex-gateway" \
-/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/scripts/build_app.sh --release
-```
-
-Then run:
+Run the build command:
 
 ```bash
 SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
-NOTARYTOOL_PROFILE="codex-notary" \
-/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/scripts/build_app.sh --release
+NOTARYTOOL_PROFILE="your-notary-profile" \
+./mac/CodexGatewayMenu/scripts/build_app.sh --release
 ```
 
 This will:
@@ -103,38 +95,38 @@ Expected identity format:
 2. Store notary credentials in keychain profile (one-time):
 
 ```bash
-xcrun notarytool store-credentials codex-gateway \
+xcrun notarytool store-credentials your-notary-profile \
   --apple-id "<APPLE_ID_EMAIL>" \
-  --team-id "M4K84L4TKR" \
+  --team-id "<TEAM_ID>" \
   --password "<APP_SPECIFIC_PASSWORD>"
 ```
 
 3. Run signed + notarized build:
 
 ```bash
-SIGN_IDENTITY="Developer ID Application: Om Shejul (M4K84L4TKR)" \
-NOTARYTOOL_PROFILE="codex-gateway" \
-/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/scripts/build_app.sh --release
+SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+NOTARYTOOL_PROFILE="your-notary-profile" \
+./mac/CodexGatewayMenu/scripts/build_app.sh --release
 ```
 
 4. Output artifacts:
-- `/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGateway.app`
-- `/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGateway.dmg`
+- `./mac/CodexGatewayMenu/build/CodexGateway.app`
+- `./mac/CodexGatewayMenu/build/CodexGateway.dmg`
 
 5. Optional validation commands:
 
 ```bash
-spctl -a -t exec -vv /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGateway.app
-spctl -a -t open -vv /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGateway.dmg
-codesign --verify --deep --strict --verbose=2 /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGateway.app
-xcrun stapler validate /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGateway.app
-xcrun stapler validate /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGateway.dmg
+spctl -a -t exec -vv ./mac/CodexGatewayMenu/build/CodexGateway.app
+spctl -a -t open -vv ./mac/CodexGatewayMenu/build/CodexGateway.dmg
+codesign --verify --deep --strict --verbose=2 ./mac/CodexGatewayMenu/build/CodexGateway.app
+xcrun stapler validate ./mac/CodexGatewayMenu/build/CodexGateway.app
+xcrun stapler validate ./mac/CodexGatewayMenu/build/CodexGateway.dmg
 ```
 
 6. Optional notarization history check:
 
 ```bash
-xcrun notarytool history --keychain-profile codex-gateway
+xcrun notarytool history --keychain-profile your-notary-profile
 ```
 
 Notes:

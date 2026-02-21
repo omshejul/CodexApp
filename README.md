@@ -36,7 +36,7 @@ bun run build:gateway
 cp gateway/.env.example gateway/.env
 ```
 
-Set `PUBLIC_BASE_URL` to your Tailscale hostname (example: `https://oms-laptop.skate-liberty.ts.net`).
+Set `PUBLIC_BASE_URL` to your Tailscale hostname (example: `https://your-hostname.tailnet.ts.net`).
 
 3. Run gateway (localhost only):
 
@@ -143,14 +143,14 @@ bunx eas-cli build --platform android --profile preview
 
 ## macOS Gateway App
 
-- Self-contained menu bar app guide: `/Users/omshejul/Code/CodexApp/docs/MAC_GATEWAY_APP.md`
+- Self-contained menu bar app guide: `./docs/MAC_GATEWAY_APP.md`
 - Build local app + DMG:
 ```bash
-/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/scripts/build_app.sh
+./mac/CodexGatewayMenu/scripts/build_app.sh
 ```
 - Signed/notarized release build:
 ```bash
 SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
 NOTARYTOOL_PROFILE="codex-notary" \
-/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/scripts/build_app.sh --release
+./mac/CodexGatewayMenu/scripts/build_app.sh --release
 ```
