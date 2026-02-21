@@ -1429,6 +1429,7 @@ export default function ThreadScreen() {
   const [lastCopiedTurnId, setLastCopiedTurnId] = useState<string | null>(null);
   const [lastCopiedDiffId, setLastCopiedDiffId] = useState<string | null>(null);
   const [wrappedDiffIds, setWrappedDiffIds] = useState<Set<string>>(new Set());
+  const [wrapToast, setWrapToast] = useState<{ diffId: string; wrapped: boolean } | null>(null);
 
   const streamSocketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1445,6 +1446,7 @@ export default function ThreadScreen() {
   const seenChangeHashesRef = useRef(new Set<string>());
   const turnsSignatureRef = useRef("");
   const mentionRequestRef = useRef(0);
+  const wrapToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const activeMention = useMemo(
     () => findActiveMentionToken(composerText, composerSelection.start),
@@ -2194,9 +2196,8 @@ export default function ThreadScreen() {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
     const distanceFromBottom = contentSize.height - (contentOffset.y + layoutMeasurement.height);
     const isNearBottom = distanceFromBottom < 120;
-    if (draggingRef.current) {
-      followBottomRef.current = isNearBottom;
-    }
+    // If the user scrolls away from bottom, stop auto-following streamed tokens.
+    followBottomRef.current = isNearBottom;
     setShowScrollToBottom(!isNearBottom);
   };
 
@@ -2241,13 +2242,32 @@ export default function ThreadScreen() {
   const toggleDiffWrap = useCallback((diffId: string) => {
     setWrappedDiffIds((existing) => {
       const next = new Set(existing);
+      let wrapped = true;
       if (next.has(diffId)) {
         next.delete(diffId);
+        wrapped = false;
       } else {
         next.add(diffId);
       }
+      setWrapToast({ diffId, wrapped });
+      if (wrapToastTimerRef.current) {
+        clearTimeout(wrapToastTimerRef.current);
+      }
+      wrapToastTimerRef.current = setTimeout(() => {
+        setWrapToast((current) => (current?.diffId === diffId ? null : current));
+        wrapToastTimerRef.current = null;
+      }, 1000);
       return next;
     });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (wrapToastTimerRef.current) {
+        clearTimeout(wrapToastTimerRef.current);
+        wrapToastTimerRef.current = null;
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -2813,12 +2833,34 @@ export default function ThreadScreen() {
                       {typeof file.diff === "string" && file.diff.length > 0 ? (
                         <View className="mt-2 rounded-lg border border-border/40 bg-muted/60 px-2.5 py-2">
                           <View className="mb-1 flex-row justify-end">
-                            <Pressable
-                              onPress={() => toggleDiffWrap(diffId)}
-                              className="mr-1 flex-row items-center justify-center rounded-full bg-black/20 px-2.5 py-2.5"
-                            >
-                              <Ionicons name={isWrapped ? "arrow-forward-outline" : "return-down-back-outline"} size={12} className="text-primary-foreground" />
-                            </Pressable>
+                            <View className="relative mr-1">
+                              <AnimatePresence>
+                                {wrapToast?.diffId === diffId ? (
+                                  <MotiView
+                                    key={`wrap-toast-${diffId}`}
+                                    from={{ opacity: 0, translateY: 4, scale: 0.97 }}
+                                    animate={{ opacity: 1, translateY: 0, scale: 1 }}
+                                    exit={{ opacity: 0, translateY: -4, scale: 0.97 }}
+                                    transition={{ type: "timing", duration: 170 }}
+                                    className="absolute -top-0 right-full z-20 w-[100px] items-center rounded-full bg-black/20 px-2.5 py-2 mr-0.5"
+                                  >
+                                    <Text className="text-sm text-primary-foreground">
+                                      Word wrap {wrapToast.wrapped ? "ON" : "OFF"}
+                                    </Text>
+                                  </MotiView>
+                                ) : null}
+                              </AnimatePresence>
+                              <Pressable
+                                onPress={() => toggleDiffWrap(diffId)}
+                                className="flex-row items-center justify-center rounded-full bg-black/20 px-2.5 py-2.5"
+                              >
+                                <Ionicons
+                                  name={isWrapped ? "arrow-forward-outline" : "return-down-back-outline"}
+                                  size={12}
+                                  className="text-primary-foreground"
+                                />
+                              </Pressable>
+                            </View>
                             <Pressable
                               onPress={() => copyDiffText(diffId, file.diff)}
                               className="flex-row items-center justify-center rounded-full bg-black/20 px-2.5 py-2.5"
