@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Codex Phone",
+    "name": "Codex",
     "slug": "codex-phone",
     "version": "0.1.0",
     "orientation": "portrait",
@@ -29,9 +29,11 @@
       "appleTeamId": "M4K84L4TKR"
     },
     "extra": {
+      "router": {},
       "eas": {
-        "projectId": "00000000-0000-0000-0000-000000000000"
+        "projectId": "d2fcd04b-52ba-4d14-8629-eba75b6f3122"
       }
-    }
+    },
+    "owner": "omshejul"
   }
 }
