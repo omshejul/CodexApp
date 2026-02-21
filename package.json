@@ -1,0 +1,26 @@
+{
+  "name": "codex-phone-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "bun@1.2.3",
+  "workspaces": [
+    "gateway",
+    "app",
+    "shared"
+  ],
+  "scripts": {
+    "build": "bun run build:shared && bun run build:gateway",
+    "build:shared": "cd shared && bun run build",
+    "build:gateway": "cd gateway && bun run build",
+    "typecheck": "bun run build:shared && bun run typecheck:shared && bun run typecheck:gateway && bun run typecheck:app",
+    "typecheck:shared": "cd shared && bun run typecheck",
+    "typecheck:gateway": "cd gateway && bun run typecheck",
+    "typecheck:app": "cd app && bun run typecheck",
+    "lint": "cd shared && bun run lint && cd ../gateway && bun run lint && cd ../app && bun run lint",
+    "dev:gateway": "cd gateway && bun run dev",
+    "dev:app": "cd app && bun run start"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

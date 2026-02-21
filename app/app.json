@@ -1,0 +1,30 @@
+{
+  "expo": {
+    "name": "Codex Phone",
+    "slug": "codex-phone",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "codex-phone",
+    "userInterfaceStyle": "light",
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-asset"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "android": {
+      "package": "com.codex.phone"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.codex.phone"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "00000000-0000-0000-0000-000000000000"
+      }
+    }
+  }
+}
