@@ -4,7 +4,6 @@ import {
   FlatList,
   Image,
   Keyboard,
-  KeyboardAvoidingView,
   Modal,
   NativeScrollEvent,
   NativeSyntheticEvent,
@@ -15,6 +14,7 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { KeyboardAvoidingView, KeyboardStickyView } from "react-native-keyboard-controller";
 import { useLocalSearchParams } from "expo-router";
 import { router } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
@@ -2340,12 +2340,8 @@ export default function ThreadScreen() {
 
   return (
     <SafeAreaView className="flex-1 bg-background" edges={["top", "left", "right"]}>
-      <KeyboardAvoidingView
-        className="flex-1"
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
-        keyboardVerticalOffset={0}
-      >
-      <View className="flex-1 bg-background px-4 pt-1">
+      <KeyboardAvoidingView className="flex-1" behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={0}>
+        <View className="flex-1 bg-background px-4 pt-1">
       <View className="-mx-4 mb-3 border-b border-border/50 pb-2 px-4">
       <View className="relative h-12 justify-center">
           <View className="absolute bottom-0 left-0 top-0 z-10 justify-center">
@@ -2717,12 +2713,13 @@ export default function ThreadScreen() {
           </Pressable>
         ) : null}
 
-        <View
-          className="-mx-4 border-t border-border/50 bg-background px-4 pt-2"
-          style={{
-            paddingBottom: keyboardVisible ? 10 : Math.max(insets.bottom, 8),
-          }}
-        >
+        <KeyboardStickyView offset={{ closed: 0, opened: 0 }}>
+          <View
+            className="-mx-4 border-t border-border/50 bg-background px-4 pt-2"
+            style={{
+              paddingBottom: Math.max(insets.bottom, 8),
+            }}
+          >
           {optionsLoaded && resolvedSelectedModel && currentReasoningOptions.length > 0 ? (
             <View className="mb-1.5 flex-row gap-2">
               <Pressable
@@ -2803,10 +2800,11 @@ export default function ThreadScreen() {
               value={composerText}
               onChangeText={setComposerText}
               placeholder="Continue this thread..."
-              placeholderTextColor="#6f6f6f"
+              placeholderTextColor="#94a3b8"
               keyboardAppearance="dark"
               multiline
-              className="max-h-36 flex-1 rounded-3xl border border-border/10 bg-muted px-4 py-3 text-foreground"
+              className="min-h-12 max-h-36 flex-1 rounded-3xl border border-border/10 bg-muted px-4 py-3 text-foreground"
+
             />
             <Pressable
               disabled={isResponding ? stopping || !activeTurnId : sending || !composerHasDraft}
@@ -2829,7 +2827,8 @@ export default function ThreadScreen() {
               </AnimatePresence>
             </Pressable>
           </View>
-        </View>
+          </View>
+        </KeyboardStickyView>
       </View>
       </KeyboardAvoidingView>
 
