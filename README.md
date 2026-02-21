@@ -97,6 +97,25 @@ bun run dev:app
 bun run typecheck
 ```
 
+## iOS Device Build
+
+Build and run on a connected iPhone:
+
+```bash
+cd app
+bun run ios --device
+```
+
+Notes:
+- This repo uses Bun (`bun.lock` + root `packageManager`), so prefer Bun over npm for app commands.
+- `react-native-reanimated@4` requires React Native New Architecture. Keep `app/ios/Podfile.properties.json` with `"newArchEnabled": "true"` or iOS `pod install` will fail.
+- If CocoaPods gets out of sync, run:
+
+```bash
+cd app/ios
+pod install --repo-update
+```
+
 ## Security Model
 
 - Codex app-server is local-only (`127.0.0.1`).

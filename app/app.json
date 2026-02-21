@@ -19,7 +19,8 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.codex.phone"
+      "bundleIdentifier": "com.codex.phone",
+      "appleTeamId": "M4K84L4TKR"
     },
     "extra": {
       "eas": {
