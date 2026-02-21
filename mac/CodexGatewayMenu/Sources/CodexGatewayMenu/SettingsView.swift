@@ -20,7 +20,7 @@ struct SettingsView: View {
         LabeledField(label: "Codex CLI Path (optional)", text: $codexBinaryPath, placeholder: "/opt/homebrew/bin/codex")
       }
 
-      Toggle("Start gateway automatically on app launch", isOn: $autoStart)
+      Toggle("Keep gateway running in background", isOn: $autoStart)
 
       Divider()
       Text("Runtime command and gateway bundle are managed automatically by this app.")
@@ -43,7 +43,6 @@ struct SettingsView: View {
     .padding(20)
     .frame(minWidth: 640, minHeight: 420)
     .onAppear {
-      manager.prefillPublicBaseURLFromTailscaleIfNeeded()
       loadFromManager()
     }
   }

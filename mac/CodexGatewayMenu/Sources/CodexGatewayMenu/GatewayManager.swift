@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 
 private let tailscaleServiceName = "codexgateway"
+private let launchAgentLabel = "com.codex.gateway"
 
 @MainActor
 final class GatewayManager: ObservableObject {
@@ -17,6 +18,12 @@ final class GatewayManager: ObservableObject {
     let devices: [PairedDevice]
   }
 
+  private struct PortListener {
+    let pid: Int32
+    let command: String
+    let isManagedGateway: Bool
+  }
+
   private struct SetupDiagnostics {
     let bundledNodeReady: Bool
     let bundledGatewayReady: Bool
@@ -24,7 +31,7 @@ final class GatewayManager: ObservableObject {
     let tailscaleAvailable: Bool
     let tailscaleAuthenticated: Bool
     let serveConfigured: Bool
-    let portConflictPID: Int32?
+    let portListener: PortListener?
   }
 
   @Published var config: AppConfig = .default
@@ -60,7 +67,6 @@ final class GatewayManager: ObservableObject {
     do {
       config = normalizeConfig(try ConfigStore.load())
       try? ConfigStore.save(config)
-      prefillPublicBaseURLFromTailscaleIfNeeded()
       refreshSetupStatus()
     } catch {
       config = .default
@@ -92,7 +98,6 @@ final class GatewayManager: ObservableObject {
     }
     refreshSetupStatus()
     Task {
-      await fixSetup(autoTriggered: true)
       if config.autoStart {
         await start()
       }
@@ -147,14 +152,8 @@ final class GatewayManager: ObservableObject {
     guard enforceFullDiskAccessRequirement() else { return }
     guard ensureFilesAndFoldersAccessIfNeeded() else { return }
 
-    let diagnostics = diagnoseSetup()
-    conflictingPID = diagnostics.portConflictPID
-    if let pid = diagnostics.portConflictPID {
-      statusMessage = "Port \(configuredPort()) is already in use."
-      appendOutput("Another process is already using 127.0.0.1:\(configuredPort()) (PID \(pid)).")
-      appendOutput("Action: stop the other process in this app, or use Open Pair Page if gateway is already running.")
-      return
-    }
+    let diagnostics = diagnoseSetup(includeNetworkChecks: true)
+    conflictingPID = nil
 
     guard diagnostics.bundledNodeReady, diagnostics.bundledGatewayReady else {
       statusMessage = "App bundle is incomplete. Rebuild the mac app."
@@ -163,93 +162,57 @@ final class GatewayManager: ObservableObject {
     }
 
     guard diagnostics.codexReady else {
-      statusMessage = "Missing Codex CLI. Click Fix Setup."
-      appendOutput("Codex CLI not found. Install Codex and click Fix Setup.")
+      statusMessage = "Missing Codex CLI."
+      appendOutput("Codex CLI not found. Install Codex and retry Start.")
+      return
+    }
+
+    guard diagnostics.tailscaleAvailable else {
+      statusMessage = "Missing Tailscale."
+      appendOutput("Tailscale CLI not found. Install Tailscale and retry Start.")
+      return
+    }
+
+    guard diagnostics.tailscaleAuthenticated else {
+      statusMessage = "Tailscale not authenticated."
+      appendOutput("Tailscale is not authenticated. Sign in and retry Start.")
       return
     }
 
     let port = configuredPort()
-    _ = ensureTailscaleServeRoutesToGateway(port: port)
-
-    guard let bundledNode = bundledNodePath(), let gatewayEntry = bundledGatewayEntryPath() else {
-      statusMessage = "App bundle is incomplete. Rebuild the mac app."
-      appendOutput("Bundled Node or gateway entrypoint is missing.")
+    if let listener = diagnostics.portListener {
+      if listener.isManagedGateway {
+        isRunning = true
+        statusMessage = "Running"
+        appendOutput("Gateway is already running on 127.0.0.1:\(port) (PID \(listener.pid)).")
+        Task { await refreshPairedDevices() }
+        return
+      }
+      conflictingPID = listener.pid
+      statusMessage = "Port \(port) is already in use."
+      appendOutput("Another process is already using 127.0.0.1:\(port) (PID \(listener.pid)).")
+      appendOutput("Command: \(listener.command)")
+      appendOutput("Action: stop the other process in this app, or change the gateway port in Settings.")
       return
     }
 
-    let process = Process()
-    process.currentDirectoryURL = bundledGatewayRoot().map { URL(fileURLWithPath: $0) }
+    _ = ensureTailscaleServeRoutesToGateway(port: port)
 
-    var env = ProcessInfo.processInfo.environment
-    for (key, value) in config.environment {
-      env[key] = value
-    }
-    env["HOST"] = "127.0.0.1"
-    env["PORT"] = "\(port)"
-    env["PATH"] = buildRuntimePATH(existing: env["PATH"])
-
-    let appSupport = appSupportDirectory()
-    let logsDir = appSupport.appendingPathComponent("logs", isDirectory: true)
-    try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
-    env["DB_PATH"] = appSupport.appendingPathComponent("gateway.sqlite").path
-    env["EVENTS_LOG_PATH"] = logsDir.appendingPathComponent("events.log").path
-    env["ERRORS_LOG_PATH"] = logsDir.appendingPathComponent("errors.log").path
-
-    if let codexPath = resolvedCodexBinaryPath(environment: env) {
-      env["CODEX_APP_SERVER_BIN"] = codexPath
-    }
-    process.environment = env
-
-    process.executableURL = URL(fileURLWithPath: bundledNode)
-    process.arguments = [gatewayEntry]
-
-    let stdoutPipe = Pipe()
-    let stderrPipe = Pipe()
-    process.standardOutput = stdoutPipe
-    process.standardError = stderrPipe
-
-    stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-      guard let self else { return }
-      let data = handle.availableData
-      guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-      Task { @MainActor in
-        self.appendOutput(text)
-      }
+    guard upsertAndStartLaunchAgent(port: port) else {
+      statusMessage = "Start failed. Check details."
+      return
     }
 
-    stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-      guard let self else { return }
-      let data = handle.availableData
-      guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-      Task { @MainActor in
-        self.appendOutput(text)
-      }
-    }
-
-    process.terminationHandler = { [weak self] terminatedProcess in
-      guard let self else { return }
-      Task { @MainActor in
-        self.isRunning = false
-        self.process = nil
-        self.statusMessage = "Stopped (exit \(terminatedProcess.terminationStatus))"
-      }
-    }
-
-    do {
-      try process.run()
-      self.process = process
-      self.isRunning = true
-      self.statusMessage = "Running"
-      appendOutput("Started: \(bundledNode) \(gatewayEntry)")
-      if let cwd = process.currentDirectoryURL?.path {
-        appendOutput("CWD: \(cwd)")
-      }
+    let started = await waitForGatewayReachable(port: port, timeoutSeconds: 8)
+    if started {
+      isRunning = true
+      statusMessage = "Running"
+      appendOutput("Gateway service is running under launchd.")
       Task { await refreshPairedDevices() }
-    } catch {
-      self.isRunning = false
-      self.process = nil
-      self.statusMessage = "Start failed. Check details."
-      appendOutput("Start failed: \(error.localizedDescription)")
+    } else {
+      isRunning = false
+      statusMessage = "Start timed out. Check details."
+      appendOutput("launchd started the gateway service, but /health was not reachable on 127.0.0.1:\(port).")
     }
   }
 
@@ -287,8 +250,8 @@ final class GatewayManager: ObservableObject {
 
     saveConfig(nextConfig)
 
-    let diagnostics = diagnoseSetup()
-    conflictingPID = diagnostics.portConflictPID
+    let diagnostics = diagnoseSetup(includeNetworkChecks: true)
+    conflictingPID = diagnostics.portListener?.isManagedGateway == false ? diagnostics.portListener?.pid : nil
     if diagnostics.bundledNodeReady && diagnostics.bundledGatewayReady && diagnostics.codexReady {
       statusMessage = autoTriggered ? "Ready" : "Setup complete. Click Start."
       appendOutput(autoTriggered ? "Automatic setup check complete." : "Setup complete.")
@@ -299,14 +262,17 @@ final class GatewayManager: ObservableObject {
   }
 
   func stop() {
+    _ = stopLaunchAgent(removePlist: true)
     cleanupManagedProcess()
+    isRunning = false
+    conflictingPID = nil
+    disableTailscaleServeIfManagedByApp()
     statusMessage = "Stopping..."
     appendOutput("Stopping gateway process")
     Task { await refreshPairedDevices() }
   }
 
   func quitApplication() {
-    performShutdownCleanup()
     NSApplication.shared.terminate(nil)
   }
 
@@ -386,6 +352,13 @@ final class GatewayManager: ObservableObject {
       let normalized = normalizeConfig(newConfig)
       try ConfigStore.save(normalized)
       config = normalized
+      if isRunning {
+        _ = upsertAndStartLaunchAgent(port: normalized.port)
+      } else if normalized.autoStart {
+        _ = upsertAndStartLaunchAgent(port: normalized.port)
+      } else {
+        _ = stopLaunchAgent(removePlist: true)
+      }
       statusMessage = isRunning ? "Running (settings saved)" : "Settings saved"
       refreshSetupStatus()
     } catch {
@@ -420,54 +393,52 @@ final class GatewayManager: ObservableObject {
   }
 
   private func refreshSetupStatus() {
-    guard !isRunning else {
-      statusMessage = "Running"
-      return
-    }
-
-    let diagnostics = diagnoseSetup()
-    conflictingPID = diagnostics.portConflictPID
+    let diagnostics = diagnoseSetup(includeNetworkChecks: false)
 
     if !diagnostics.bundledNodeReady || !diagnostics.bundledGatewayReady {
+      isRunning = false
+      conflictingPID = nil
       statusMessage = "Needs setup: app bundle is incomplete."
       return
     }
     if !diagnostics.codexReady {
+      isRunning = false
+      conflictingPID = nil
       statusMessage = "Missing Codex CLI"
       return
     }
-    if !diagnostics.tailscaleAvailable {
-      statusMessage = "Missing Tailscale"
+    if let listener = diagnostics.portListener {
+      if listener.isManagedGateway {
+        isRunning = true
+        conflictingPID = nil
+        statusMessage = "Running"
+        return
+      }
+      isRunning = false
+      conflictingPID = listener.pid
+      statusMessage = "Port \(configuredPort()) is already in use (PID \(listener.pid))."
       return
     }
-    if !diagnostics.tailscaleAuthenticated {
-      statusMessage = "Tailscale not authenticated"
-      return
-    }
-    if let pid = diagnostics.portConflictPID {
-      statusMessage = "Port \(configuredPort()) is already in use (PID \(pid))."
-      return
-    }
-    if !diagnostics.serveConfigured {
-      statusMessage = "Needs setup: configure Tailscale route."
-      return
-    }
+    isRunning = false
+    conflictingPID = nil
     statusMessage = "Ready"
   }
 
-  private func diagnoseSetup() -> SetupDiagnostics {
+  private func diagnoseSetup(includeNetworkChecks: Bool) -> SetupDiagnostics {
     let port = configuredPort()
     let env = config.environment
     let tailscalePath = resolveExecutablePath(for: "tailscale", environment: env)
+    let tailscaleAuthenticated = includeNetworkChecks && tailscalePath != nil ? isTailscaleAuthenticated(environment: env) : false
+    let serveConfigured = includeNetworkChecks && tailscalePath != nil ? isServeRouteConfigured(port: port, environment: env) : false
 
     return SetupDiagnostics(
       bundledNodeReady: bundledNodePath() != nil,
       bundledGatewayReady: bundledGatewayEntryPath() != nil,
       codexReady: resolvedCodexBinaryPath(environment: env) != nil,
       tailscaleAvailable: tailscalePath != nil,
-      tailscaleAuthenticated: tailscalePath != nil ? isTailscaleAuthenticated(environment: env) : false,
-      serveConfigured: tailscalePath != nil ? isServeRouteConfigured(port: port, environment: env) : false,
-      portConflictPID: listenerPID(forPort: port)
+      tailscaleAuthenticated: tailscaleAuthenticated,
+      serveConfigured: serveConfigured,
+      portListener: listenerInfo(forPort: port)
     )
   }
 
@@ -495,10 +466,10 @@ final class GatewayManager: ObservableObject {
 
     for line in lines {
       if line.contains("spawn codex ENOENT") {
-        outputLines.append("Fix: install Codex CLI, then click \"Fix Setup\".")
+        outputLines.append("Fix: install Codex CLI, then click Start.")
       }
       if line.contains("Failed to configure Tailscale Serve route") {
-        outputLines.append("Fix: sign in to Tailscale and click \"Fix Setup\".")
+        outputLines.append("Fix: sign in to Tailscale and click Start.")
       }
       if line.contains("EADDRINUSE") {
         outputLines.append("Fix: click \"Stop Other Process\" or change the port in Settings.")
@@ -599,6 +570,198 @@ final class GatewayManager: ObservableObject {
 
   private func localhostPairURL(port: Int) -> String {
     return "http://127.0.0.1:\(port)/pair"
+  }
+
+  private func launchAgentPlistURL() -> URL {
+    FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+      .appendingPathComponent("\(launchAgentLabel).plist", isDirectory: false)
+  }
+
+  private func launchAgentTarget() -> String {
+    "gui/\(getuid())/\(launchAgentLabel)"
+  }
+
+  private func runtimeEnvironment(port: Int) -> [String: String] {
+    var env = ProcessInfo.processInfo.environment
+    for (key, value) in config.environment {
+      env[key] = value
+    }
+    env["HOST"] = "127.0.0.1"
+    env["PORT"] = "\(port)"
+    env["PATH"] = buildRuntimePATH(existing: env["PATH"])
+
+    let appSupport = appSupportDirectory()
+    let logsDir = appSupport.appendingPathComponent("logs", isDirectory: true)
+    try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
+    env["DB_PATH"] = appSupport.appendingPathComponent("gateway.sqlite").path
+    env["EVENTS_LOG_PATH"] = logsDir.appendingPathComponent("events.log").path
+    env["ERRORS_LOG_PATH"] = logsDir.appendingPathComponent("errors.log").path
+
+    if let codexPath = resolvedCodexBinaryPath(environment: env) {
+      env["CODEX_APP_SERVER_BIN"] = codexPath
+    }
+    return env
+  }
+
+  @discardableResult
+  private func upsertAndStartLaunchAgent(port: Int) -> Bool {
+    guard let bundledNode = bundledNodePath(),
+          let gatewayEntry = bundledGatewayEntryPath(),
+          let gatewayRoot = bundledGatewayRoot()
+    else {
+      appendOutput("Bundled Node or gateway entrypoint is missing.")
+      return false
+    }
+
+    let env = runtimeEnvironment(port: port)
+    let logsDir = appSupportDirectory().appendingPathComponent("logs", isDirectory: true)
+    let stdoutPath = logsDir.appendingPathComponent("launchd-stdout.log").path
+    let stderrPath = logsDir.appendingPathComponent("launchd-stderr.log").path
+    let plistPath = launchAgentPlistURL()
+
+    try? FileManager.default.createDirectory(
+      at: plistPath.deletingLastPathComponent(),
+      withIntermediateDirectories: true
+    )
+
+    let plist: [String: Any] = [
+      "Label": launchAgentLabel,
+      "ProgramArguments": [bundledNode, gatewayEntry],
+      "WorkingDirectory": gatewayRoot,
+      "EnvironmentVariables": env,
+      "RunAtLoad": true,
+      "KeepAlive": true,
+      "ThrottleInterval": 5,
+      "StandardOutPath": stdoutPath,
+      "StandardErrorPath": stderrPath
+    ]
+
+    do {
+      let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+      try data.write(to: plistPath, options: .atomic)
+    } catch {
+      appendOutput("Failed to write launch agent plist: \(error.localizedDescription)")
+      return false
+    }
+
+    _ = runSync(executablePath: "/bin/launchctl", arguments: ["bootout", launchAgentTarget()], workingDirectory: nil, environment: [:])
+    let bootstrap = runSync(
+      executablePath: "/bin/launchctl",
+      arguments: ["bootstrap", "gui/\(getuid())", plistPath.path],
+      workingDirectory: nil,
+      environment: [:]
+    )
+    if bootstrap.exitCode != 0 {
+      appendOutput("Failed to bootstrap launch agent '\(launchAgentLabel)'.")
+      if !bootstrap.output.isEmpty {
+        appendOutput(bootstrap.output)
+      }
+      return false
+    }
+
+    _ = runSync(
+      executablePath: "/bin/launchctl",
+      arguments: ["enable", launchAgentTarget()],
+      workingDirectory: nil,
+      environment: [:]
+    )
+
+    let kickstart = runSync(
+      executablePath: "/bin/launchctl",
+      arguments: ["kickstart", "-k", launchAgentTarget()],
+      workingDirectory: nil,
+      environment: [:]
+    )
+    if kickstart.exitCode != 0 {
+      appendOutput("Failed to start launch agent '\(launchAgentLabel)'.")
+      if !kickstart.output.isEmpty {
+        appendOutput(kickstart.output)
+      }
+      return false
+    }
+
+    appendOutput("LaunchAgent '\(launchAgentLabel)' is active.")
+    return true
+  }
+
+  @discardableResult
+  private func stopLaunchAgent(removePlist: Bool) -> Bool {
+    let bootout = runSync(
+      executablePath: "/bin/launchctl",
+      arguments: ["bootout", launchAgentTarget()],
+      workingDirectory: nil,
+      environment: [:]
+    )
+
+    if removePlist {
+      try? FileManager.default.removeItem(at: launchAgentPlistURL())
+    }
+
+    if bootout.exitCode == 0 {
+      appendOutput("Stopped launch agent '\(launchAgentLabel)'.")
+      return true
+    }
+
+    if !bootout.output.isEmpty && !bootout.output.contains("No such process") {
+      appendOutput(bootout.output)
+    }
+    return false
+  }
+
+  private func listenerInfo(forPort port: Int) -> PortListener? {
+    guard let pid = listenerPID(forPort: port) else { return nil }
+    let command = processCommand(forPID: pid)
+    return PortListener(
+      pid: pid,
+      command: command,
+      isManagedGateway: isManagedGatewayCommand(command)
+    )
+  }
+
+  private func processCommand(forPID pid: Int32) -> String {
+    let result = runSync(
+      executablePath: "/bin/ps",
+      arguments: ["-p", String(pid), "-o", "command="],
+      workingDirectory: nil,
+      environment: [:]
+    )
+    return result.output
+      .split(whereSeparator: \.isNewline)
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .first ?? ""
+  }
+
+  private func isManagedGatewayCommand(_ command: String) -> Bool {
+    guard !command.isEmpty else { return false }
+    if command.contains("/GatewayRuntime/dist/server.js") { return true }
+    if command.contains("codex-gateway-runtime") && command.contains("server.js") { return true }
+    if let resourcePath = Bundle.main.resourcePath,
+       command.contains(resourcePath),
+       command.contains("server.js")
+    {
+      return true
+    }
+    return false
+  }
+
+  private func waitForGatewayReachable(port: Int, timeoutSeconds: TimeInterval) async -> Bool {
+    guard let healthURL = URL(string: "http://127.0.0.1:\(port)/health") else { return false }
+    let timeoutTime = Date().addingTimeInterval(timeoutSeconds)
+
+    while Date() < timeoutTime {
+      do {
+        let (_, response) = try await URLSession.shared.data(from: healthURL)
+        if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+          return true
+        }
+      } catch {
+        // Retry until timeout.
+      }
+      try? await Task.sleep(nanoseconds: 300_000_000)
+    }
+
+    return false
   }
 
   private func bundledNodePath() -> String? {
@@ -816,7 +979,7 @@ final class GatewayManager: ObservableObject {
       return false
     }
     guard isTailscaleAuthenticated(environment: environment) else {
-      appendOutput("Tailscale is not authenticated. Sign in and click Fix Setup.")
+      appendOutput("Tailscale is not authenticated. Sign in and click Start.")
       return false
     }
 
@@ -855,7 +1018,7 @@ final class GatewayManager: ObservableObject {
       return false
     }
 
-    appendOutput("Failed to configure Tailscale route. Run Fix Setup after signing in to Tailscale.")
+    appendOutput("Failed to configure Tailscale route. Sign in to Tailscale and click Start again.")
     if !configureResult.output.isEmpty {
       appendOutput(configureResult.output)
     }
@@ -915,6 +1078,10 @@ final class GatewayManager: ObservableObject {
   }
 
   private func performShutdownCleanup() {
+    // If launchd manages the gateway, the service should remain alive when this UI exits.
+    if FileManager.default.fileExists(atPath: launchAgentPlistURL().path) {
+      return
+    }
     cleanupManagedProcess()
     disableTailscaleServeIfManagedByApp()
   }

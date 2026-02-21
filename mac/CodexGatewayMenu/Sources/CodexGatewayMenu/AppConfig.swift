@@ -14,7 +14,7 @@ struct AppConfig: Codable, Equatable {
     ],
     pairURL: "http://127.0.0.1:8787/pair",
     codexBinaryPath: nil,
-    autoStart: false
+    autoStart: true
   )
 
   private enum CodingKeys: String, CodingKey {
@@ -54,7 +54,7 @@ struct AppConfig: Codable, Equatable {
 
     let decodedEnvironment = try container.decodeIfPresent([String: String].self, forKey: .environment) ?? [:]
     let decodedPairURL = try container.decodeIfPresent(String.self, forKey: .pairURL)
-    let decodedAutoStart = try container.decodeIfPresent(Bool.self, forKey: .autoStart) ?? false
+    let decodedAutoStart = try container.decodeIfPresent(Bool.self, forKey: .autoStart) ?? true
     let decodedCodexPath = try container.decodeIfPresent(String.self, forKey: .codexBinaryPath)
 
     let explicitPort = try container.decodeIfPresent(Int.self, forKey: .port)

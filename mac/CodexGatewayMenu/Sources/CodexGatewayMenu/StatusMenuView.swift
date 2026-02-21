@@ -44,7 +44,7 @@ struct StatusMenuView: View {
       }
 
       if manager.statusMessage != "Running" && manager.statusMessage != "Ready" {
-        Text("Use Fix Setup to auto-check Codex CLI, Tailscale auth, and route configuration.")
+        Text("Click Start to verify Codex CLI, Tailscale auth, and route configuration.")
           .font(.caption2)
           .foregroundStyle(.secondary)
       }
