@@ -36,6 +36,7 @@ import {
   resumeThread,
   sendThreadMessage,
 } from "@/lib/api";
+import { formatPathForDisplay } from "@/lib/path";
 import { extractDeltaText, RenderedTurn, toRenderedTurns } from "@/lib/turns";
 
 interface CodexSseEvent {
@@ -2364,7 +2365,7 @@ export default function ThreadScreen() {
                 style={{ overflow: "hidden", width: "100%", alignItems: "center" }}
               >
                 <Text className="text-[11px] leading-[14px] text-muted-foreground" numberOfLines={1}>
-                  {headerPath ?? ""}
+                  {headerPath ? formatPathForDisplay(headerPath) : ""}
                 </Text>
               </MotiView>
             </View>
@@ -2713,13 +2714,14 @@ export default function ThreadScreen() {
           </Pressable>
         ) : null}
 
-        <KeyboardStickyView offset={{ closed: 0, opened: 0 }}>
-          <View
-            className="-mx-4 border-t border-border/50 bg-background px-4 pt-2"
-            style={{
-              paddingBottom: Math.max(insets.bottom, 8),
-            }}
-          >
+        {Platform.OS === "android" ? (
+          <KeyboardStickyView offset={{ closed: 0, opened: 0 }}>
+            <View
+              className="-mx-4 border-t border-border/50 bg-background px-4 pt-2"
+              style={{
+                paddingBottom: Math.max(insets.bottom, 8),
+              }}
+            >
           {optionsLoaded && resolvedSelectedModel && currentReasoningOptions.length > 0 ? (
             <View className="mb-1.5 flex-row gap-2">
               <Pressable
@@ -2827,8 +2829,124 @@ export default function ThreadScreen() {
               </AnimatePresence>
             </Pressable>
           </View>
+            </View>
+          </KeyboardStickyView>
+        ) : (
+          <View
+            className="-mx-4 border-t border-border/50 bg-background px-4 pt-2"
+            style={{
+              paddingBottom: keyboardVisible ? 10 : Math.max(insets.bottom, 8),
+            }}
+          >
+            {optionsLoaded && resolvedSelectedModel && currentReasoningOptions.length > 0 ? (
+              <View className="mb-1.5 flex-row gap-2">
+                <Pressable
+                  onPress={() => setOpenDropdown("model")}
+                  className="h-9 flex-1 flex-row items-center justify-between rounded-full border border-border/10 bg-muted px-3"
+                >
+                  <Text className="text-sm font-semibold text-foreground">
+                    {modelOptions.find((option) => option.value === resolvedSelectedModel)?.label}
+                  </Text>
+                  <View className="w-4 items-center justify-center">
+                    <Ionicons name="chevron-up" size={14} color="#86efac" />
+                  </View>
+                </Pressable>
+                <Pressable
+                  onPress={() => setOpenDropdown("reasoning")}
+                  className="h-9 flex-1 flex-row items-center justify-between rounded-full border border-border/10 bg-muted px-3"
+                >
+                  <Text className="text-sm font-semibold text-foreground">
+                    {currentReasoningOptions.find((option) => option.value === resolvedSelectedReasoning)?.label}
+                  </Text>
+                  <View className="w-4 items-center justify-center">
+                    <Ionicons name="chevron-up" size={14} color="#86efac" />
+                  </View>
+                </Pressable>
+                {keyboardVisible ? (
+                  <MotiView
+                    from={{ opacity: 0, scale: 0.8 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.8 }}
+                    transition={{ type: "timing", duration: 150 }}
+                  >
+                    <Pressable
+                      onPress={() => Keyboard.dismiss()}
+                      className="h-9 flex-row items-center justify-center gap-1.5 rounded-full border border-border/10 bg-muted px-3"
+                    >
+                      <Ionicons name="keypad" size={16} color="#e0e0e0" />
+                      <Ionicons name="chevron-down" className="pt-0.5" size={14} color="#e0e0e0" />
+                    </Pressable>
+                  </MotiView>
+                ) : null}
+              </View>
+            ) : null}
+
+            {pendingImages.length > 0 ? (
+              <View className="mb-2">
+                <FlatList
+                  horizontal
+                  data={pendingImages}
+                  keyExtractor={(item) => item.id}
+                  showsHorizontalScrollIndicator={false}
+                  renderItem={({ item }) => (
+                    <View className="mr-2">
+                      <Pressable onPress={() => setPreviewImageUri(item.uri)}>
+                        <Image source={{ uri: item.uri }} resizeMode="cover" className="h-16 w-16 rounded-lg bg-black/25" />
+                      </Pressable>
+                      <Pressable
+                        onPress={() =>
+                          setPendingImages((existing) => existing.filter((image) => image.id !== item.id))
+                        }
+                        className="absolute -right-1 -top-1 rounded-full bg-black/70 p-1"
+                      >
+                        <Ionicons name="close" size={12} color="#ffffff" />
+                      </Pressable>
+                    </View>
+                  )}
+                />
+              </View>
+            ) : null}
+
+            <View className="flex-row items-end gap-2">
+              <Pressable
+                onPress={onPickImages}
+                className="h-12 w-12 items-center justify-center rounded-full border border-border/10 bg-muted"
+              >
+                <Ionicons name="image-outline" size={18} color="#d8ffd8" />
+              </Pressable>
+              <TextInput
+                value={composerText}
+                onChangeText={setComposerText}
+                placeholder="Continue this thread..."
+                placeholderTextColor="#94a3b8"
+                keyboardAppearance="dark"
+                multiline
+                className="min-h-12 max-h-36 flex-1 rounded-3xl border border-border/10 bg-muted px-4 py-3 text-foreground"
+                style={undefined}
+              />
+              <Pressable
+                disabled={isResponding ? stopping || !activeTurnId : sending || !composerHasDraft}
+                onPress={isResponding ? onStopResponse : onSend}
+                className={`h-10 w-10 items-center justify-center rounded-full ${
+                  isResponding || sending || !composerHasDraft ? "bg-secondary" : "bg-primary"
+                }`}
+              >
+                <AnimatePresence>
+                  <MotiView
+                    key={`${composerActionIconName}-${isResponding ? "responding" : "idle"}-${stopping ? "stopping" : "active"}`}
+                    from={{ opacity: 0, scale: 0.78, rotate: "-10deg" }}
+                    animate={{ opacity: 1, scale: 1, rotate: "0deg" }}
+                    exit={{ opacity: 0, scale: 0.78, rotate: "10deg" }}
+                    transition={{ type: "timing", duration: 140 }}
+                    style={{ width: 20, height: 20, alignItems: "center", justifyContent: "center" }}
+                  >
+                    <Ionicons name={composerActionIconName} size={20} color="#d8ffd8" />
+                  </MotiView>
+                </AnimatePresence>
+              </Pressable>
+            </View>
           </View>
-        </KeyboardStickyView>
+        )}
       </View>
       </KeyboardAvoidingView>
 

@@ -16,6 +16,7 @@ import {
   ReauthRequiredError,
 } from "@/lib/api";
 import { getOrCreateDeviceIdentity } from "@/lib/device";
+import { formatPathForDisplay } from "@/lib/path";
 
 interface ThreadItem {
   id: string;
@@ -47,25 +48,6 @@ const loadingStepLabels: Record<LoadingStep, { title: string; detail: string }> 
     detail: "Sorting and rendering your conversations.",
   },
 };
-
-function formatPathForDisplay(fullPath: string | null): string {
-  if (!fullPath) {
-    return "Loading...";
-  }
-
-  const homeMatch = fullPath.match(/^\/Users\/[^/]+(?:\/|$)/);
-  if (homeMatch) {
-    const home = homeMatch[0].endsWith("/") ? homeMatch[0].slice(0, -1) : homeMatch[0];
-    if (fullPath === home) {
-      return "~/";
-    }
-    if (fullPath.startsWith(`${home}/`)) {
-      return `~/${fullPath.slice(home.length + 1)}`;
-    }
-  }
-
-  return fullPath;
-}
 
 function formatRelativeTime(updatedAt?: string): string {
   if (!updatedAt) {
@@ -325,7 +307,7 @@ export default function ThreadsScreen() {
         </Text>
         <View className="mt-1 flex-row items-center justify-between gap-3">
           <Text className="flex-1 text-xs text-muted-foreground" numberOfLines={1} ellipsizeMode="middle">
-            {item.cwd ?? "No directory"}
+            {item.cwd ? formatPathForDisplay(item.cwd) : "No directory"}
           </Text>
           <Text className="text-xs text-muted-foreground">{formatRelativeTime(item.updatedAt)}</Text>
         </View>
