@@ -48,3 +48,11 @@ NOTARYTOOL_PROFILE="codex-notary" \
 - Keep commits focused and small.
 - Include only files related to the requested change.
 - Run the narrowest verification that proves the change works.
+
+## Run/Restart Guidance
+
+- For macOS app changes, keep restart guidance minimal.
+- Say only: rebuild using `/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/scripts/build_app.sh`.
+
+- For Metro Restart say to run  `npx expo start --dev-client --clear`
+- For build/reinstall iOS app say to run  `npx expo run:ios --device --no-bundler --configuration Debug`
