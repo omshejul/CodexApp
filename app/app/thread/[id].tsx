@@ -18,7 +18,7 @@ import { useLocalSearchParams } from "expo-router";
 import { router } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
-import { MotiView } from "moti";
+import { AnimatePresence, MotiView } from "moti";
 import { Ionicons } from "@expo/vector-icons";
 import Markdown from "react-native-markdown-display";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
@@ -181,6 +181,93 @@ function parseSsePayload(raw: string): CodexSseEvent | null {
   } catch {
     return null;
   }
+}
+
+function extractReasoningText(params: unknown): string {
+  const getString = (value: unknown): string => (typeof value === "string" && value.length > 0 ? value : "");
+
+  const scan = (value: unknown): string => {
+    if (!value || typeof value !== "object") {
+      return "";
+    }
+
+    const record = value as Record<string, unknown>;
+
+    const direct =
+      getString(record.delta) ||
+      getString(record.text) ||
+      getString(record.summaryText) ||
+      getString(record.summary_text);
+    if (direct) {
+      return direct;
+    }
+
+    const summaryPart = record.summaryPart;
+    if (summaryPart && typeof summaryPart === "object") {
+      const part = summaryPart as Record<string, unknown>;
+      const partText = getString(part.delta) || getString(part.text);
+      if (partText) {
+        return partText;
+      }
+    }
+
+    const summary = record.summary;
+    if (Array.isArray(summary)) {
+      const summaryText = summary
+        .map((part) => {
+          if (!part || typeof part !== "object") {
+            return "";
+          }
+          const summaryRecord = part as Record<string, unknown>;
+          return getString(summaryRecord.delta) || getString(summaryRecord.text);
+        })
+        .filter((part) => part.length > 0)
+        .join("");
+      if (summaryText) {
+        return summaryText;
+      }
+    }
+
+    if (record.item && typeof record.item === "object") {
+      const nested = scan(record.item);
+      if (nested) {
+        return nested;
+      }
+    }
+
+    if (record.message && typeof record.message === "object") {
+      const nested = scan(record.message);
+      if (nested) {
+        return nested;
+      }
+    }
+
+    return "";
+  };
+
+  return scan(params);
+}
+
+function formatReasoningDetail(detail: string): string {
+  const trimmed = detail.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const lines = trimmed
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  let normalized = trimmed;
+  const singleTokenLines = lines.filter((line) => !line.includes(" ")).length;
+  if (lines.length >= 3 && singleTokenLines / lines.length >= 0.6) {
+    normalized = lines.join(" ");
+  }
+
+  normalized = normalized.replace(/\*\*(.+?)\*\*/g, "$1");
+  normalized = normalized.replace(/[ \t]{2,}/g, " ");
+  return normalized.trim();
 }
 
 function turnsSignature(items: RenderedTurn[]): string {
@@ -579,29 +666,64 @@ function toPersistedEventTurns(
 
 function ThinkingShinyPill() {
   return (
-    <View className="pb-1 pt-2">
-      <View className="relative self-start overflow-hidden rounded-full border border-emerald-300/30 bg-emerald-950/45 px-4 py-2">
+    <MotiView
+      from={{ opacity: 0, translateY: 8 }}
+      animate={{ opacity: 1, translateY: 0 }}
+      exit={{ opacity: 0, translateY: -4 }}
+      transition={{ type: "timing", duration: 300 }}
+      className="pb-4 pt-2"
+    >
+      <View className="relative self-start overflow-hidden rounded-full border border-white/20 bg-white/5 px-4 py-2">
         <MotiView
-          from={{ translateX: -140, opacity: 0.1 }}
-          animate={{ translateX: 220, opacity: 0.45 }}
-          transition={{ type: "timing", duration: 1700, loop: true, repeatReverse: false }}
-          className="absolute -bottom-8 -top-8 w-14 bg-white/25"
+          from={{ translateX: -160, opacity: 0 }}
+          animate={{ translateX: 240, opacity: 0.6 }}
+          transition={{ type: "timing", duration: 1400, loop: true, repeatReverse: false }}
+          className="absolute -bottom-8 -top-8 w-20 bg-white/30"
+          style={{
+            transform: [{ rotate: "18deg" }],
+          }}
+        />
+        <MotiView
+          from={{ translateX: -100, opacity: 0 }}
+          animate={{ translateX: 240, opacity: 0.3 }}
+          transition={{ type: "timing", duration: 1800, loop: true, repeatReverse: false, delay: 400 }}
+          className="absolute -bottom-8 -top-8 w-10 bg-white/20"
           style={{
             transform: [{ rotate: "18deg" }],
           }}
         />
         <View className="relative flex-row items-center gap-2">
-          <Ionicons name="sparkles-outline" size={14} color="#b7f7d0" />
-          <Text className="text-sm font-semibold text-emerald-100">Thinking</Text>
           <MotiView
-            from={{ opacity: 0.35, scale: 0.9 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ type: "timing", duration: 650, loop: true, repeatReverse: true }}
-            className="h-1.5 w-1.5 rounded-full bg-emerald-300"
-          />
+            from={{ opacity: 0.4 }}
+            animate={{ opacity: 1 }}
+            transition={{ type: "timing", duration: 800, loop: true, repeatReverse: true }}
+          >
+            <Ionicons name="sparkles-outline" size={14} color="#ffffff" />
+          </MotiView>
+          <Text className="text-sm font-semibold text-white">Thinking</Text>
+          <View className="flex-row items-center gap-1">
+            <MotiView
+              from={{ opacity: 0.2, scale: 0.7 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ type: "timing", duration: 500, loop: true, repeatReverse: true, delay: 0 }}
+              className="h-1.5 w-1.5 rounded-full bg-white"
+            />
+            <MotiView
+              from={{ opacity: 0.2, scale: 0.7 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ type: "timing", duration: 500, loop: true, repeatReverse: true, delay: 150 }}
+              className="h-1.5 w-1.5 rounded-full bg-white"
+            />
+            <MotiView
+              from={{ opacity: 0.2, scale: 0.7 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ type: "timing", duration: 500, loop: true, repeatReverse: true, delay: 300 }}
+              className="h-1.5 w-1.5 rounded-full bg-white"
+            />
+          </View>
         </View>
       </View>
-    </View>
+    </MotiView>
   );
 }
 
@@ -628,6 +750,7 @@ export default function ThreadScreen() {
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const [expandedActivityIds, setExpandedActivityIds] = useState<Set<string>>(new Set());
+  const [expandedTerminalIds, setExpandedTerminalIds] = useState<Set<string>>(new Set());
   const [streamStatus, setStreamStatus] = useState<{ tone: StreamStatusTone; text: string }>({
     tone: "warn",
     text: "Connecting",
@@ -989,6 +1112,7 @@ export default function ThreadScreen() {
     setHeaderPath(null);
     setTurns([]);
     setExpandedActivityIds(new Set());
+    setExpandedTerminalIds(new Set());
     turnsSignatureRef.current = "";
     setStreamStatus({ tone: "warn", text: "Connecting" });
     reconnectAttemptRef.current = 0;
@@ -1107,10 +1231,7 @@ export default function ThreadScreen() {
             method.includes("reasoning/summarytextdelta") ||
             method.includes("reasoning/summarypartadded")
           ) {
-            const delta = extractDeltaText(payload.params);
-            const chunk =
-              delta ||
-              (payload.params && typeof payload.params === "object" ? JSON.stringify(payload.params, null, 2) : "");
+            const chunk = extractReasoningText(payload.params);
             if (chunk) {
               setStreamingReasoning((existing) => `${existing}${chunk}`);
             }
@@ -1729,64 +1850,116 @@ export default function ThreadScreen() {
                 </View>
               ) : (
               item.kind === "activity" && item.activity ? (
-                (item.activity.title === "Terminal output" ||
-                  item.activity.title === "Reasoning" ||
-                  item.activity.title === "Plan" ||
-                  item.activity.title === "File changes" ||
-                  item.activity.title === "Tool progress") &&
-                item.activity.detail ? (
-                  <View className="w-full rounded-xl border border-border/20 bg-black/35 px-3 py-2">
-                    <Text className="mb-1 text-xs font-semibold uppercase tracking-[0.8px] text-muted-foreground">
-                      {item.activity.title}
-                    </Text>
-                    <Text
-                      className={`text-[12px] leading-5 text-foreground ${
-                        item.activity.title === "Terminal output" || item.activity.title === "File changes"
-                          ? "font-mono"
-                          : ""
-                      }`}
-                    >
-                      {item.activity.detail}
-                    </Text>
-                  </View>
-                ) : (
-                item.activity.title === "Ran command" && item.activity.detail ? (
-                  <Pressable
-                    className="w-full py-1"
-                    onPress={() => {
-                      setExpandedActivityIds((existing) => {
-                        const next = new Set(existing);
-                        if (next.has(item.id)) {
-                          next.delete(item.id);
-                        } else {
-                          next.add(item.id);
-                        }
-                        return next;
-                      });
-                    }}
-                  >
-                    <Text className="text-center text-base font-medium text-muted-foreground">{item.activity.title}</Text>
-                    {expandedActivityIds.has(item.id) ? (
-                      <Text className="mt-0.5 text-center text-sm text-muted-foreground">
-                        {item.activity.detail}
-                      </Text>
-                    ) : (
-                      <Text className="mt-0.5 text-center text-sm text-muted-foreground" numberOfLines={1}>
-                        {item.activity.detail}
-                      </Text>
-                    )}
-                  </Pressable>
-                ) : (
-                  <View className="w-full py-1">
-                    <Text className="text-center text-base font-medium text-muted-foreground">{item.activity.title}</Text>
-                    {item.activity.detail ? (
-                      <Text className="mt-0.5 text-center text-sm text-muted-foreground" numberOfLines={1}>
-                        {item.activity.detail}
-                      </Text>
-                    ) : null}
-                  </View>
-                )
-                )
+                (() => {
+                  if (item.activity.title === "Terminal output" && item.activity.detail) {
+                    return (
+                      <Pressable
+                        className="w-full rounded-xl border border-border/20 bg-black/35 px-3 py-2"
+                        onPress={() => {
+                          setExpandedTerminalIds((existing) => {
+                            const next = new Set(existing);
+                            if (next.has(item.id)) {
+                              next.delete(item.id);
+                            } else {
+                              next.add(item.id);
+                            }
+                            return next;
+                          });
+                        }}
+                      >
+                        <View className="flex-row items-center justify-between">
+                          <Text className="text-xs font-semibold uppercase tracking-[0.8px] text-muted-foreground">
+                            Terminal Output
+                          </Text>
+                          <Ionicons
+                            name={expandedTerminalIds.has(item.id) ? "chevron-up" : "chevron-down"}
+                            size={14}
+                            color="#94a3b8"
+                          />
+                        </View>
+                        {expandedTerminalIds.has(item.id) ? (
+                          <Text className="mt-1 font-mono text-[12px] leading-5 text-foreground">
+                            {item.activity.detail}
+                          </Text>
+                        ) : (
+                          <Text className="mt-1 text-[12px] text-muted-foreground" numberOfLines={1}>
+                            {(item.activity.detail.split("\n").find((line) => line.trim().length > 0) ?? "Tap to expand").trim()}
+                          </Text>
+                        )}
+                      </Pressable>
+                    );
+                  }
+
+                  if (
+                    (item.activity.title === "Reasoning" ||
+                      item.activity.title === "Plan" ||
+                      item.activity.title === "File changes" ||
+                      item.activity.title === "Tool progress") &&
+                    item.activity.detail
+                  ) {
+                    const activityDetail =
+                      item.activity.title === "Reasoning"
+                        ? formatReasoningDetail(item.activity.detail)
+                        : item.activity.detail;
+                    return (
+                      <View className="w-full rounded-xl border border-border/20 bg-black/35 px-3 py-2">
+                        <Text className="mb-1 text-xs font-semibold uppercase tracking-[0.8px] text-muted-foreground">
+                          {item.activity.title}
+                        </Text>
+                        <Text
+                          className={`text-[12px] leading-5 text-foreground ${
+                            item.activity.title === "File changes" ? "font-mono" : ""
+                          }`}
+                        >
+                          {activityDetail}
+                        </Text>
+                      </View>
+                    );
+                  }
+
+                  if (item.activity.title === "Ran command" && item.activity.detail) {
+                    return (
+                      <Pressable
+                        className="w-full py-1"
+                        onPress={() => {
+                          setExpandedActivityIds((existing) => {
+                            const next = new Set(existing);
+                            if (next.has(item.id)) {
+                              next.delete(item.id);
+                            } else {
+                              next.add(item.id);
+                            }
+                            return next;
+                          });
+                        }}
+                      >
+                        <Text className="text-center text-base font-medium text-muted-foreground">{item.activity.title}</Text>
+                        {expandedActivityIds.has(item.id) ? (
+                          <View className="mt-1 rounded-lg border border-border/20 bg-black/35 px-3 py-2">
+                            <Text className="font-mono text-[12px] leading-5 text-foreground">
+                              {item.activity.detail}
+                            </Text>
+                          </View>
+                        ) : (
+                          <Text className="mt-0.5 text-center text-sm text-muted-foreground" numberOfLines={1}>
+                            {item.activity.detail}
+                          </Text>
+                        )}
+                      </Pressable>
+                    );
+                  }
+
+                  return (
+                    <View className="w-full py-1">
+                      <Text className="text-center text-base font-medium text-muted-foreground">{item.activity.title}</Text>
+                      {item.activity.detail ? (
+                        <Text className="mt-0.5 text-center text-sm text-muted-foreground" numberOfLines={1}>
+                          {item.activity.detail}
+                        </Text>
+                      ) : null}
+                    </View>
+                  );
+                })()
               ) : (
               item.role === "user" ? (
                 <View className="max-w-[86%] rounded-2xl border border-border/10 bg-neutral-500/40 px-4 py-2 mt-3">
@@ -1840,9 +2013,9 @@ export default function ThreadScreen() {
             )
           }
           ListFooterComponent={
-            isThinking ? (
-              <ThinkingShinyPill />
-            ) : null
+            <AnimatePresence>
+              {isThinking ? <ThinkingShinyPill key="thinking" /> : null}
+            </AnimatePresence>
           }
         />
 
@@ -1945,7 +2118,7 @@ export default function ThreadScreen() {
               placeholderTextColor="#6f6f6f"
               keyboardAppearance="dark"
               multiline
-              className="max-h-36 flex-1 rounded-3xl border border-border/10 bg-muted px-4 py-3 text-sm text-foreground"
+              className="max-h-36 flex-1 rounded-3xl border border-border/10 bg-muted px-4 py-3 text-foreground"
             />
             <Pressable
               disabled={isResponding ? stopping : sending || (!composerText.trim() && pendingImages.length === 0)}
