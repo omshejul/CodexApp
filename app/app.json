@@ -6,6 +6,11 @@
     "orientation": "portrait",
     "scheme": "codex-phone",
     "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#020202"
+    },
     "userInterfaceStyle": "dark",
     "plugins": [
       "expo-router",
@@ -29,7 +34,7 @@
       "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
         "foregroundImage": "./assets/icon.png",
-        "backgroundColor": "#0f172a"
+        "backgroundColor": "#020202"
       }
     },
     "ios": {

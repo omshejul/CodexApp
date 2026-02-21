@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, FlatList, Linking, Modal, Pressable, RefreshControl, ScrollView, Text, useWindowDimensions, View } from "react-native";
-import { router } from "expo-router";
+import { router, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { MotiView } from "moti";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   ApiHttpError,
   clearSession,
@@ -109,6 +109,7 @@ function formatRelativeTime(updatedAt?: string): string {
 
 export default function ThreadsScreen() {
   const { height: windowHeight } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   const [threads, setThreads] = useState<ThreadItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -136,6 +137,7 @@ export default function ThreadsScreen() {
   const [currentDeviceId, setCurrentDeviceId] = useState<string | null>(null);
   const [loadingStep, setLoadingStep] = useState<LoadingStep>("session");
   const [loadingSeconds, setLoadingSeconds] = useState(0);
+  const hasLoadedThreadsOnceRef = useRef(false);
 
   useEffect(() => {
     if (!loading) {
@@ -153,8 +155,11 @@ export default function ThreadsScreen() {
     };
   }, [loading]);
 
-  const loadThreads = useCallback(async () => {
+  const loadThreads = useCallback(async (showInitialLoader = false) => {
     setError(null);
+    if (showInitialLoader) {
+      setLoading(true);
+    }
     setLoadingStep("session");
     try {
       setLoadingStep("gateway");
@@ -175,16 +180,18 @@ export default function ThreadsScreen() {
     }
   }, []);
 
-  useEffect(() => {
-    loadThreads().catch(() => {
-      setError("Unable to load threads");
-      setLoading(false);
-    });
-  }, [loadThreads]);
+  useFocusEffect(
+    useCallback(() => {
+      const showInitialLoader = !hasLoadedThreadsOnceRef.current;
+      loadThreads(showInitialLoader).finally(() => {
+        hasLoadedThreadsOnceRef.current = true;
+      });
+    }, [loadThreads])
+  );
 
   const onRefresh = () => {
     setRefreshing(true);
-    loadThreads().catch(() => {
+    loadThreads(false).catch(() => {
       setRefreshing(false);
     });
   };
@@ -329,7 +336,8 @@ export default function ThreadsScreen() {
   const showInitialLoading = loading && !refreshing && threads.length === 0 && !error;
   const activeStepIndex = loadingStepOrder.indexOf(loadingStep);
   const isSlowLoad = loadingSeconds >= 8;
-  const settingsPanelMaxHeight = Math.floor(windowHeight * 0.8);
+  const settingsPanelMaxHeight = Math.floor(windowHeight - insets.top - insets.bottom - 32);
+  const devicesListMaxHeight = Math.floor(Math.min(windowHeight * 0.32, 260));
 
   return (
     <SafeAreaView className="flex-1 bg-background px-4 pt-2" edges={["top", "left", "right"]}>
@@ -426,7 +434,15 @@ export default function ThreadsScreen() {
           keyExtractor={(item) => item.id}
           renderItem={renderItem}
           contentContainerStyle={{ paddingBottom: 24 }}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} className="text-primary" />}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              colors={["#2f7de1"]}
+              tintColor="#2f7de1"
+              progressBackgroundColor="#171717"
+            />
+          }
           ListFooterComponent={
             loading || refreshing ? (
               <View className="items-center py-4">
@@ -606,12 +622,7 @@ export default function ThreadsScreen() {
               transition={{ type: "timing", duration: 260 }}
             >
               <View className="w-full rounded-2xl border border-border/50 bg-card" style={{ maxHeight: settingsPanelMaxHeight }}>
-                <ScrollView
-                  className="p-4"
-                  contentContainerStyle={{ paddingBottom: 8 }}
-                  showsVerticalScrollIndicator
-                  nestedScrollEnabled
-                >
+                <View className="p-4" style={{ paddingBottom: Math.max(insets.bottom, 16) + 12 }}>
                   <Text className="text-lg font-semibold text-card-foreground">Settings</Text>
                   <Text className="mt-1 text-xs text-muted-foreground">User info and pairing.</Text>
 
@@ -633,12 +644,23 @@ export default function ThreadsScreen() {
             </View>
 
             <View className="mt-4 px-1">
-              <Text className="text-xs text-muted-foreground">Paired devices</Text>
+              <View className="flex-row mb-2 items-center gap-2">
+                <Text className="text-xs text-muted-foreground">Paired devices</Text>
+                <View className="rounded-full bg-primary/15 px-2 py-0.5">
+                  <Text className="text-[10px] font-semibold text-primary">{pairedDevices.length} devices</Text>
+                </View>
+              </View>
               {pairedDevices.length === 0 ? (
                 <Text className="mt-1 text-sm text-foreground">No active devices</Text>
               ) : (
-                <View className="mt-1 gap-2">
-                  {pairedDevices.slice(0, 4).map((device) => (
+                <ScrollView
+                  className="mt-1"
+                  style={{ maxHeight: devicesListMaxHeight }}
+                  contentContainerStyle={{ gap: 8, paddingRight: 4 }}
+                  showsVerticalScrollIndicator
+                  nestedScrollEnabled
+                >
+                  {pairedDevices.map((device) => (
                     <View key={device.id} className="rounded-xl bg-muted/50 px-3 py-2.5">
                       <View className="flex-row items-center justify-between">
                         <View className="flex-1 flex-row items-center gap-2">
@@ -669,7 +691,7 @@ export default function ThreadsScreen() {
                       </View>
                     </View>
                   ))}
-                </View>
+                </ScrollView>
               )}
             </View>
 
@@ -710,7 +732,7 @@ export default function ThreadsScreen() {
                       <Text className="text-sm font-semibold text-foreground">Help</Text>
                     </View>
                   </Pressable>
-                </ScrollView>
+                </View>
               </View>
             </MotiView>
           </View>

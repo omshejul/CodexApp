@@ -9,11 +9,10 @@ import { getOrCreateDeviceIdentity } from "@/lib/device";
 
 export default function PairScreen() {
   const [permission, requestPermission] = useCameraPermissions();
-  const [scanning, setScanning] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const canScan = useMemo(() => !!permission?.granted && scanning && !busy, [permission?.granted, scanning, busy]);
+  const canScan = useMemo(() => !!permission?.granted && !busy, [permission?.granted, busy]);
 
   const onScan = async (result: BarcodeScanningResult) => {
     if (!canScan) {
@@ -31,12 +30,10 @@ export default function PairScreen() {
       const message = scanError instanceof Error ? scanError.message : "Unable to pair device.";
       setError(message);
       setBusy(false);
-      setScanning(false);
       return;
     }
 
     setBusy(false);
-    setScanning(false);
   };
 
   return (
@@ -52,7 +49,7 @@ export default function PairScreen() {
           Pair once, then your phone connects to your mac threads instantly.
         </Text>
 
-        {permission?.granted && scanning ? (
+        {permission?.granted ? (
           <View className="mt-5 overflow-hidden rounded-2xl border border-border/50 bg-card">
             <CameraView
               style={{ width: "100%", height: 420 }}
@@ -83,24 +80,14 @@ export default function PairScreen() {
           <Text className="mt-1 text-center text-base font-semibold text-foreground">http://127.0.0.1:8787/pair</Text>
 
           <View className="mt-4 flex-row gap-3">
-          {!permission?.granted ? (
-            <Pressable
-              onPress={requestPermission}
-              className="flex-1 rounded-xl bg-primary px-4 py-3"
-            >
-              <Text className="text-center text-base font-bold text-primary-foreground">Enable Camera</Text>
-            </Pressable>
-          ) : (
-            <Pressable
-              onPress={() => setScanning((value) => !value)}
-              disabled={busy}
-              className="flex-1 rounded-xl bg-primary px-4 py-3"
-            >
-              <Text className="text-center text-base font-bold text-primary-foreground">
-                {scanning ? (busy ? "Pairing…" : "Stop") : "Scan QR"}
-              </Text>
-            </Pressable>
-          )}
+            {!permission?.granted ? (
+              <Pressable
+                onPress={requestPermission}
+                className="flex-1 rounded-xl bg-primary px-4 py-3"
+              >
+                <Text className="text-center text-base font-bold text-primary-foreground">Enable Camera</Text>
+              </Pressable>
+            ) : null}
           </View>
         </View>
       </MotiView>
