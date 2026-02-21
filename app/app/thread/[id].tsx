@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
+  Image,
   Keyboard,
   KeyboardAvoidingView,
   Modal,
@@ -173,7 +174,9 @@ function parseSsePayload(raw: string): CodexSseEvent | null {
 }
 
 function turnsSignature(items: RenderedTurn[]): string {
-  return items.map((item) => `${item.id}:${item.role}:${item.kind ?? "message"}:${item.text.length}`).join("|");
+  return items
+    .map((item) => `${item.id}:${item.role}:${item.kind ?? "message"}:${item.text.length}:${item.images?.length ?? 0}`)
+    .join("|");
 }
 
 function turnContentSignature(item: RenderedTurn): string {
@@ -189,7 +192,7 @@ function turnContentSignature(item: RenderedTurn): string {
   if (item.kind === "activity" && item.activity) {
     return `activity:${item.activity.title}:${item.activity.detail ?? ""}`;
   }
-  return `msg:${item.role}:${item.text}`;
+  return `msg:${item.role}:${item.text}:${(item.images ?? []).join(",")}`;
 }
 
 function parseFilesFromUnifiedDiff(diffText: string): Array<{
@@ -617,6 +620,7 @@ export default function ThreadScreen() {
   const [reasoningOptionsByModel, setReasoningOptionsByModel] = useState<Record<string, ReasoningOption[]>>({});
   const [optionsLoaded, setOptionsLoaded] = useState(false);
   const [openDropdown, setOpenDropdown] = useState<OpenDropdown>(null);
+  const [previewImageUri, setPreviewImageUri] = useState<string | null>(null);
 
   const streamSocketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1277,11 +1281,37 @@ export default function ThreadScreen() {
               ) : (
               item.role === "user" ? (
                 <View className="max-w-[86%] rounded-2xl border border-border/10 bg-neutral-500/40 px-4 py-2 mt-3">
-                  <Text className="text-base leading-6 text-white">{item.text}</Text>
+                  {item.text ? <Text className="text-base leading-6 text-white">{item.text}</Text> : null}
+                  {item.images?.length ? (
+                    <View className={item.text ? "mt-2" : ""}>
+                      {item.images.map((uri, imageIndex) => (
+                        <Pressable key={`${item.id}-user-image-${imageIndex}`} onPress={() => setPreviewImageUri(uri)}>
+                          <Image
+                            source={{ uri }}
+                            resizeMode="contain"
+                            className="mb-2 h-48 w-64 rounded-xl bg-black/25"
+                          />
+                        </Pressable>
+                      ))}
+                    </View>
+                  ) : null}
                 </View>
               ) : (
                 <View className="w-full px-1 py-1">
-                  <Markdown style={markdownStyles}>{item.text}</Markdown>
+                  {item.text ? <Markdown style={markdownStyles}>{item.text}</Markdown> : null}
+                  {item.images?.length ? (
+                    <View className={item.text ? "mt-1" : ""}>
+                      {item.images.map((uri, imageIndex) => (
+                        <Pressable key={`${item.id}-assistant-image-${imageIndex}`} onPress={() => setPreviewImageUri(uri)}>
+                          <Image
+                            source={{ uri }}
+                            resizeMode="contain"
+                            className="mb-2 h-52 w-full rounded-xl bg-black/25"
+                          />
+                        </Pressable>
+                      ))}
+                    </View>
+                  ) : null}
                 </View>
               )
               )
@@ -1422,6 +1452,38 @@ export default function ThreadScreen() {
                 </Pressable>
               );
             })}
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        transparent
+        visible={previewImageUri !== null}
+        animationType="fade"
+        onRequestClose={() => setPreviewImageUri(null)}
+      >
+        <Pressable
+          className="flex-1 bg-black/95 px-4"
+          style={{
+            paddingTop: Math.max(insets.top, 8) + 8,
+            paddingBottom: Math.max(insets.bottom, 8) + 8,
+          }}
+          onPress={() => setPreviewImageUri(null)}
+        >
+          <View className="mb-3 flex-row justify-end">
+            <View className="rounded-full bg-white/10 p-2">
+              <Ionicons name="close" size={20} color="#ffffff" />
+            </View>
+          </View>
+          <Pressable
+            className="flex-1 items-center justify-center"
+            onPress={(event) => {
+              event.stopPropagation();
+            }}
+          >
+            {previewImageUri ? (
+              <Image source={{ uri: previewImageUri }} resizeMode="contain" className="h-full w-full" />
+            ) : null}
           </Pressable>
         </Pressable>
       </Modal>

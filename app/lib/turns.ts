@@ -2,6 +2,7 @@ export interface RenderedTurn {
   id: string;
   role: "user" | "assistant" | "system";
   text: string;
+  images?: string[];
   streaming?: boolean;
   kind?: "message" | "changeSummary" | "activity";
   summary?: {
@@ -22,6 +23,65 @@ export interface RenderedTurn {
 
 function normalizeText(value: string): string {
   return value.replace(/\r\n/g, "\n").replace(/(?:\n[ \t]*){3,}/g, "\n\n").trim();
+}
+
+function uniqueNonEmpty(values: string[]): string[] {
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+}
+
+function extractImageUri(value: unknown): string | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const directKeys = ["url", "imageUrl", "image_url", "uri", "src", "path"] as const;
+  for (const key of directKeys) {
+    const candidate = record[key];
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate.trim();
+    }
+  }
+
+  const nestedKeys = ["image", "image_url", "source"] as const;
+  for (const key of nestedKeys) {
+    const nested = extractImageUri(record[key]);
+    if (nested) {
+      return nested;
+    }
+  }
+
+  return null;
+}
+
+function extractImageUris(content: unknown[]): string[] {
+  const urls: string[] = [];
+
+  for (const part of content) {
+    if (!part || typeof part !== "object") {
+      continue;
+    }
+    const record = part as Record<string, unknown>;
+    const type = typeof record.type === "string" ? record.type : "";
+    const looksImageType =
+      type === "image" ||
+      type === "localImage" ||
+      type === "input_image" ||
+      type === "output_image" ||
+      type === "image_url";
+    const uri = extractImageUri(record);
+
+    if (looksImageType && uri) {
+      urls.push(uri);
+      continue;
+    }
+
+    if (uri && (record.image !== undefined || record.image_url !== undefined || record.url !== undefined)) {
+      urls.push(uri);
+    }
+  }
+
+  return uniqueNonEmpty(urls);
 }
 
 function flattenText(value: unknown): string {
@@ -294,6 +354,7 @@ export function toRenderedTurns(turns: unknown[]): RenderedTurn[] {
 
       if (type === "userMessage") {
         const content = Array.isArray(record.content) ? record.content : [];
+        const imageUris = extractImageUris(content);
         const textParts = content
           .map((part) => {
             if (!part || typeof part !== "object") {
@@ -305,7 +366,7 @@ export function toRenderedTurns(turns: unknown[]): RenderedTurn[] {
           .filter(Boolean);
 
         const text = normalizeText(textParts.join("\n"));
-        if (!text) {
+        if (!text && imageUris.length === 0) {
           continue;
         }
 
@@ -313,17 +374,33 @@ export function toRenderedTurns(turns: unknown[]): RenderedTurn[] {
           id: typeof record.id === "string" ? record.id : `turn-${turnIndex}-item-${itemIndex}`,
           role: "user",
           text,
+          images: imageUris.length > 0 ? imageUris : undefined,
         });
         continue;
       }
 
       if (type === "agentMessage") {
-        const text = normalizeText(typeof record.text === "string" ? record.text : "");
-        if (!text) {
+        const content = Array.isArray(record.content) ? record.content : [];
+        const imageUris = extractImageUris(content);
+        const textParts = content
+          .map((part) => {
+            if (!part || typeof part !== "object") {
+              return "";
+            }
+            const obj = part as Record<string, unknown>;
+            if (obj.type === "text" && typeof obj.text === "string") {
+              return obj.text;
+            }
+            return "";
+          })
+          .filter(Boolean);
+        const fallbackText = typeof record.text === "string" ? record.text : "";
+        const text = normalizeText(textParts.length > 0 ? textParts.join("\n") : fallbackText);
+        if (!text && imageUris.length === 0) {
           continue;
         }
 
-        const summary = parseInlineChangeSummary(text);
+        const summary = text ? parseInlineChangeSummary(text) : null;
         if (summary) {
           rendered.push({
             id: typeof record.id === "string" ? record.id : `turn-${turnIndex}-item-${itemIndex}`,
@@ -339,6 +416,7 @@ export function toRenderedTurns(turns: unknown[]): RenderedTurn[] {
           id: typeof record.id === "string" ? record.id : `turn-${turnIndex}-item-${itemIndex}`,
           role: "assistant",
           text,
+          images: imageUris.length > 0 ? imageUris : undefined,
           kind: "message",
         });
       }
