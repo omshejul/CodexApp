@@ -27,6 +27,7 @@ import {
   clearSession,
   getGatewayOptions,
   getStreamConfig,
+  getThreads,
   getThread,
   getThreadEvents,
   interruptThreadTurn,
@@ -634,6 +635,8 @@ export default function ThreadScreen() {
   const [previewImageUri, setPreviewImageUri] = useState<string | null>(null);
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
+  const [headerTitle, setHeaderTitle] = useState("Chat");
+  const [headerPath, setHeaderPath] = useState<string | null>(null);
 
   const streamSocketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -857,6 +860,8 @@ export default function ThreadScreen() {
     setStreamingAssistant("");
     setIsThinking(false);
     setActiveTurnId(null);
+    setHeaderTitle("Chat");
+    setHeaderPath(null);
     setTurns([]);
     setExpandedActivityIds(new Set());
     turnsSignatureRef.current = "";
@@ -1004,10 +1009,19 @@ export default function ThreadScreen() {
 
       try {
         await resumeThread(threadId);
-        const [thread, eventsResponse] = await Promise.all([getThread(threadId), getThreadEvents(threadId)]);
+        const [thread, eventsResponse, threadsResponse] = await Promise.all([
+          getThread(threadId),
+          getThreadEvents(threadId),
+          getThreads(),
+        ]);
         if (!active) {
           return;
         }
+
+        const headerName = thread.name?.trim() || thread.title?.trim() || "Chat";
+        const matchingSummary = threadsResponse.threads.find((entry) => entry.id === threadId);
+        setHeaderTitle(headerName);
+        setHeaderPath(matchingSummary?.cwd?.trim() || null);
 
         const initialTurns = toRenderedTurns(thread.turns);
         const withPersistedEvents = toPersistedEventTurns(eventsResponse.events, initialTurns);
@@ -1298,8 +1312,9 @@ export default function ThreadScreen() {
         keyboardVerticalOffset={0}
       >
       <View className="flex-1 bg-background px-4 pt-1">
-      <View className="-mx-4 mb-3 flex-row items-center border-b border-border/50 pb-2 px-4">
-      <View className="w-28">
+      <View className="-mx-4 mb-3 border-b border-border/50 pb-2 px-4">
+      <View className="relative h-11 justify-center">
+          <View className="absolute bottom-0 left-0 top-0 z-10 justify-center">
             <Pressable
               onPress={() => router.back()}
               className="self-start h-10 w-10 items-center justify-center"
@@ -1307,20 +1322,36 @@ export default function ThreadScreen() {
               <Ionicons name="chevron-back" size={24} color="#ffffff" />
             </Pressable>
           </View>
-          <View className="flex-1 items-center">
-            <Text className="text-2xl font-semibold text-foreground">Chat</Text>
+
+          <View className="px-12">
+            <View className="items-center">
+              <Text className="text-2xl font-semibold text-foreground" numberOfLines={1}>
+                {headerTitle}
+              </Text>
+              <MotiView
+                animate={{ opacity: headerPath ? 1 : 0, translateY: headerPath ? 0 : -4, height: headerPath ? 14 : 0 }}
+                transition={{ type: "timing", duration: 220 }}
+                style={{ overflow: "hidden", width: "100%", alignItems: "center" }}
+              >
+                <Text className="mt-0.5 text-[11px] text-muted-foreground" numberOfLines={1}>
+                  {headerPath ?? ""}
+                </Text>
+              </MotiView>
+            </View>
           </View>
-          <View className="w-28 items-end">
+
+          <View className="absolute bottom-0 right-0 top-0 z-10 items-end justify-center">
             <MotiView
               animate={{ opacity: indicatorVisible ? 1 : 0, scale: indicatorVisible ? 1 : 0.97 }}
               transition={{ type: "timing", duration: 1000 }}
             >
-              <View className="flex-row items-center rounded-full border border-border/10 bg-card px-3 py-1.5">
-                <View className="mr-2 h-2.5 w-2.5 rounded-full" style={{ backgroundColor: streamDotColor }} />
+              <View className="flex-row items-center rounded-full border border-border/10 bg-card px-2.5 py-1.5">
+                <View className="mr-1.5 h-2 w-2 rounded-full" style={{ backgroundColor: streamDotColor }} />
                 <Text className="text-xs font-semibold text-foreground">{streamStatus.text}</Text>
               </View>
             </MotiView>
           </View>
+        </View>
         </View>
         {/* <Text className="mb-2 text-[11px] font-semibold uppercase tracking-[1.2px] text-muted-foreground">ID</Text>
         <Text className="mb-3 rounded-xl border border-border/10 bg-muted px-3 py-2 text-xs text-muted-foreground">{threadId}</Text> */}
