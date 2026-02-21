@@ -20,9 +20,11 @@ struct StatusMenuView: View {
           .fontWeight(.semibold)
       }
 
-      Text(manager.statusMessage)
-        .font(.caption)
-        .foregroundStyle(.secondary)
+      if !(manager.needsFullDiskAccess && manager.statusMessage == "Full Disk Access required") {
+        Text(manager.statusMessage)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
 
       if manager.needsFullDiskAccess {
         VStack(alignment: .leading, spacing: 6) {
