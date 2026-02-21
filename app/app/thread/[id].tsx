@@ -16,6 +16,7 @@ import {
 } from "react-native";
 import { useLocalSearchParams } from "expo-router";
 import { router } from "expo-router";
+import * as ImagePicker from "expo-image-picker";
 import { MotiView } from "moti";
 import { Ionicons } from "@expo/vector-icons";
 import Markdown from "react-native-markdown-display";
@@ -47,6 +48,12 @@ interface ModelOption {
 interface ReasoningOption {
   label: string;
   value: ReasoningEffort;
+}
+
+interface PendingImage {
+  id: string;
+  uri: string;
+  imageUrl: string;
 }
 
 const DEFAULT_REASONING_OPTIONS: ReasoningOption[] = [
@@ -621,6 +628,7 @@ export default function ThreadScreen() {
   const [optionsLoaded, setOptionsLoaded] = useState(false);
   const [openDropdown, setOpenDropdown] = useState<OpenDropdown>(null);
   const [previewImageUri, setPreviewImageUri] = useState<string | null>(null);
+  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
 
   const streamSocketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1093,13 +1101,18 @@ export default function ThreadScreen() {
   };
 
   const onSend = async () => {
-    if (!threadId || !composerText.trim() || sending) {
+    if (!threadId || sending) {
+      return;
+    }
+    const text = composerText.trim();
+    if (!text && pendingImages.length === 0) {
       return;
     }
 
     Keyboard.dismiss();
-    const text = composerText.trim();
+    const queuedImages = pendingImages;
     setComposerText("");
+    setPendingImages([]);
     setSending(true);
     setError(null);
 
@@ -1109,13 +1122,15 @@ export default function ThreadScreen() {
         id: `local-user-${Date.now()}`,
         role: "user",
         text,
+        images: queuedImages.map((image) => image.uri),
       },
     ]);
     followBottomRef.current = true;
 
     try {
       await sendThreadMessage(threadId, {
-        text,
+        text: text || undefined,
+        images: queuedImages.map((image) => ({ imageUrl: image.imageUrl })),
         model: resolvedSelectedModel ?? undefined,
         reasoningEffort: resolvedSelectedReasoning ?? undefined,
       });
@@ -1130,6 +1145,51 @@ export default function ThreadScreen() {
       setSending(false);
     }
   };
+
+  const onPickImages = useCallback(async () => {
+    try {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) {
+        setError("Photo library permission is required to attach images.");
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsMultipleSelection: true,
+        quality: 0.7,
+        base64: true,
+      });
+
+      if (result.canceled || !result.assets.length) {
+        return;
+      }
+
+      const nextImages: PendingImage[] = result.assets
+        .map((asset) => {
+          if (!asset.base64) {
+            return null;
+          }
+          const mimeType = typeof asset.mimeType === "string" && asset.mimeType.length > 0 ? asset.mimeType : "image/jpeg";
+          return {
+            id: `${Date.now()}-${asset.assetId ?? asset.uri}`,
+            uri: asset.uri,
+            imageUrl: `data:${mimeType};base64,${asset.base64}`,
+          };
+        })
+        .filter((image): image is PendingImage => image !== null);
+
+      if (!nextImages.length) {
+        setError("Unable to attach selected image.");
+        return;
+      }
+
+      setPendingImages((existing) => [...existing, ...nextImages]);
+      setError(null);
+    } catch (pickError) {
+      setError(pickError instanceof Error ? pickError.message : "Unable to pick image");
+    }
+  }, []);
 
   const allTurns = streamingAssistant
     ? [
@@ -1161,7 +1221,7 @@ export default function ThreadScreen() {
             </Pressable>
           </View>
           <View className="flex-1 items-center">
-            <Text className="text-2 xl font-semibold text-foreground">Chat</Text>
+            <Text className="text-2xl font-semibold text-foreground">Chat</Text>
           </View>
           <View className="w-28 items-end">
             <View className="flex-row items-center rounded-full border border-border/10 bg-card px-3 py-1.5">
@@ -1389,7 +1449,39 @@ export default function ThreadScreen() {
             </View>
           ) : null}
 
+          {pendingImages.length > 0 ? (
+            <View className="mb-2">
+              <FlatList
+                horizontal
+                data={pendingImages}
+                keyExtractor={(item) => item.id}
+                showsHorizontalScrollIndicator={false}
+                renderItem={({ item }) => (
+                  <View className="mr-2">
+                    <Pressable onPress={() => setPreviewImageUri(item.uri)}>
+                      <Image source={{ uri: item.uri }} resizeMode="cover" className="h-16 w-16 rounded-lg bg-black/25" />
+                    </Pressable>
+                    <Pressable
+                      onPress={() =>
+                        setPendingImages((existing) => existing.filter((image) => image.id !== item.id))
+                      }
+                      className="absolute -right-1 -top-1 rounded-full bg-black/70 p-1"
+                    >
+                      <Ionicons name="close" size={12} color="#ffffff" />
+                    </Pressable>
+                  </View>
+                )}
+              />
+            </View>
+          ) : null}
+
           <View className="flex-row items-end gap-2">
+            <Pressable
+              onPress={onPickImages}
+              className="h-12 w-12 items-center justify-center rounded-full border border-border/10 bg-muted"
+            >
+              <Ionicons name="image-outline" size={18} color="#d8ffd8" />
+            </Pressable>
             <TextInput
               value={composerText}
               onChangeText={setComposerText}
@@ -1399,10 +1491,10 @@ export default function ThreadScreen() {
               className="max-h-36 flex-1 rounded-full border border-border/10 bg-muted px-4 py-3 text-sm text-foreground"
             />
             <Pressable
-              disabled={sending || !composerText.trim()}
+              disabled={sending || (!composerText.trim() && pendingImages.length === 0)}
               onPress={onSend}
               className={`min-w-[92px] rounded-2xl px-4 py-3 ${
-                sending || !composerText.trim() ? "bg-secondary" : "bg-primary"
+                sending || (!composerText.trim() && pendingImages.length === 0) ? "bg-secondary" : "bg-primary"
               }`}
             >
               <View className="flex-row items-center justify-center gap-2">

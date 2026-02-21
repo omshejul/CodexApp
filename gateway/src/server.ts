@@ -820,6 +820,7 @@ function normalizeGatewayOptions(result: unknown) {
 }
 
 const app = Fastify({
+  bodyLimit: 25 * 1024 * 1024,
   logger: prettyLogsEnabled
     ? {
         level: logLevel,
@@ -1442,13 +1443,23 @@ async function bootstrap() {
       return reply.code(400).send({ error: parsedBody.error.flatten() });
     }
 
+    const trimmedText = typeof parsedBody.data.text === "string" ? parsedBody.data.text.trim() : "";
+    const imageInputs = (parsedBody.data.images ?? [])
+      .map((image) => image.imageUrl.trim())
+      .filter((imageUrl) => imageUrl.length > 0)
+      .map((imageUrl) => ({ type: "image", image_url: imageUrl }));
+    const input = [
+      ...(trimmedText ? [{ type: "text", text: trimmedText, text_elements: [] }] : []),
+      ...imageInputs,
+    ];
+
     const result = await codex.call("turn/start", {
       threadId: params.id,
       approvalPolicy: "never",
       sandboxPolicy: buildDefaultDangerFullAccessSandboxPolicy(),
       model: parsedBody.data.model ?? null,
       effort: parsedBody.data.reasoningEffort ?? null,
-      input: [{ type: "text", text: parsedBody.data.text, text_elements: [] }],
+      input,
     });
 
     const turnId = (() => {

@@ -108,9 +108,26 @@ export const ThreadNameSetResponseSchema = z.object({
 });
 
 export const ThreadMessageRequestSchema = z.object({
-  text: z.string().min(1),
+  text: z.string().optional(),
+  images: z
+    .array(
+      z.object({
+        imageUrl: z.string().min(1),
+      })
+    )
+    .optional(),
   model: z.string().min(1).optional(),
   reasoningEffort: z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]).optional(),
+}).superRefine((value, ctx) => {
+  const hasText = typeof value.text === "string" && value.text.trim().length > 0;
+  const hasImages = Array.isArray(value.images) && value.images.length > 0;
+  if (!hasText && !hasImages) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Either text or images must be provided.",
+      path: ["text"],
+    });
+  }
 });
 
 export const ThreadMessageResponseSchema = z.object({
