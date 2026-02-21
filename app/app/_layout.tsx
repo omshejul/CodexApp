@@ -5,6 +5,7 @@ import { useEffect } from "react";
 import { Platform } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import "../global.css";
+import "../lib/interop";
 
 const SYSTEM_FONT = Platform.select({
   ios: "System",
@@ -19,13 +20,13 @@ export default function RootLayout() {
 
   return (
     <SafeAreaProvider>
-      <StatusBar style="light" backgroundColor="#0a0a0a" />
+      <StatusBar style="light" backgroundColor="hsl(0, 0%, 4%)" />
       <Stack
         initialRouteName="index"
         screenOptions={{
           headerShown: false,
           contentStyle: {
-            backgroundColor: "#ffffff",
+            backgroundColor: "hsl(0, 0%, 4%)",
           },
           headerTitleStyle: {
             fontWeight: "700",

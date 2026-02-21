@@ -341,9 +341,9 @@ export default function ThreadsScreen() {
               accessibilityLabel={creating ? "Creating new chat" : "New chat"}
             >
               {creating ? (
-                <ActivityIndicator size="small" color="#ffffff" />
+                <ActivityIndicator size="small" className="text-primary-foreground" />
               ) : (
-                <Ionicons name="add" size={22} color="#ffffff" />
+                <Ionicons name="add" size={22} className="text-primary-foreground" />
               )}
             </Pressable>
             <Pressable
@@ -354,7 +354,7 @@ export default function ThreadsScreen() {
               accessibilityRole="button"
               accessibilityLabel="Settings"
             >
-              <Ionicons name="settings-outline" size={18} color="#e5e7eb" />
+              <Ionicons name="settings-outline" size={18} className="text-foreground" />
             </Pressable>
           </View>
         </View>
@@ -380,7 +380,7 @@ export default function ThreadsScreen() {
         >
           <View className="rounded-2xl border border-border/50 bg-card p-4">
             <View className="mb-2 flex-row items-center gap-2">
-              <ActivityIndicator size="small" color="#22c55e" />
+              <ActivityIndicator size="small" className="text-primary" />
               <Text className="text-sm font-semibold text-card-foreground">Loading your threads</Text>
             </View>
             <Text className="mb-3 text-xs text-muted-foreground">Elapsed: {loadingSeconds}s</Text>
@@ -389,10 +389,10 @@ export default function ThreadsScreen() {
                 const isDone = index < activeStepIndex;
                 const isActive = index === activeStepIndex;
                 const iconName = isDone ? "checkmark-circle" : isActive ? "sync-circle" : "ellipse-outline";
-                const iconColor = isDone ? "#22c55e" : isActive ? "#60a5fa" : "#6b7280";
+                const iconClass = isDone ? "text-success" : isActive ? "text-primary" : "text-muted-foreground";
                 return (
                   <View key={step} className="flex-row items-start gap-2">
-                    <Ionicons name={iconName as "checkmark-circle" | "sync-circle" | "ellipse-outline"} size={16} color={iconColor} />
+                    <Ionicons name={iconName as "checkmark-circle" | "sync-circle" | "ellipse-outline"} size={16} className={iconClass} />
                     <View className="flex-1">
                       <Text className={`text-sm ${isActive || isDone ? "text-card-foreground" : "text-muted-foreground"}`}>
                         {loadingStepLabels[step].title}
@@ -418,11 +418,11 @@ export default function ThreadsScreen() {
           keyExtractor={(item) => item.id}
           renderItem={renderItem}
           contentContainerStyle={{ paddingBottom: 24 }}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2f7de1" />}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} className="text-primary" />}
           ListFooterComponent={
             loading || refreshing ? (
               <View className="items-center py-4">
-                <ActivityIndicator size="small" color="#22c55e" />
+                <ActivityIndicator size="small" className="text-primary" />
               </View>
             ) : null
           }
@@ -443,7 +443,7 @@ export default function ThreadsScreen() {
           animate={{ opacity: 1 }}
           transition={{ type: "timing", duration: 220 }}
         >
-          <Pressable className="flex-1 items-center justify-center bg-background/80 px-4" onPress={onCancelPicker}>
+          <Pressable className="flex-1 items-center justify-center bg-background/80 px-5" onPress={onCancelPicker}>
             <MotiView
               className="w-full"
               from={{ opacity: 0, scale: 0.96, translateY: 14 }}
@@ -451,88 +451,102 @@ export default function ThreadsScreen() {
               transition={{ type: "timing", duration: 260 }}
             >
               <Pressable
-                className="w-full rounded-2xl border border-border/50 bg-card p-4"
+                className="w-full rounded-2xl border border-border/50 bg-card p-5"
                 onPress={(event) => {
                   event.stopPropagation();
                 }}
               >
-            <View className="flex-row items-center gap-2">
-              <Ionicons name="folder-open-outline" size={18} color="#e5e7eb" />
-              <Text className="text-lg font-semibold text-card-foreground">Choose folder</Text>
-            </View>
-            <Text className="mt-1 text-xs text-muted-foreground">Navigate folders, then open the current folder.</Text>
-
-            <View className="mt-3 flex-row items-center justify-between rounded-xl border border-border/50 bg-muted px-3 py-2">
-              <View className="flex-row items-center gap-2">
-                <Ionicons name="home-outline" size={14} color="#9ca3af" />
-                <Text className="text-xs text-foreground" numberOfLines={1} ellipsizeMode="middle">
-                  {breadcrumb}
-                </Text>
-              </View>
-              <Pressable
-                className="flex-row items-center gap-1 rounded-lg border border-border/50 bg-card px-2 py-1"
-                onPress={() => {
-                  if (parentDirectory) {
-                    loadDirectory(parentDirectory).catch(() => undefined);
-                  }
-                }}
-                disabled={!parentDirectory || loadingDirectories}
-              >
-                <Ionicons name="arrow-up-outline" size={14} color={parentDirectory ? "#e5e7eb" : "#6b7280"} />
-                <Text className={`text-xs font-semibold ${parentDirectory ? "text-foreground" : "text-muted-foreground"}`}>Up</Text>
-              </Pressable>
-            </View>
-
-            {pickerError ? (
-              <View className="mt-2 rounded-xl border border-border/50 bg-destructive/15 px-3 py-2">
-                <Text className="text-xs text-destructive-foreground">{pickerError}</Text>
-              </View>
-            ) : null}
-
-            <View className="mt-3 max-h-64 rounded-xl border border-border/50 bg-muted p-1">
-              {loadingDirectories ? (
-                <View className="items-center py-4">
-                  <ActivityIndicator size="small" color="#22c55e" />
-                </View>
-              ) : (
-                <FlatList
-                  data={folders}
-                  keyExtractor={(item) => item.path}
-                  keyboardShouldPersistTaps="handled"
-                  renderItem={({ item }) => (
-                    <Pressable
-                      className="rounded-lg bg-card mb-1 px-3 py-2"
-                      onPress={() => {
-                        loadDirectory(item.path).catch(() => undefined);
-                      }}
-                    >
-                      <View className="flex-row items-center justify-between">
-                        <View className="flex-row items-center gap-2">
-                          <Ionicons name="folder-outline" size={14} color="#d1d5db" />
-                          <Text className="text-foreground">{item.name}</Text>
-                        </View>
-                        <Ionicons name="chevron-forward" size={14} color="#6b7280" />
-                      </View>
-                    </Pressable>
-                  )}
-                  ListEmptyComponent={
-                    <View className="py-4">
-                      <Text className="text-center text-xs text-muted-foreground">No folders here.</Text>
-                    </View>
-                  }
-                />
-              )}
-            </View>
-
-                <View className="mt-4 flex-row gap-2">
+                <View className="flex-row items-center gap-3">
+                  <View className="h-9 w-9 items-center justify-center rounded-xl bg-primary/15">
+                    <Ionicons name="folder-open-outline" size={18} className="text-primary" />
+                  </View>
+                  <View className="flex-1">
+                    <Text className="text-lg font-semibold text-card-foreground">Choose folder</Text>
+                    <Text className="text-xs text-muted-foreground">Select a working directory for the new thread.</Text>
+                  </View>
                   <Pressable
-                    className="flex-1 rounded-xl border border-border/50 bg-muted px-3 py-3"
+                    className="h-8 w-8 items-center justify-center rounded-full"
+                    onPress={onCancelPicker}
+                    hitSlop={8}
+                  >
+                    <Ionicons name="close" size={18} className="text-muted-foreground" />
+                  </Pressable>
+                </View>
+
+                <View className="my-4 h-px bg-border/50" />
+
+                <View className="flex-row items-center justify-between rounded-xl bg-muted/60 px-3 py-2.5">
+                  <View className="mr-2 flex-1 flex-row items-center gap-2">
+                    <Ionicons name="location-outline" size={14} className="text-muted-foreground" />
+                    <Text className="flex-1 text-xs font-medium text-foreground" numberOfLines={1} ellipsizeMode="middle">
+                      {breadcrumb}
+                    </Text>
+                  </View>
+                  <Pressable
+                    className={`flex-row items-center gap-1 rounded-lg px-2.5 py-1.5 ${parentDirectory ? "bg-card border border-border/50" : "opacity-40"}`}
+                    onPress={() => {
+                      if (parentDirectory) {
+                        loadDirectory(parentDirectory).catch(() => undefined);
+                      }
+                    }}
+                    disabled={!parentDirectory || loadingDirectories}
+                  >
+                    <Ionicons name="arrow-up-outline" size={13} className={parentDirectory ? "text-foreground" : "text-muted-foreground"} />
+                    <Text className={`text-xs font-medium ${parentDirectory ? "text-foreground" : "text-muted-foreground"}`}>Up</Text>
+                  </Pressable>
+                </View>
+
+                {pickerError ? (
+                  <View className="mt-2.5 flex-row items-center gap-2 rounded-xl bg-destructive/10 px-3 py-2.5">
+                    <Ionicons name="alert-circle-outline" size={14} className="text-destructive" />
+                    <Text className="flex-1 text-xs text-destructive-foreground">{pickerError}</Text>
+                  </View>
+                ) : null}
+
+                <View className="mt-3 max-h-72 rounded-xl border border-border/30 bg-muted/40 p-1.5">
+                  {loadingDirectories ? (
+                    <View className="items-center py-6">
+                      <ActivityIndicator size="small" className="text-primary" />
+                      <Text className="mt-2 text-xs text-muted-foreground">Loading folders...</Text>
+                    </View>
+                  ) : (
+                    <FlatList
+                      data={folders}
+                      keyExtractor={(item) => item.path}
+                      keyboardShouldPersistTaps="handled"
+                      renderItem={({ item }) => (
+                        <Pressable
+                          className="mb-0.5 flex-row items-center justify-between rounded-lg bg-card/80 px-3 py-2.5 active:bg-card"
+                          onPress={() => {
+                            loadDirectory(item.path).catch(() => undefined);
+                          }}
+                        >
+                          <View className="flex-1 flex-row items-center gap-2.5">
+                            <Ionicons name="folder" size={15} className="text-primary" />
+                            <Text className="text-sm text-foreground">{item.name}</Text>
+                          </View>
+                          <Ionicons name="chevron-forward" size={13} className="text-muted-foreground" />
+                        </Pressable>
+                      )}
+                      ListEmptyComponent={
+                        <View className="items-center py-6">
+                          <Ionicons name="folder-open-outline" size={24} className="text-muted-foreground" />
+                          <Text className="mt-1.5 text-xs text-muted-foreground">No subfolders</Text>
+                        </View>
+                      }
+                    />
+                  )}
+                </View>
+
+                <View className="mt-4 flex-row gap-2.5">
+                  <Pressable
+                    className="flex-1 rounded-xl border border-border/50 bg-muted py-3"
                     onPress={onCancelPicker}
                   >
-                    <Text className="text-center text-sm font-semibold text-foreground">Cancel</Text>
+                    <Text className="text-center text-sm font-semibold text-muted-foreground">Cancel</Text>
                   </Pressable>
                   <Pressable
-                    className="flex-1 rounded-xl border border-border/50 bg-primary px-3 py-3"
+                    className={`flex-1 flex-row items-center justify-center gap-2 rounded-xl py-3 ${creating || !currentDirectory ? "bg-primary/50" : "bg-primary"}`}
                     onPress={() => {
                       if (currentDirectory) {
                         onCreateThread(currentDirectory).catch(() => undefined);
@@ -540,7 +554,14 @@ export default function ThreadsScreen() {
                     }}
                     disabled={creating || !currentDirectory}
                   >
-                    <Text className="text-center text-sm font-semibold text-primary-foreground">{creating ? "Creating..." : "Open Directory"}</Text>
+                    {creating ? (
+                      <ActivityIndicator size="small" className="text-primary-foreground" />
+                    ) : (
+                      <Ionicons name="open-outline" size={15} className="text-primary-foreground" />
+                    )}
+                    <Text className="text-center text-sm font-semibold text-primary-foreground">
+                      {creating ? "Creating..." : "Open Here"}
+                    </Text>
                   </Pressable>
                 </View>
               </Pressable>
@@ -665,7 +686,7 @@ export default function ThreadsScreen() {
                     }}
                   >
                     <View className="flex-row items-center justify-center gap-2">
-                      <Ionicons name="link-outline" size={16} color="#e5e7eb" />
+                      <Ionicons name="link-outline" size={16} className="text-foreground" />
                       <Text className="text-sm font-semibold text-foreground">Re-Pair Device</Text>
                     </View>
                   </Pressable>

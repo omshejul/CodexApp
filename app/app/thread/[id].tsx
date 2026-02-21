@@ -1496,7 +1496,7 @@ export default function ThreadScreen() {
             <Pressable
               disabled={sending || (!composerText.trim() && pendingImages.length === 0)}
               onPress={onSend}
-              className={`min-w-[92px] rounded-2xl px-4 py-3 ${
+              className={`min-w-[92px] rounded-full px-4 py-3 ${
                 sending || (!composerText.trim() && pendingImages.length === 0) ? "bg-secondary" : "bg-primary"
               }`}
             >
