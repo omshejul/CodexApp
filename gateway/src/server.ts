@@ -20,6 +20,7 @@ import {
   PairCreateResponseSchema,
   ThreadMessageRequestSchema,
   ThreadMessageResponseSchema,
+  ThreadCreateResponseSchema,
   ThreadResponseSchema,
   ThreadResumeResponseSchema,
   ThreadsResponseSchema,
@@ -55,6 +56,8 @@ const publicBaseUrlOverride = process.env.PUBLIC_BASE_URL;
 const eventsLogPath = process.env.EVENTS_LOG_PATH ?? path.resolve(__dirname, "../logs/events.log");
 const errorsLogPath = process.env.ERRORS_LOG_PATH ?? path.resolve(__dirname, "../logs/errors.log");
 const runtimeLogs = createRuntimeLogWriter(eventsLogPath, errorsLogPath);
+const logLevel = process.env.LOG_LEVEL ?? "info";
+const prettyLogsEnabled = (process.env.LOG_PRETTY ?? "1") !== "0";
 
 const codex = new CodexRpcClient(codexWsUrl, GATEWAY_NAME, GATEWAY_VERSION);
 let managedCodexProcess: ChildProcess | null = null;
@@ -457,13 +460,14 @@ function getWsBearerToken(request: IncomingMessage, parsedUrl: URL): string | nu
   return null;
 }
 
-function normalizeThreads(result: unknown): Array<{ id: string; title?: string; updatedAt?: string }> {
-  const summarizePreview = (value: string): string => {
-    const singleLine = value.replace(/\s+/g, " ").trim();
-    if (singleLine.length <= 140) {
-      return singleLine;
+function normalizeThreads(result: unknown): Array<{ id: string; name?: string; title?: string; updatedAt?: string }> {
+  const pickNonEmptyString = (...values: unknown[]): string | undefined => {
+    for (const value of values) {
+      if (typeof value === "string" && value.trim().length > 0) {
+        return value;
+      }
     }
-    return `${singleLine.slice(0, 137)}...`;
+    return undefined;
   };
 
   const asObject = result && typeof result === "object" ? (result as Record<string, unknown>) : null;
@@ -477,36 +481,33 @@ function normalizeThreads(result: unknown): Array<{ id: string; title?: string; 
     ? (asObject.items as unknown[])
     : [];
 
-  return threadArray.reduce<Array<{ id: string; title?: string; updatedAt?: string }>>((acc, item) => {
+  return threadArray.reduce<Array<{ id: string; name?: string; title?: string; updatedAt?: string }>>((acc, item) => {
     if (!item || typeof item !== "object") {
       return acc;
     }
 
     const row = item as Record<string, unknown>;
+    const nested = row.thread && typeof row.thread === "object" ? (row.thread as Record<string, unknown>) : null;
     const id = row.id ?? row.threadId;
     if (typeof id !== "string" || id.length === 0) {
       return acc;
     }
 
-    const title =
-      typeof row.title === "string" && row.title.trim().length > 0
-        ? row.title
-        : typeof row.preview === "string" && row.preview.trim().length > 0
-        ? summarizePreview(row.preview)
-        : undefined;
-    const updatedRaw = row.updatedAt ?? row.updated_at ?? row.createdAt ?? row.created_at;
+    const name = pickNonEmptyString(row.name, row.threadName, nested?.name, nested?.threadName, row.title, nested?.title);
+    const title = pickNonEmptyString(row.title, nested?.title);
+    const updatedRaw = row.updatedAt ?? row.updated_at ?? row.createdAt ?? row.created_at ?? nested?.updatedAt ?? nested?.updated_at;
     const updatedAt =
       typeof updatedRaw === "string"
         ? updatedRaw
         : typeof updatedRaw === "number" && Number.isFinite(updatedRaw)
         ? new Date(updatedRaw * 1000).toISOString()
         : undefined;
-    acc.push({ id, title, updatedAt });
+    acc.push({ id, name, title, updatedAt });
     return acc;
   }, []);
 }
 
-function normalizeThread(result: unknown, fallbackId: string): { id: string; title?: string; turns: unknown[] } {
+function normalizeThread(result: unknown, fallbackId: string): { id: string; name?: string; title?: string; turns: unknown[] } {
   if (result && typeof result === "object") {
     const topLevel = result as Record<string, unknown>;
     const nested = (topLevel.thread ?? topLevel) as Record<string, unknown>;
@@ -514,13 +515,26 @@ function normalizeThread(result: unknown, fallbackId: string): { id: string; tit
     const turnsCandidate = nested.turns;
 
     const id = typeof idCandidate === "string" && idCandidate.length > 0 ? idCandidate : fallbackId;
+    const name = typeof nested.name === "string" ? nested.name : undefined;
     const title = typeof nested.title === "string" ? nested.title : undefined;
     const turns = Array.isArray(turnsCandidate) ? turnsCandidate : [];
 
-    return { id, title, turns };
+    return { id, name, title, turns };
   }
 
   return { id: fallbackId, turns: [] };
+}
+
+function isUnmaterializedThreadError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("no rollout found for thread id") ||
+    message.includes("not materialized yet") ||
+    message.includes("includeturns is unavailable before first user message")
+  );
 }
 
 function normalizeGatewayOptions(result: unknown) {
@@ -608,7 +622,21 @@ function normalizeGatewayOptions(result: unknown) {
 }
 
 const app = Fastify({
-  logger: true,
+  logger: prettyLogsEnabled
+    ? {
+        level: logLevel,
+        transport: {
+          target: "pino-pretty",
+          options: {
+            colorize: true,
+            translateTime: "SYS:standard",
+            ignore: "pid,hostname",
+          },
+        },
+      }
+    : {
+        level: logLevel,
+      },
 });
 
 async function bootstrap() {
@@ -883,12 +911,59 @@ async function bootstrap() {
     return reply.send(payload);
   });
 
+  app.post("/threads", { preHandler: [requireAuth] }, async (_request, reply) => {
+    const result = await codex.call("thread/start", {
+      approvalPolicy: "never",
+      sandboxPolicy: buildDefaultDangerFullAccessSandboxPolicy(),
+    });
+
+    const threadId = (() => {
+      if (!result || typeof result !== "object") {
+        return null;
+      }
+      const topLevel = result as Record<string, unknown>;
+      if (typeof topLevel.threadId === "string" && topLevel.threadId.length > 0) {
+        return topLevel.threadId;
+      }
+      if (typeof topLevel.id === "string" && topLevel.id.length > 0) {
+        return topLevel.id;
+      }
+      const thread = topLevel.thread;
+      if (thread && typeof thread === "object" && typeof (thread as Record<string, unknown>).id === "string") {
+        return (thread as Record<string, string>).id;
+      }
+      return null;
+    })();
+
+    if (!threadId) {
+      throw new Error("thread/start returned no thread id");
+    }
+
+    const payload = ThreadCreateResponseSchema.parse({
+      ok: true,
+      threadId,
+    });
+    return reply.send(payload);
+  });
+
   app.get("/threads/:id", { preHandler: [requireAuth] }, async (request, reply) => {
     const params = request.params as { id: string };
-    const result = await codex.call("thread/read", {
-      threadId: params.id,
-      includeTurns: true,
-    });
+    let result: unknown;
+    try {
+      result = await codex.call("thread/read", {
+        threadId: params.id,
+        includeTurns: true,
+      });
+    } catch (error) {
+      if (isUnmaterializedThreadError(error)) {
+        const payload = ThreadResponseSchema.parse({
+          id: params.id,
+          turns: [],
+        });
+        return reply.send(payload);
+      }
+      throw error;
+    }
 
     const normalized = normalizeThread(result, params.id);
     const payload = ThreadResponseSchema.parse(normalized);
@@ -903,11 +978,18 @@ async function bootstrap() {
 
   app.post("/threads/:id/resume", { preHandler: [requireAuth] }, async (request, reply) => {
     const params = request.params as { id: string };
-    await codex.call("thread/resume", {
-      threadId: params.id,
-      approvalPolicy: "never",
-      sandbox: "danger-full-access",
-    });
+    try {
+      await codex.call("thread/resume", {
+        threadId: params.id,
+        approvalPolicy: "never",
+        sandbox: "danger-full-access",
+      });
+    } catch (error) {
+      if (!isUnmaterializedThreadError(error)) {
+        throw error;
+      }
+      runtimeLogs.event("thread.resume.unmaterialized", { threadId: params.id });
+    }
 
     const payload = ThreadResumeResponseSchema.parse({ ok: true });
     return reply.send(payload);

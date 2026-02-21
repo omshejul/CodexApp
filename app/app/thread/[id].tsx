@@ -899,7 +899,7 @@ export default function ThreadScreen() {
     : turns;
 
   return (
-    <SafeAreaView className="flex-1 bg-background" edges={["top", "left", "right", "bottom"]}>
+    <SafeAreaView className="flex-1 bg-background" edges={["top", "left", "right"]}>
       <KeyboardAvoidingView
         className="flex-1"
         behavior={Platform.OS === "ios" ? "padding" : undefined}
@@ -922,8 +922,8 @@ export default function ThreadScreen() {
             <Text className="text-xs font-semibold text-foreground">{streamStatus.text}</Text>
           </View>
         </View>
-        <Text className="mb-2 text-[11px] font-semibold uppercase tracking-[1.2px] text-muted-foreground">ID</Text>
-        <Text className="mb-3 rounded-xl border border-border/50 bg-muted px-3 py-2 text-xs text-muted-foreground">{threadId}</Text>
+        {/* <Text className="mb-2 text-[11px] font-semibold uppercase tracking-[1.2px] text-muted-foreground">ID</Text>
+        <Text className="mb-3 rounded-xl border border-border/50 bg-muted px-3 py-2 text-xs text-muted-foreground">{threadId}</Text> */}
 
         {error ? (
           <View className="mb-3 rounded-xl border border-border/50 bg-destructive/15 p-3">

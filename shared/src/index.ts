@@ -39,6 +39,7 @@ export const AuthLogoutRequestSchema = z.object({
 
 export const ThreadSummarySchema = z.object({
   id: z.string().min(1),
+  name: z.string().optional(),
   title: z.string().optional(),
   updatedAt: z.string().optional(),
 });
@@ -49,12 +50,18 @@ export const ThreadsResponseSchema = z.object({
 
 export const ThreadResponseSchema = z.object({
   id: z.string().min(1),
+  name: z.string().optional(),
   title: z.string().optional(),
   turns: z.array(z.unknown()),
 });
 
 export const ThreadResumeResponseSchema = z.object({
   ok: z.literal(true),
+});
+
+export const ThreadCreateResponseSchema = z.object({
+  ok: z.literal(true),
+  threadId: z.string().min(1),
 });
 
 export const ThreadMessageRequestSchema = z.object({
@@ -100,6 +107,7 @@ export type ThreadSummary = z.infer<typeof ThreadSummarySchema>;
 export type ThreadsResponse = z.infer<typeof ThreadsResponseSchema>;
 export type ThreadResponse = z.infer<typeof ThreadResponseSchema>;
 export type ThreadResumeResponse = z.infer<typeof ThreadResumeResponseSchema>;
+export type ThreadCreateResponse = z.infer<typeof ThreadCreateResponseSchema>;
 export type ThreadMessageRequest = z.infer<typeof ThreadMessageRequestSchema>;
 export type ThreadMessageResponse = z.infer<typeof ThreadMessageResponseSchema>;
 export type ModelOption = z.infer<typeof ModelOptionSchema>;

@@ -5,6 +5,7 @@ import {
   PairClaimResponseSchema,
   ThreadMessageRequest,
   ThreadMessageResponseSchema,
+  ThreadCreateResponseSchema,
   ThreadResponseSchema,
   ThreadResumeResponseSchema,
   ThreadsResponseSchema,
@@ -246,6 +247,13 @@ export async function getThreads() {
 export async function getThread(threadId: string) {
   const payload = await authenticatedRequest<unknown>(`/threads/${encodeURIComponent(threadId)}`);
   return ThreadResponseSchema.parse(payload);
+}
+
+export async function createThread() {
+  const payload = await authenticatedRequest<unknown>("/threads", {
+    method: "POST",
+  });
+  return ThreadCreateResponseSchema.parse(payload);
 }
 
 export async function resumeThread(threadId: string) {
