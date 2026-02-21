@@ -31,15 +31,15 @@ export default function IndexScreen() {
   }, []);
 
   return (
-    <View className="flex-1 items-center justify-center bg-[#f6f9ff] px-6">
+    <View className="flex-1 items-center justify-center bg-background px-6">
       <MotiView
         from={{ opacity: 0, translateY: 6 }}
         animate={{ opacity: 1, translateY: 0 }}
         transition={{ type: "timing", duration: 280 }}
         className="items-center"
       >
-        <ActivityIndicator size="large" color="#2f7de1" />
-        <Text className="mt-3 text-base font-semibold text-[#1f57a4]">Connecting to your laptop…</Text>
+        <ActivityIndicator size="large" color="#22c55e" />
+        <Text className="mt-3 text-base font-semibold text-foreground">Connecting to your laptop…</Text>
       </MotiView>
     </View>
   );

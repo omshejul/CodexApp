@@ -267,15 +267,17 @@ export async function sendThreadMessage(threadId: string, request: ThreadMessage
   return ThreadMessageResponseSchema.parse(payload);
 }
 
-export async function getStreamConfig(threadId: string): Promise<{ url: string; token: string }> {
+export async function getStreamConfig(threadId: string): Promise<{ wsUrl: string; token: string }> {
   const current = await loadStoredSession();
   if (!current) {
     throw new ReauthRequiredError();
   }
 
   const token = await getValidAccessToken();
+  const httpUrl = `${current.serverBaseUrl}/threads/${encodeURIComponent(threadId)}/ws`;
+  const wsUrl = `${httpUrl.replace(/^http:\/\//i, "ws://").replace(/^https:\/\//i, "wss://")}?access_token=${encodeURIComponent(token)}`;
   return {
-    url: `${current.serverBaseUrl}/threads/${encodeURIComponent(threadId)}/stream`,
+    wsUrl,
     token,
   };
 }

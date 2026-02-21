@@ -1,4 +1,5 @@
 import path from "node:path";
+import type { IncomingMessage } from "node:http";
 import { ChildProcess, execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import dotenv from "dotenv";
@@ -25,6 +26,7 @@ import {
 } from "@codex-phone/shared";
 import { CodexRpcClient } from "./codex-rpc";
 import { GatewayDatabase, PairSessionRow, RefreshTokenRow } from "./db";
+import { createRuntimeLogWriter } from "./runtime-logs";
 import { generatePairCode, generateRefreshSecret, hashValue, safeEqualHex } from "./security";
 
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
@@ -50,6 +52,9 @@ const db = new GatewayDatabase(dbPath);
 const jwtSecret = process.env.JWT_SECRET ?? db.getOrCreateJwtSecret();
 const tokenHashSecret = process.env.TOKEN_HASH_SECRET ?? jwtSecret;
 const publicBaseUrlOverride = process.env.PUBLIC_BASE_URL;
+const eventsLogPath = process.env.EVENTS_LOG_PATH ?? path.resolve(__dirname, "../logs/events.log");
+const errorsLogPath = process.env.ERRORS_LOG_PATH ?? path.resolve(__dirname, "../logs/errors.log");
+const runtimeLogs = createRuntimeLogWriter(eventsLogPath, errorsLogPath);
 
 const codex = new CodexRpcClient(codexWsUrl, GATEWAY_NAME, GATEWAY_VERSION);
 let managedCodexProcess: ChildProcess | null = null;
@@ -328,6 +333,12 @@ function issueAccessToken(deviceId: string, deviceName: string): string {
   );
 }
 
+function buildDefaultDangerFullAccessSandboxPolicy() {
+  return {
+    type: "dangerFullAccess" as const,
+  };
+}
+
 function parseRefreshToken(raw: string): { id: string; secret: string } | null {
   const parts = raw.split(".");
   if (parts.length !== 2) {
@@ -393,6 +404,7 @@ function ensureLocalRequest(request: FastifyRequest, reply: FastifyReply): boole
 async function requireAuth(request: FastifyRequest, reply: FastifyReply) {
   const header = request.headers.authorization;
   if (!header || !header.startsWith("Bearer ")) {
+    runtimeLogs.event("auth.missing_bearer", { method: request.method, url: request.url, ip: request.ip });
     reply.code(401).send({ error: "Missing bearer token" });
     return;
   }
@@ -401,6 +413,7 @@ async function requireAuth(request: FastifyRequest, reply: FastifyReply) {
   try {
     const payload = jwt.verify(token, jwtSecret, { algorithms: ["HS256"] }) as jwt.JwtPayload;
     if (payload.typ !== "access" || typeof payload.sub !== "string") {
+      runtimeLogs.event("auth.invalid_access_token", { method: request.method, url: request.url, ip: request.ip });
       reply.code(401).send({ error: "Invalid access token" });
       return;
     }
@@ -410,8 +423,38 @@ async function requireAuth(request: FastifyRequest, reply: FastifyReply) {
       deviceName: typeof payload.deviceName === "string" ? payload.deviceName : undefined,
     };
   } catch {
+    runtimeLogs.event("auth.invalid_access_token", { method: request.method, url: request.url, ip: request.ip });
     reply.code(401).send({ error: "Invalid access token" });
   }
+}
+
+function verifyAccessToken(token: string): { deviceId: string; deviceName?: string } | null {
+  try {
+    const payload = jwt.verify(token, jwtSecret, { algorithms: ["HS256"] }) as jwt.JwtPayload;
+    if (payload.typ !== "access" || typeof payload.sub !== "string") {
+      return null;
+    }
+    return {
+      deviceId: payload.sub,
+      deviceName: typeof payload.deviceName === "string" ? payload.deviceName : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getWsBearerToken(request: IncomingMessage, parsedUrl: URL): string | null {
+  const authHeader = request.headers.authorization;
+  if (typeof authHeader === "string" && authHeader.startsWith("Bearer ")) {
+    return authHeader.slice("Bearer ".length);
+  }
+
+  const queryToken = parsedUrl.searchParams.get("access_token") ?? parsedUrl.searchParams.get("token");
+  if (queryToken && queryToken.trim().length > 0) {
+    return queryToken;
+  }
+
+  return null;
 }
 
 function normalizeThreads(result: unknown): Array<{ id: string; title?: string; updatedAt?: string }> {
@@ -569,6 +612,8 @@ const app = Fastify({
 });
 
 async function bootstrap() {
+  runtimeLogs.event("gateway.bootstrap.start", { host, port, codexWsUrl, eventsLogPath, errorsLogPath });
+
   if (!isLocalHost(host)) {
     throw new Error(`Refusing to start gateway on non-local HOST='${host}'. Use 127.0.0.1 or localhost.`);
   }
@@ -592,6 +637,25 @@ async function bootstrap() {
     global: false,
     max: 20,
     timeWindow: "1 minute",
+  });
+
+  app.addHook("onRequest", async (request) => {
+    runtimeLogs.event("http.request", {
+      id: request.id,
+      method: request.method,
+      url: request.url,
+      ip: request.ip,
+    });
+  });
+
+  app.addHook("onResponse", async (request, reply) => {
+    runtimeLogs.event("http.response", {
+      id: request.id,
+      method: request.method,
+      url: request.url,
+      statusCode: reply.statusCode,
+      ip: request.ip,
+    });
   });
 
   app.get("/health", async (_request, reply) => {
@@ -842,6 +906,7 @@ async function bootstrap() {
     await codex.call("thread/resume", {
       threadId: params.id,
       approvalPolicy: "never",
+      sandbox: "danger-full-access",
     });
 
     const payload = ThreadResumeResponseSchema.parse({ ok: true });
@@ -858,6 +923,7 @@ async function bootstrap() {
     const result = await codex.call("turn/start", {
       threadId: params.id,
       approvalPolicy: "never",
+      sandboxPolicy: buildDefaultDangerFullAccessSandboxPolicy(),
       model: parsedBody.data.model ?? null,
       effort: parsedBody.data.reasoningEffort ?? null,
       input: [{ type: "text", text: parsedBody.data.text, text_elements: [] }],
@@ -891,6 +957,7 @@ async function bootstrap() {
 
   app.get("/threads/:id/stream", { preHandler: [requireAuth] }, async (request, reply) => {
     const params = request.params as { id: string };
+    runtimeLogs.event("stream.sse.open", { threadId: params.id, ip: request.ip });
 
     reply.hijack();
     reply.raw.writeHead(200, {
@@ -901,6 +968,7 @@ async function bootstrap() {
     });
 
     const sendEvent = (payload: { method: string; params: unknown }) => {
+      runtimeLogs.event("stream.sse.event", { threadId: params.id, method: payload.method });
       reply.raw.write(`event: codex\n`);
       reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
     };
@@ -918,6 +986,7 @@ async function bootstrap() {
     }, 15_000);
 
     request.raw.on("close", () => {
+      runtimeLogs.event("stream.sse.close", { threadId: params.id, ip: request.ip });
       clearInterval(keepAlive);
       unsubscribe();
       reply.raw.end();
@@ -926,6 +995,7 @@ async function bootstrap() {
 
   app.setErrorHandler((error, _request, reply) => {
     requestLogSafeError(error);
+    runtimeLogs.error("http.error", error);
     if (reply.sent) {
       return;
     }
@@ -953,8 +1023,74 @@ async function bootstrap() {
     port,
   });
 
+  const streamSocketServer = new WebSocket.Server({
+    noServer: true,
+    perMessageDeflate: false,
+  });
+
+  app.server.on("upgrade", (request, socket, head) => {
+    const hostHeader = request.headers.host ?? `127.0.0.1:${port}`;
+    const parsedUrl = new URL(request.url ?? "/", `http://${hostHeader}`);
+    const match = parsedUrl.pathname.match(/^\/threads\/([^/]+)\/ws$/);
+    if (!match) {
+      runtimeLogs.event("stream.ws.rejected_path", { url: parsedUrl.pathname, ip: request.socket.remoteAddress });
+      socket.destroy();
+      return;
+    }
+
+    const token = getWsBearerToken(request, parsedUrl);
+    if (!token || !verifyAccessToken(token)) {
+      runtimeLogs.event("stream.ws.auth_failed", { threadId: decodeURIComponent(match[1]), ip: request.socket.remoteAddress });
+      socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+
+    const threadId = decodeURIComponent(match[1]);
+    streamSocketServer.handleUpgrade(request, socket, head, (ws) => {
+      runtimeLogs.event("stream.ws.open", { threadId, ip: request.socket.remoteAddress });
+      const sendPayload = (payload: { method: string; params: unknown }) => {
+        if (ws.readyState !== WebSocket.OPEN) {
+          return;
+        }
+        runtimeLogs.event("stream.ws.event", { threadId, method: payload.method });
+        ws.send(JSON.stringify(payload));
+      };
+
+      sendPayload({
+        method: "stream/ready",
+        params: {
+          threadId,
+        },
+      });
+
+      const unsubscribe = codex.subscribeThread(threadId, sendPayload);
+      const keepAlive = setInterval(() => {
+        sendPayload({
+          method: "stream/keepalive",
+          params: {
+            ts: Date.now(),
+          },
+        });
+      }, 15_000);
+
+      ws.on("close", () => {
+        runtimeLogs.event("stream.ws.close", { threadId, ip: request.socket.remoteAddress });
+        clearInterval(keepAlive);
+        unsubscribe();
+      });
+
+      ws.on("error", (error) => {
+        runtimeLogs.error("stream.ws.error", error, { threadId, ip: request.socket.remoteAddress });
+        clearInterval(keepAlive);
+        unsubscribe();
+      });
+    });
+  });
+
   app.log.info(`Gateway listening on http://${host}:${port}`);
   app.log.info(`Codex app-server target: ${codexWsUrl}`);
+  runtimeLogs.event("gateway.bootstrap.ready", { host, port, codexWsUrl });
 }
 
 function requestLogSafeError(error: unknown) {
@@ -967,6 +1103,7 @@ function requestLogSafeError(error: unknown) {
 
 bootstrap().catch(async (error) => {
   requestLogSafeError(error);
+  runtimeLogs.error("gateway.bootstrap.failed", error);
   await stopManagedCodexAppServer();
   db.close();
   process.exit(1);

@@ -1,5 +1,6 @@
 import "../global.css";
 import { Stack } from "expo-router";
+import { StatusBar } from "expo-status-bar";
 import { Platform } from "react-native";
 
 const SYSTEM_FONT = Platform.select({
@@ -10,26 +11,22 @@ const SYSTEM_FONT = Platform.select({
 
 export default function RootLayout() {
   return (
-    <Stack
-      screenOptions={{
-        headerStyle: {
-          backgroundColor: "#090f1a",
-        },
-        headerTintColor: "#d7e9ff",
-        headerTitleStyle: {
-          fontWeight: "700",
-          color: "#d7e9ff",
-          fontFamily: SYSTEM_FONT,
-        },
-        contentStyle: {
-          backgroundColor: "#090f1a",
-        },
-      }}
-    >
-      <Stack.Screen name="index" options={{ headerShown: false }} />
-      <Stack.Screen name="pair" options={{ title: "Pair Device", headerShown: false }} />
-      <Stack.Screen name="threads" options={{ title: "Threads" }} />
-      <Stack.Screen name="thread/[id]" options={{ title: "Thread", headerShown: false }} />
-    </Stack>
+    <>
+      <StatusBar style="light" backgroundColor="#0a0a0a" />
+      <Stack
+        screenOptions={{
+          headerShown: false,
+          headerTitleStyle: {
+            fontWeight: "700",
+            fontFamily: SYSTEM_FONT,
+          },
+        }}
+      >
+        <Stack.Screen name="index" options={{ headerShown: false }} />
+        <Stack.Screen name="pair" options={{ title: "Pair Device", headerShown: false }} />
+        <Stack.Screen name="threads" options={{ title: "Threads", headerShown: false }} />
+        <Stack.Screen name="thread/[id]" options={{ title: "Thread", headerShown: false }} />
+      </Stack>
+    </>
   );
 }

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   FlatList,
   Keyboard,
   KeyboardAvoidingView,
@@ -15,7 +16,7 @@ import {
 import { useLocalSearchParams } from "expo-router";
 import { router } from "expo-router";
 import { MotiView } from "moti";
-import EventSource from "react-native-sse";
+import { Ionicons } from "@expo/vector-icons";
 import Markdown from "react-native-markdown-display";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import {
@@ -55,6 +56,7 @@ const DEFAULT_REASONING_OPTIONS: ReasoningOption[] = [
 ];
 
 type OpenDropdown = "model" | "reasoning" | null;
+type StreamStatusTone = "ok" | "warn" | "error";
 
 const SYSTEM_FONT = Platform.select({
   ios: "System",
@@ -166,6 +168,10 @@ function parseSsePayload(raw: string): CodexSseEvent | null {
   } catch {
     return null;
   }
+}
+
+function turnsSignature(items: RenderedTurn[]): string {
+  return items.map((item) => `${item.id}:${item.role}:${item.kind ?? "message"}:${item.text.length}`).join("|");
 }
 
 function extractChangeSummaryFromEvent(method: string, params: unknown): RenderedTurn["summary"] | null {
@@ -465,16 +471,24 @@ export default function ThreadScreen() {
   const [selectedReasoning, setSelectedReasoning] = useState<ReasoningEffort | null>(null);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const [streamStatus, setStreamStatus] = useState<{ tone: StreamStatusTone; text: string }>({
+    tone: "warn",
+    text: "Connecting",
+  });
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([{ label: "Auto", value: null }]);
   const [reasoningOptionsByModel, setReasoningOptionsByModel] = useState<Record<string, ReasoningOption[]>>({});
   const [openDropdown, setOpenDropdown] = useState<OpenDropdown>(null);
 
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const streamSocketRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttemptRef = useRef(0);
   const listRef = useRef<FlatList<RenderedTurn>>(null);
   const followBottomRef = useRef(true);
   const draggingRef = useRef(false);
+  const initialSnapDoneRef = useRef(false);
   const seenEventIdsRef = useRef(new Set<string>());
   const seenChangeHashesRef = useRef(new Set<string>());
+  const turnsSignatureRef = useRef("");
 
   const currentReasoningOptions = useMemo(() => {
     if (!selectedModel) {
@@ -510,34 +524,59 @@ export default function ThreadScreen() {
     }
 
     let active = true;
+    initialSnapDoneRef.current = false;
+    followBottomRef.current = true;
+    draggingRef.current = false;
+    setShowScrollToBottom(false);
+    setStreamingAssistant("");
+    setIsThinking(false);
+    setTurns([]);
+    turnsSignatureRef.current = "";
+    setStreamStatus({ tone: "warn", text: "Connecting" });
+    reconnectAttemptRef.current = 0;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
 
     const setup = async () => {
       setError(null);
       setLoading(true);
 
-      try {
-        await resumeThread(threadId);
-        const thread = await getThread(threadId);
+      const scheduleReconnect = () => {
         if (!active) {
           return;
         }
+        const attempt = reconnectAttemptRef.current;
+        const delayMs = Math.min(8000, 500 * 2 ** attempt);
+        reconnectAttemptRef.current += 1;
+        setStreamStatus({ tone: "warn", text: "Reconnecting" });
+        reconnectTimerRef.current = setTimeout(() => {
+          reconnectTimerRef.current = null;
+          connectStream().catch(() => {
+            scheduleReconnect();
+          });
+        }, delayMs);
+      };
 
-        setTurns(toRenderedTurns(thread.turns));
-
+      const connectStream = async () => {
         const stream = await getStreamConfig(threadId);
         if (!active) {
           return;
         }
 
-        const eventSource = new EventSource(stream.url, {
-          headers: {
-            Authorization: `Bearer ${stream.token}`,
-          },
-          pollingInterval: 0,
-        });
+        streamSocketRef.current?.close();
+        const socket = new WebSocket(stream.wsUrl);
+        streamSocketRef.current = socket;
 
-        eventSource.addEventListener("codex" as never, (event) => {
-          const data = (event as { data?: string }).data;
+        socket.onopen = () => {
+          reconnectAttemptRef.current = 0;
+          setStreamStatus({ tone: "ok", text: "Live" });
+          setError((current) => (current?.startsWith("Stream disconnected") ? null : current));
+        };
+
+        socket.onmessage = (event) => {
+          const data = typeof event.data === "string" ? event.data : "";
           if (!data) {
             return;
           }
@@ -549,12 +588,11 @@ export default function ThreadScreen() {
 
           const method = payload.method.toLowerCase();
 
-          if (
-            method === "turn/started" ||
-            method === "item/started" ||
-            method.includes("reasoning") ||
-            method.includes("plan/")
-            ) {
+          if (method === "stream/keepalive" || method === "stream/ready") {
+            return;
+          }
+
+          if (method === "turn/started" || method === "item/started" || method.includes("reasoning") || method.includes("plan/")) {
             setIsThinking(true);
           }
 
@@ -611,19 +649,40 @@ export default function ThreadScreen() {
               return "";
             });
           }
-        });
+        };
 
-        eventSource.addEventListener("error", () => {
-          setError("Stream disconnected. Pull to refresh thread history.");
-        });
+        socket.onerror = () => {
+          setStreamStatus({ tone: "warn", text: "Connection issue" });
+        };
 
-        eventSourceRef.current = eventSource;
+        socket.onclose = () => {
+          if (!active) {
+            return;
+          }
+          if (streamSocketRef.current === socket) {
+            streamSocketRef.current = null;
+          }
+          scheduleReconnect();
+        };
+      };
+
+      try {
+        await resumeThread(threadId);
+        const thread = await getThread(threadId);
+        if (!active) {
+          return;
+        }
+
+        setTurns(toRenderedTurns(thread.turns));
+        turnsSignatureRef.current = turnsSignature(toRenderedTurns(thread.turns));
+        await connectStream();
       } catch (setupError) {
         if (setupError instanceof ReauthRequiredError) {
           await clearSession();
           router.replace("/pair");
           return;
         }
+        setStreamStatus({ tone: "error", text: "Disconnected" });
         setError(setupError instanceof Error ? setupError.message : "Unable to load thread");
       } finally {
         if (active) {
@@ -633,16 +692,59 @@ export default function ThreadScreen() {
     };
 
     setup().catch(() => {
+      setStreamStatus({ tone: "error", text: "Disconnected" });
       setError("Unable to load thread");
       setLoading(false);
     });
 
     return () => {
       active = false;
-      eventSourceRef.current?.close();
-      eventSourceRef.current = null;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      streamSocketRef.current?.close();
+      streamSocketRef.current = null;
     };
   }, [threadId]);
+
+  useEffect(() => {
+    if (!threadId) {
+      return;
+    }
+    if (loading) {
+      return;
+    }
+
+    const shouldSync = isThinking || streamStatus.tone !== "ok";
+    if (!shouldSync) {
+      return;
+    }
+
+    let active = true;
+    const timer = setInterval(async () => {
+      try {
+        const thread = await getThread(threadId);
+        if (!active) {
+          return;
+        }
+        const rendered = toRenderedTurns(thread.turns);
+        const nextSignature = turnsSignature(rendered);
+        if (nextSignature !== turnsSignatureRef.current) {
+          turnsSignatureRef.current = nextSignature;
+          setStreamingAssistant("");
+          setTurns(rendered);
+        }
+      } catch {
+        // no-op: stream reconnect status already indicates issues
+      }
+    }, 2500);
+
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [threadId, loading, isThinking, streamStatus.tone]);
 
   useEffect(() => {
     let active = true;
@@ -713,12 +815,18 @@ export default function ThreadScreen() {
     setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 220);
   };
 
+  const streamDotColor =
+    streamStatus.tone === "ok" ? "#22c55e" : streamStatus.tone === "warn" ? "#f59e0b" : "#ef4444";
+
   useEffect(() => {
     if (!followBottomRef.current) {
       return;
     }
     const timer = setTimeout(() => {
-      keepToBottom(true);
+      keepToBottom(initialSnapDoneRef.current);
+      if (!initialSnapDoneRef.current) {
+        initialSnapDoneRef.current = true;
+      }
     }, 40);
     return () => clearTimeout(timer);
   }, [turns, streamingAssistant]);
@@ -791,29 +899,35 @@ export default function ThreadScreen() {
     : turns;
 
   return (
-    <SafeAreaView className="flex-1 bg-[#090f1a]" edges={["top", "left", "right", "bottom"]}>
+    <SafeAreaView className="flex-1 bg-background" edges={["top", "left", "right", "bottom"]}>
       <KeyboardAvoidingView
         className="flex-1"
         behavior={Platform.OS === "ios" ? "padding" : undefined}
         keyboardVerticalOffset={0}
       >
-      <View className="flex-1 bg-[#090f1a] px-4 pt-1">
+      <View className="flex-1 bg-background px-4 pt-1">
         <View className="mb-3 flex-row items-center justify-between">
           <Pressable
             onPress={() => router.back()}
-            className="rounded-full border border-[#244068] bg-[#101b2d] px-4 py-2"
+            className="rounded-full border border-border/50 bg-card px-4 py-2"
           >
-            <Text className="text-sm font-semibold text-[#d8e8ff]">‹ Threads</Text>
+            <View className="flex-row items-center gap-1">
+              <Ionicons name="chevron-back" size={16} color="#e6e6e6" />
+              <Text className="text-sm font-semibold text-foreground">Threads</Text>
+            </View>
           </Pressable>
-          <Text className="text-4xl font-bold text-[#d8e8ff]">Thread</Text>
-          <View className="w-[82px]" />
+          <Text className="text-4xl font-bold text-foreground">Chat</Text>
+          <View className="flex-row items-center rounded-full border border-border/50 bg-card px-3 py-1.5">
+            <View className="mr-2 h-2.5 w-2.5 rounded-full" style={{ backgroundColor: streamDotColor }} />
+            <Text className="text-xs font-semibold text-foreground">{streamStatus.text}</Text>
+          </View>
         </View>
-        <Text className="mb-2 text-[11px] font-semibold uppercase tracking-[1.2px] text-[#5d7598]">Thread</Text>
-        <Text className="mb-3 rounded-xl border border-[#1f2d44] bg-[#0d1628] px-3 py-2 text-xs text-[#8fb4e2]">{threadId}</Text>
+        <Text className="mb-2 text-[11px] font-semibold uppercase tracking-[1.2px] text-muted-foreground">ID</Text>
+        <Text className="mb-3 rounded-xl border border-border/50 bg-muted px-3 py-2 text-xs text-muted-foreground">{threadId}</Text>
 
         {error ? (
-          <View className="mb-3 rounded-xl border border-[#66313d] bg-[#2c141b] p-3">
-            <Text className="text-sm text-[#ffc5d2]">{error}</Text>
+          <View className="mb-3 rounded-xl border border-border/50 bg-destructive/15 p-3">
+            <Text className="text-sm text-destructive-foreground">{error}</Text>
           </View>
         ) : null}
 
@@ -837,7 +951,10 @@ export default function ThreadScreen() {
           }}
           onContentSizeChange={() => {
             if (followBottomRef.current) {
-              keepToBottom(false);
+              keepToBottom(initialSnapDoneRef.current);
+              if (!initialSnapDoneRef.current) {
+                initialSnapDoneRef.current = true;
+              }
             }
           }}
           scrollEventThrottle={16}
@@ -849,16 +966,16 @@ export default function ThreadScreen() {
               className={`mb-2 w-full ${item.role === "user" ? "items-end" : "items-start"}`}
             >
               {item.kind === "changeSummary" && item.summary ? (
-                <View className="w-full rounded-2xl border border-[#232a36] bg-[#18181b] px-4 py-4">
-                  <Text className="text-3xl font-bold text-[#f5f5f5]">{item.summary.filesChanged} file changed</Text>
+                <View className="w-full rounded-2xl border border-border/50 bg-card px-4 py-4">
+                  <Text className="text-3xl font-bold text-card-foreground">{item.summary.filesChanged} file changed</Text>
                   {item.summary.files.map((file) => (
                     <View key={`${item.id}-${file.path}`} className="mt-3 flex-row items-center justify-between">
-                      <Text className="max-w-[70%] text-2xl text-[#f5f5f5]" numberOfLines={1}>
+                      <Text className="max-w-[70%] text-2xl text-foreground" numberOfLines={1}>
                         {file.path}
                       </Text>
                       <Text className="text-2xl font-semibold">
-                        <Text className="text-[#4ade80]">+{file.additions}</Text>
-                        <Text className="text-[#f87171]"> -{file.deletions}</Text>
+                        <Text className="text-emerald-400">+{file.additions}</Text>
+                        <Text className="text-red-400"> -{file.deletions}</Text>
                       </Text>
                     </View>
                   ))}
@@ -866,9 +983,9 @@ export default function ThreadScreen() {
               ) : (
               item.kind === "activity" && item.activity ? (
                 <View className="w-full py-1">
-                  <Text className="text-center text-base font-medium text-[#8b94a8]">{item.activity.title}</Text>
+                  <Text className="text-center text-base font-medium text-muted-foreground">{item.activity.title}</Text>
                   {item.activity.detail ? (
-                    <Text className="mt-0.5 text-center text-sm text-[#6f7891]" numberOfLines={1}>
+                    <Text className="mt-0.5 text-center text-sm text-muted-foreground" numberOfLines={1}>
                       {item.activity.detail}
                     </Text>
                   ) : null}
@@ -877,14 +994,14 @@ export default function ThreadScreen() {
               <View
                 className={`max-w-[86%] rounded-2xl px-3 py-3 ${
                   item.role === "user"
-                    ? "border border-[#2d6cc3] bg-[#2356a0]"
+                    ? "border border-border/50 bg-emerald-950/40"
                     : item.streaming
-                    ? "border border-[#284165] bg-[#0f1a2d]"
-                    : "border border-[#1d2b42] bg-[#0f1729]"
+                    ? "border border-border/50 bg-card"
+                    : "border border-border/50 bg-card"
                 }`}
               >
                 {item.role === "user" ? (
-                  <Text className="text-sm leading-6 text-[#f8fbff]">{item.text}</Text>
+                  <Text className="text-sm leading-6 text-emerald-100">{item.text}</Text>
                 ) : (
                   <Markdown style={markdownStyles}>{item.text}</Markdown>
                 )}
@@ -894,16 +1011,21 @@ export default function ThreadScreen() {
             </MotiView>
           )}
           ListEmptyComponent={
-            !loading ? (
-              <View className="rounded-2xl border border-dashed border-[#2a3c59] bg-[#0d1628] p-4">
-                <Text className="text-center text-sm text-[#85a7d1]">No turns available for this thread yet.</Text>
+            loading ? (
+              <View className="items-center justify-center rounded-2xl border border-border/50 bg-muted p-5">
+                <ActivityIndicator color="#8f8f8f" />
+                <Text className="mt-2 text-sm text-muted-foreground">Loading thread…</Text>
               </View>
-            ) : null
+            ) : (
+              <View className="rounded-2xl border border-dashed border-border/50 bg-card p-4">
+                <Text className="text-center text-sm text-muted-foreground">No turns available for this thread yet.</Text>
+              </View>
+            )
           }
           ListFooterComponent={
             isThinking ? (
               <View className="pb-1 pt-1">
-                <Text className="text-left text-2xl font-medium text-[#9aa3b2]">Thinking</Text>
+                <Text className="text-left text-2xl font-medium text-muted-foreground">Thinking</Text>
               </View>
             ) : null
           }
@@ -912,14 +1034,14 @@ export default function ThreadScreen() {
         {showScrollToBottom ? (
           <Pressable
             onPress={scrollToBottom}
-            className="absolute bottom-[188px] right-4 z-20 rounded-full border border-[#355987] bg-[#0f213a] px-3 py-2"
+            className="absolute bottom-[188px] right-4 z-20 rounded-full border border-border/50 bg-muted px-2.5 py-2"
           >
-            <Text className="text-xs font-semibold text-[#c9e2ff]">Bottom</Text>
+            <Ionicons name="arrow-down" size={16} color="#e0e0e0" />
           </Pressable>
         ) : null}
 
         <View
-          className="border-t border-[#16253d] bg-[#090f1a] pt-2"
+          className="border-t border-border/50 bg-background pt-2"
           style={{
             paddingBottom: Math.max(insets.bottom, 8),
           }}
@@ -928,30 +1050,30 @@ export default function ThreadScreen() {
             <View className="mb-2 flex-row justify-end">
               <Pressable
                 onPress={() => Keyboard.dismiss()}
-                className="rounded-full border border-[#355987] bg-[#0f213a] px-3 py-1.5"
+                className="rounded-full border border-border/50 bg-muted px-3 py-1.5"
               >
-                <Text className="text-xs font-semibold text-[#c9e2ff]">Hide Keyboard</Text>
+                <Text className="text-xs font-semibold text-foreground">Hide Keyboard</Text>
               </Pressable>
             </View>
           ) : null}
           <View className="mb-2 flex-row gap-2">
             <Pressable
               onPress={() => setOpenDropdown("model")}
-              className="h-9 flex-1 flex-row items-center justify-between rounded-full border border-[#355987] bg-[#0f213a] px-3"
+              className="h-9 flex-1 flex-row items-center justify-between rounded-full border border-border/50 bg-muted px-3"
             >
-              <Text className="text-sm font-semibold text-[#c9e2ff]">
+              <Text className="text-sm font-semibold text-foreground">
                 {modelOptions.find((option) => option.value === selectedModel)?.label ?? "Auto"}
               </Text>
-              <Text className="text-sm font-semibold text-[#c9e2ff]">^</Text>
+              <Text className="text-sm font-semibold text-emerald-300">^</Text>
             </Pressable>
             <Pressable
               onPress={() => setOpenDropdown("reasoning")}
-              className="h-9 flex-1 flex-row items-center justify-between rounded-full border border-[#355987] bg-[#0f213a] px-3"
+              className="h-9 flex-1 flex-row items-center justify-between rounded-full border border-border/50 bg-muted px-3"
             >
-              <Text className="text-sm font-semibold text-[#c9e2ff]">
+              <Text className="text-sm font-semibold text-foreground">
                 {currentReasoningOptions.find((option) => option.value === selectedReasoning)?.label ?? "Auto"}
               </Text>
-              <Text className="text-sm font-semibold text-[#c9e2ff]">^</Text>
+              <Text className="text-sm font-semibold text-emerald-300">^</Text>
             </Pressable>
           </View>
 
@@ -960,18 +1082,21 @@ export default function ThreadScreen() {
               value={composerText}
               onChangeText={setComposerText}
               placeholder="Continue this thread..."
-              placeholderTextColor="#6e86a8"
+              placeholderTextColor="#6f6f6f"
               multiline
-              className="max-h-36 flex-1 rounded-2xl border border-[#2a3f60] bg-[#0d1628] px-4 py-3 text-sm text-[#e6edf7]"
+              className="max-h-36 flex-1 rounded-2xl border border-border/50 bg-muted px-4 py-3 text-sm text-foreground"
             />
             <Pressable
               disabled={sending || !composerText.trim()}
               onPress={onSend}
               className={`min-w-[92px] rounded-2xl px-4 py-3 ${
-                sending || !composerText.trim() ? "bg-[#314763]" : "bg-[#3a80d9]"
+                sending || !composerText.trim() ? "bg-secondary" : "bg-primary"
               }`}
             >
-              <Text className="text-center text-sm font-bold text-white">{sending ? "..." : "Send"}</Text>
+              <View className="flex-row items-center justify-center gap-2">
+                <Ionicons name={sending ? "time-outline" : "send"} size={14} color="#d8ffd8" />
+                <Text className="text-center text-sm font-bold text-primary-foreground">{sending ? "..." : "Send"}</Text>
+              </View>
             </Pressable>
           </View>
         </View>
@@ -979,9 +1104,9 @@ export default function ThreadScreen() {
       </KeyboardAvoidingView>
 
       <Modal transparent visible={openDropdown !== null} animationType="fade" onRequestClose={() => setOpenDropdown(null)}>
-        <Pressable className="flex-1 bg-black/55 px-4 pt-24" onPress={() => setOpenDropdown(null)}>
+        <Pressable className="flex-1 bg-background/80 px-4 pt-24" onPress={() => setOpenDropdown(null)}>
           <Pressable
-            className="rounded-xl border border-[#2a3c5a] bg-[#111826] p-2"
+            className="rounded-xl border border-border/50 bg-muted p-2"
             onPress={(event) => {
               event.stopPropagation();
             }}
@@ -992,7 +1117,7 @@ export default function ThreadScreen() {
               return (
                 <Pressable
                   key={`${openDropdown}-${option.label}`}
-                  className={`rounded-lg px-3 py-3 ${active ? "bg-[#1d3558]" : "bg-transparent"}`}
+                  className={`rounded-lg px-3 py-3 ${active ? "bg-primary/30" : "bg-transparent"}`}
                   onPress={() => {
                     if (isModel) {
                       setSelectedModel(option.value as string | null);
@@ -1002,7 +1127,7 @@ export default function ThreadScreen() {
                     setOpenDropdown(null);
                   }}
                 >
-                  <Text className={`text-base ${active ? "font-semibold text-[#d9e9ff]" : "text-[#9fb2cd]"}`}>{option.label}</Text>
+                  <Text className={`text-base ${active ? "font-semibold text-primary-foreground" : "text-muted-foreground"}`}>{option.label}</Text>
                 </Pressable>
               );
             })}

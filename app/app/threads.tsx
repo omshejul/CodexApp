@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { FlatList, Pressable, RefreshControl, Text, View } from "react-native";
+import { ActivityIndicator, FlatList, Pressable, RefreshControl, Text, View } from "react-native";
 import { router } from "expo-router";
 import { MotiView } from "moti";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { clearSession, getThreads, ReauthRequiredError } from "@/lib/api";
 
 interface ThreadItem {
@@ -57,10 +58,10 @@ export default function ThreadsScreen() {
     >
       <Pressable
         onPress={() => router.push(`/thread/${item.id}`)}
-        className="rounded-2xl border border-[#1d2b42] bg-[#0f1729] px-4 py-4"
+        className="rounded-2xl border border-border/50 bg-card px-4 py-4"
       >
-        <Text className="text-base font-bold text-[#e6f0ff]">{item.title || item.id}</Text>
-        <Text className="mt-1 text-xs text-[#8baad0]">
+        <Text className="text-base font-bold text-card-foreground">{item.title || item.id}</Text>
+        <Text className="mt-1 text-xs text-muted-foreground">
           {item.updatedAt ? new Date(item.updatedAt).toLocaleString() : "Unknown update time"}
         </Text>
       </Pressable>
@@ -68,23 +69,23 @@ export default function ThreadsScreen() {
   );
 
   return (
-    <View className="flex-1 bg-[#090f1a] px-4 pt-4">
+    <SafeAreaView className="flex-1 bg-background px-4 pt-2" edges={["top", "left", "right"]}>
       <View className="mb-4 flex-row items-center justify-between">
-        <Text className="text-3xl font-black text-[#d7e9ff]">Threads</Text>
+        <Text className="text-3xl font-semibold text-foreground">Threads</Text>
         <Pressable
-          className="rounded-lg border border-[#2a3f60] bg-[#0f1a2d] px-3 py-2"
+          className="rounded-lg border border-border/50 bg-muted px-3 py-2"
           onPress={async () => {
             await clearSession();
             router.replace("/pair");
           }}
         >
-          <Text className="text-xs font-semibold text-[#a8c8ef]">Re-pair</Text>
+          <Text className="text-xs font-semibold text-foreground">Re-pair</Text>
         </Pressable>
       </View>
 
       {error ? (
-        <View className="mb-4 rounded-xl border border-[#66313d] bg-[#2c141b] p-3">
-          <Text className="text-sm text-[#ffc5d2]">{error}</Text>
+        <View className="mb-4 rounded-xl border border-border/50 bg-destructive/15 p-3">
+          <Text className="text-sm text-destructive-foreground">{error}</Text>
         </View>
       ) : null}
 
@@ -94,14 +95,21 @@ export default function ThreadsScreen() {
         renderItem={renderItem}
         contentContainerStyle={{ paddingBottom: 24 }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2f7de1" />}
+        ListFooterComponent={
+          loading || refreshing ? (
+            <View className="items-center py-4">
+              <ActivityIndicator size="small" color="#22c55e" />
+            </View>
+          ) : null
+        }
         ListEmptyComponent={
           !loading ? (
-            <View className="rounded-2xl border border-dashed border-[#2a3c59] bg-[#0d1628] p-6">
-              <Text className="text-center text-sm text-[#85a7d1]">No threads returned by the gateway.</Text>
+            <View className="rounded-2xl border border-dashed border-border/50 bg-muted p-6">
+              <Text className="text-center text-sm text-muted-foreground">No threads returned by the gateway.</Text>
             </View>
           ) : null
         }
       />
-    </View>
+    </SafeAreaView>
   );
 }
