@@ -21,3 +21,4 @@ mac/CodexGatewayMenu/.staging
 mac/CodexGatewayMenu/build
 
 *.tsbuildinfo
+app/ios
