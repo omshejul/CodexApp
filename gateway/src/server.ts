@@ -72,9 +72,12 @@ const errorsLogPath = process.env.ERRORS_LOG_PATH ?? path.resolve(__dirname, "..
 const runtimeLogs = createRuntimeLogWriter(eventsLogPath, errorsLogPath);
 const logLevel = process.env.LOG_LEVEL ?? "info";
 const prettyLogsEnabled = (process.env.LOG_PRETTY ?? "1") !== "0";
+const preventSystemSleepWhileGatewayActive =
+  process.platform === "darwin" && (process.env.PREVENT_SYSTEM_SLEEP_WHILE_GATEWAY_ACTIVE ?? "1") !== "0";
 
 const codex = new CodexRpcClient(codexWsUrl, GATEWAY_NAME, GATEWAY_VERSION);
 let managedCodexProcess: ChildProcess | null = null;
+let sleepInhibitorProcess: ChildProcess | null = null;
 
 let cachedDetectedBaseUrl: string | null = null;
 
@@ -126,6 +129,63 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function startSleepInhibitor() {
+  if (!preventSystemSleepWhileGatewayActive) {
+    return;
+  }
+  if (sleepInhibitorProcess && !sleepInhibitorProcess.killed) {
+    return;
+  }
+
+  const executable = fs.existsSync("/usr/bin/caffeinate") ? "/usr/bin/caffeinate" : "caffeinate";
+  try {
+    const proc = spawn(executable, ["-i", "-w", String(process.pid)], {
+      stdio: "ignore",
+      detached: false,
+    });
+    sleepInhibitorProcess = proc;
+
+    proc.once("spawn", () => {
+      runtimeLogs.event("gateway.sleep_inhibitor.started", { executable });
+      app.log.info("Sleep inhibitor active while gateway is running");
+    });
+
+    proc.on("error", (error) => {
+      runtimeLogs.error("gateway.sleep_inhibitor.error", error);
+      app.log.warn({ error }, "Could not start sleep inhibitor process");
+      if (sleepInhibitorProcess === proc) {
+        sleepInhibitorProcess = null;
+      }
+    });
+
+    proc.on("exit", (code, signal) => {
+      runtimeLogs.event("gateway.sleep_inhibitor.exited", {
+        code: code ?? null,
+        signal: signal ?? null,
+      });
+      if (sleepInhibitorProcess === proc) {
+        sleepInhibitorProcess = null;
+      }
+    });
+  } catch (error) {
+    runtimeLogs.error("gateway.sleep_inhibitor.start_failed", error);
+    app.log.warn({ error }, "Could not launch sleep inhibitor process");
+  }
+}
+
+function stopSleepInhibitor() {
+  const proc = sleepInhibitorProcess;
+  sleepInhibitorProcess = null;
+  if (!proc || proc.killed) {
+    return;
+  }
+  try {
+    proc.kill("SIGTERM");
+  } catch {
+    // ignore kill errors on shutdown
+  }
 }
 
 async function isCodexWsReachable(url: string, timeoutMs = 1200): Promise<boolean> {
@@ -1122,6 +1182,8 @@ async function bootstrap() {
     throw new Error(`Refusing to start gateway on non-local HOST='${host}'. Use 127.0.0.1 or localhost.`);
   }
 
+  startSleepInhibitor();
+
   codex.setServerRequestHandler(async ({ method }) => {
     app.log.warn(
       { method },
@@ -1924,6 +1986,7 @@ async function bootstrap() {
         await stopManagedCodexAppServer();
       }
     } finally {
+      stopSleepInhibitor();
       db.close();
       process.exit(0);
     }
@@ -2073,6 +2136,7 @@ function applyErrorHeaders(error: unknown, reply: FastifyReply) {
 bootstrap().catch(async (error) => {
   requestLogSafeError(error);
   runtimeLogs.error("gateway.bootstrap.failed", error);
+  stopSleepInhibitor();
   await stopManagedCodexAppServer();
   db.close();
   process.exit(1);
