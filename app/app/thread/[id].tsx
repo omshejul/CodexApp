@@ -25,6 +25,7 @@ import {
   getGatewayOptions,
   getStreamConfig,
   getThread,
+  getThreadEvents,
   resumeThread,
   sendThreadMessage,
 } from "@/lib/api";
@@ -78,6 +79,8 @@ const markdownStyles = {
   bullet_list: { marginTop: 0, marginBottom: 8 },
   ordered_list: { marginTop: 0, marginBottom: 8 },
   list_item: { marginBottom: 4 },
+  ordered_list_content: { flex: 1, flexShrink: 1 },
+  bullet_list_content: { flex: 1, flexShrink: 1 },
   code_inline: {
     backgroundColor: "#1f293b",
     color: "#d4e6ff",
@@ -174,13 +177,87 @@ function turnsSignature(items: RenderedTurn[]): string {
   return items.map((item) => `${item.id}:${item.role}:${item.kind ?? "message"}:${item.text.length}`).join("|");
 }
 
+function turnContentSignature(item: RenderedTurn): string {
+  if (item.kind === "changeSummary" && item.summary) {
+    const files = item.summary.files
+      .map(
+        (file) =>
+          `${file.path}:${file.additions}:${file.deletions}:${file.diff?.length ?? 0}:${(file.snippets ?? []).join("|")}`
+      )
+      .join(";");
+    return `change:${files}`;
+  }
+  if (item.kind === "activity" && item.activity) {
+    return `activity:${item.activity.title}:${item.activity.detail ?? ""}`;
+  }
+  return `msg:${item.role}:${item.text}`;
+}
+
+function parseFilesFromUnifiedDiff(diffText: string): Array<{
+  path: string;
+  additions: number;
+  deletions: number;
+  snippets: string[];
+  diff: string;
+}> {
+  const lines = diffText.split("\n");
+  const perFile = new Map<
+    string,
+    {
+      additions: number;
+      deletions: number;
+      snippets: string[];
+      lines: string[];
+    }
+  >();
+  let currentPath: string | null = null;
+
+  for (const line of lines) {
+    const header = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
+    if (header) {
+      currentPath = (header[2] || header[1]).trim();
+      if (!perFile.has(currentPath)) {
+        perFile.set(currentPath, { additions: 0, deletions: 0, snippets: [], lines: [] });
+      }
+    }
+
+    if (currentPath) {
+      const stat = perFile.get(currentPath);
+      if (stat) {
+        stat.lines.push(line);
+        if (!line.startsWith("+++ ") && !line.startsWith("--- ")) {
+          if (line.startsWith("+")) {
+            stat.additions += 1;
+            if (stat.snippets.length < 10) {
+              stat.snippets.push(line);
+            }
+          } else if (line.startsWith("-")) {
+            stat.deletions += 1;
+            if (stat.snippets.length < 10) {
+              stat.snippets.push(line);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return Array.from(perFile.entries()).map(([path, stat]) => ({
+    path,
+    additions: stat.additions,
+    deletions: stat.deletions,
+    snippets: stat.snippets,
+    diff: stat.lines.join("\n"),
+  }));
+}
+
 function extractChangeSummaryFromEvent(method: string, params: unknown): RenderedTurn["summary"] | null {
   const lower = method.toLowerCase();
   if (!lower.includes("diff") && !lower.includes("filechange") && !lower.includes("file_change")) {
     return null;
   }
 
-  const files: Array<{ path: string; additions: number; deletions: number }> = [];
+  const files: Array<{ path: string; additions: number; deletions: number; snippets?: string[]; diff?: string }> = [];
   const seen = new Set<string>();
 
   const walk = (value: unknown) => {
@@ -222,43 +299,12 @@ function extractChangeSummaryFromEvent(method: string, params: unknown): Rendere
 
     const diffText = typeof record.diff === "string" ? record.diff : typeof record.delta === "string" ? record.delta : null;
     if (diffText && diffText.includes("diff --git")) {
-      const perFile = new Map<string, { additions: number; deletions: number }>();
-      let currentPath: string | null = null;
-      for (const line of diffText.split("\n")) {
-        const header = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
-        if (header) {
-          currentPath = header[2] || header[1];
-          if (!perFile.has(currentPath)) {
-            perFile.set(currentPath, { additions: 0, deletions: 0 });
-          }
-          continue;
-        }
-        if (!currentPath) {
-          continue;
-        }
-        if (line.startsWith("+++ ") || line.startsWith("--- ")) {
-          continue;
-        }
-        if (line.startsWith("+")) {
-          const stat = perFile.get(currentPath);
-          if (stat) {
-            stat.additions += 1;
-          }
-          continue;
-        }
-        if (line.startsWith("-")) {
-          const stat = perFile.get(currentPath);
-          if (stat) {
-            stat.deletions += 1;
-          }
-        }
-      }
-
-      for (const [path, stat] of perFile.entries()) {
-        const key = `${path}:${stat.additions}:${stat.deletions}`;
+      const parsedFiles = parseFilesFromUnifiedDiff(diffText);
+      for (const parsed of parsedFiles) {
+        const key = `${parsed.path}:${parsed.additions}:${parsed.deletions}:${parsed.diff.length}`;
         if (!seen.has(key)) {
           seen.add(key);
-          files.push({ path, additions: stat.additions, deletions: stat.deletions });
+          files.push(parsed);
         }
       }
     }
@@ -453,6 +499,76 @@ function extractActivityFromEvent(method: string, params: unknown): RenderedTurn
   }
 
   return null;
+}
+
+function toPersistedEventTurns(
+  events: Array<{ id: number; method: string; params?: unknown }>,
+  existing: RenderedTurn[]
+): RenderedTurn[] {
+  const merged = [...existing];
+  const seen = new Set(merged.map((item) => turnContentSignature(item)));
+
+  for (const event of events) {
+    const summary = extractChangeSummaryFromEvent(event.method, event.params ?? null);
+    if (summary) {
+      const candidate: RenderedTurn = {
+        id: `persisted-change-${event.id}`,
+        role: "system",
+        text: "",
+        kind: "changeSummary",
+        summary,
+      };
+      const signature = turnContentSignature(candidate);
+      if (!seen.has(signature)) {
+        seen.add(signature);
+        merged.push(candidate);
+      }
+      continue;
+    }
+
+    const activity = extractActivityFromEvent(event.method, event.params ?? null);
+    if (activity) {
+      const candidate: RenderedTurn = {
+        ...activity,
+        id: `persisted-activity-${event.id}`,
+      };
+      const signature = turnContentSignature(candidate);
+      if (!seen.has(signature)) {
+        seen.add(signature);
+        merged.push(candidate);
+      }
+    }
+  }
+
+  return merged;
+}
+
+function ThinkingShinyPill() {
+  return (
+    <View className="pb-1 pt-2">
+      <View className="relative self-start overflow-hidden rounded-full border border-emerald-300/30 bg-emerald-950/45 px-4 py-2">
+        <MotiView
+          from={{ translateX: -140, opacity: 0.1 }}
+          animate={{ translateX: 220, opacity: 0.45 }}
+          transition={{ type: "timing", duration: 1700, loop: true, repeatReverse: false }}
+          className="absolute -bottom-8 -top-8 w-14 bg-white/25"
+          style={{
+            transform: [{ rotate: "18deg" }],
+          }}
+        />
+        <View className="relative flex-row items-center gap-2">
+          <Ionicons name="sparkles-outline" size={14} color="#b7f7d0" />
+          <Text className="text-sm font-semibold text-emerald-100">Thinking</Text>
+          <MotiView
+            from={{ opacity: 0.35, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ type: "timing", duration: 650, loop: true, repeatReverse: true }}
+            className="h-1.5 w-1.5 rounded-full bg-emerald-300"
+          />
+        </View>
+      </View>
+    </View>
+  );
 }
 
 export default function ThreadScreen() {
@@ -668,13 +784,20 @@ export default function ThreadScreen() {
 
       try {
         await resumeThread(threadId);
-        const thread = await getThread(threadId);
+        const [thread, eventsResponse] = await Promise.all([getThread(threadId), getThreadEvents(threadId)]);
         if (!active) {
           return;
         }
 
-        setTurns(toRenderedTurns(thread.turns));
-        turnsSignatureRef.current = turnsSignature(toRenderedTurns(thread.turns));
+        const initialTurns = toRenderedTurns(thread.turns);
+        const withPersistedEvents = toPersistedEventTurns(eventsResponse.events, initialTurns);
+        setTurns(withPersistedEvents);
+        turnsSignatureRef.current = turnsSignature(withPersistedEvents);
+        seenChangeHashesRef.current = new Set(
+          withPersistedEvents
+            .filter((item) => item.kind === "changeSummary" && item.summary)
+            .map((item) => JSON.stringify(item.summary))
+        );
         await connectStream();
       } catch (setupError) {
         if (setupError instanceof ReauthRequiredError) {
@@ -906,27 +1029,30 @@ export default function ThreadScreen() {
         keyboardVerticalOffset={0}
       >
       <View className="flex-1 bg-background px-4 pt-1">
-        <View className="mb-3 flex-row items-center justify-between">
-          <Pressable
-            onPress={() => router.back()}
-            className="rounded-full border border-border/50 bg-card px-4 py-2"
-          >
-            <View className="flex-row items-center gap-1">
-              <Ionicons name="chevron-back" size={16} color="#e6e6e6" />
-              <Text className="text-sm font-semibold text-foreground">Threads</Text>
+        <View className="mb-3 flex-row items-center">
+          <View className="w-28">
+            <Pressable
+              onPress={() => router.back()}
+              className="self-start h-10 w-10 items-center justify-center"
+            >
+              <Ionicons name="chevron-back" size={24} color="#ffffff" />
+            </Pressable>
+          </View>
+          <View className="flex-1 items-center">
+            <Text className="text-3xl font-semibold text-foreground">Chat</Text>
+          </View>
+          <View className="w-28 items-end">
+            <View className="flex-row items-center rounded-full border border-border/10 bg-card px-3 py-1.5">
+              <View className="mr-2 h-2.5 w-2.5 rounded-full" style={{ backgroundColor: streamDotColor }} />
+              <Text className="text-xs font-semibold text-foreground">{streamStatus.text}</Text>
             </View>
-          </Pressable>
-          <Text className="text-4xl font-bold text-foreground">Chat</Text>
-          <View className="flex-row items-center rounded-full border border-border/50 bg-card px-3 py-1.5">
-            <View className="mr-2 h-2.5 w-2.5 rounded-full" style={{ backgroundColor: streamDotColor }} />
-            <Text className="text-xs font-semibold text-foreground">{streamStatus.text}</Text>
           </View>
         </View>
         {/* <Text className="mb-2 text-[11px] font-semibold uppercase tracking-[1.2px] text-muted-foreground">ID</Text>
-        <Text className="mb-3 rounded-xl border border-border/50 bg-muted px-3 py-2 text-xs text-muted-foreground">{threadId}</Text> */}
+        <Text className="mb-3 rounded-xl border border-border/10 bg-muted px-3 py-2 text-xs text-muted-foreground">{threadId}</Text> */}
 
         {error ? (
-          <View className="mb-3 rounded-xl border border-border/50 bg-destructive/15 p-3">
+          <View className="mb-3 rounded-xl border border-border/10 bg-destructive/15 p-3">
             <Text className="text-sm text-destructive-foreground">{error}</Text>
           </View>
         ) : null}
@@ -966,17 +1092,26 @@ export default function ThreadScreen() {
               className={`mb-2 w-full ${item.role === "user" ? "items-end" : "items-start"}`}
             >
               {item.kind === "changeSummary" && item.summary ? (
-                <View className="w-full rounded-2xl border border-border/50 bg-card px-4 py-4">
-                  <Text className="text-3xl font-bold text-card-foreground">{item.summary.filesChanged} file changed</Text>
+                <View className="w-full rounded-2xl border border-border/10 bg-card px-4 py-4">
+                  <Text className="text-3xl font-bold text-card-foreground">
+                    {item.summary.filesChanged} file{item.summary.filesChanged === 1 ? "" : "s"} changed
+                  </Text>
                   {item.summary.files.map((file) => (
-                    <View key={`${item.id}-${file.path}`} className="mt-3 flex-row items-center justify-between">
-                      <Text className="max-w-[70%] text-2xl text-foreground" numberOfLines={1}>
-                        {file.path}
-                      </Text>
-                      <Text className="text-2xl font-semibold">
-                        <Text className="text-emerald-400">+{file.additions}</Text>
-                        <Text className="text-red-400"> -{file.deletions}</Text>
-                      </Text>
+                    <View key={`${item.id}-${file.path}`} className="mt-3">
+                      <View className="flex-row items-center justify-between">
+                        <Text className="max-w-[70%] text-2xl text-foreground" numberOfLines={1}>
+                          {file.path}
+                        </Text>
+                        <Text className="text-2xl font-semibold">
+                          <Text className="text-emerald-400">+{file.additions}</Text>
+                          <Text className="text-red-400"> -{file.deletions}</Text>
+                        </Text>
+                      </View>
+                      {typeof file.diff === "string" && file.diff.length > 0 ? (
+                        <View className="mt-2 rounded-lg border border-border/40 bg-muted/60 px-2.5 py-2">
+                          <Text className="font-mono text-[11px] leading-4 text-muted-foreground">{file.diff}</Text>
+                        </View>
+                      ) : null}
                     </View>
                   ))}
                 </View>
@@ -992,12 +1127,12 @@ export default function ThreadScreen() {
                 </View>
               ) : (
               <View
-                className={`max-w-[86%] rounded-2xl px-3 py-3 ${
+                className={`rounded-2xl px-3 py-3 ${
                   item.role === "user"
-                    ? "border border-border/50 bg-emerald-950/40"
+                    ? "max-w-[86%] border border-border/10 bg-emerald-950/40"
                     : item.streaming
-                    ? "border border-border/50 bg-card"
-                    : "border border-border/50 bg-card"
+                    ? "w-[86%] border border-border/10 bg-card"
+                    : "w-[86%] border border-border/10 bg-card"
                 }`}
               >
                 {item.role === "user" ? (
@@ -1012,7 +1147,7 @@ export default function ThreadScreen() {
           )}
           ListEmptyComponent={
             loading ? (
-              <View className="items-center justify-center rounded-2xl border border-border/50 bg-muted p-5">
+              <View className="items-center justify-center rounded-2xl border border-border/10 bg-muted p-5">
                 <ActivityIndicator color="#8f8f8f" />
                 <Text className="mt-2 text-sm text-muted-foreground">Loading thread…</Text>
               </View>
@@ -1024,9 +1159,7 @@ export default function ThreadScreen() {
           }
           ListFooterComponent={
             isThinking ? (
-              <View className="pb-1 pt-1">
-                <Text className="text-left text-2xl font-medium text-muted-foreground">Thinking</Text>
-              </View>
+              <ThinkingShinyPill />
             ) : null
           }
         />
@@ -1034,7 +1167,7 @@ export default function ThreadScreen() {
         {showScrollToBottom ? (
           <Pressable
             onPress={scrollToBottom}
-            className="absolute bottom-[188px] right-4 z-20 rounded-full border border-border/50 bg-muted px-2.5 py-2"
+            className="absolute bottom-[188px] right-4 z-20 rounded-full border border-border/10 bg-muted px-2.5 py-2"
           >
             <Ionicons name="arrow-down" size={16} color="#e0e0e0" />
           </Pressable>
@@ -1050,7 +1183,7 @@ export default function ThreadScreen() {
             <View className="mb-2 flex-row justify-end">
               <Pressable
                 onPress={() => Keyboard.dismiss()}
-                className="rounded-full border border-border/50 bg-muted px-3 py-1.5"
+                className="rounded-full border border-border/10 bg-muted px-3 py-1.5"
               >
                 <Text className="text-xs font-semibold text-foreground">Hide Keyboard</Text>
               </Pressable>
@@ -1059,7 +1192,7 @@ export default function ThreadScreen() {
           <View className="mb-2 flex-row gap-2">
             <Pressable
               onPress={() => setOpenDropdown("model")}
-              className="h-9 flex-1 flex-row items-center justify-between rounded-full border border-border/50 bg-muted px-3"
+              className="h-9 flex-1 flex-row items-center justify-between rounded-full border border-border/10 bg-muted px-3"
             >
               <Text className="text-sm font-semibold text-foreground">
                 {modelOptions.find((option) => option.value === selectedModel)?.label ?? "Auto"}
@@ -1068,7 +1201,7 @@ export default function ThreadScreen() {
             </Pressable>
             <Pressable
               onPress={() => setOpenDropdown("reasoning")}
-              className="h-9 flex-1 flex-row items-center justify-between rounded-full border border-border/50 bg-muted px-3"
+              className="h-9 flex-1 flex-row items-center justify-between rounded-full border border-border/10 bg-muted px-3"
             >
               <Text className="text-sm font-semibold text-foreground">
                 {currentReasoningOptions.find((option) => option.value === selectedReasoning)?.label ?? "Auto"}
@@ -1084,7 +1217,7 @@ export default function ThreadScreen() {
               placeholder="Continue this thread..."
               placeholderTextColor="#6f6f6f"
               multiline
-              className="max-h-36 flex-1 rounded-2xl border border-border/50 bg-muted px-4 py-3 text-sm text-foreground"
+              className="max-h-36 flex-1 rounded-full border border-border/10 bg-muted px-4 py-3 text-sm text-foreground"
             />
             <Pressable
               disabled={sending || !composerText.trim()}
@@ -1106,7 +1239,7 @@ export default function ThreadScreen() {
       <Modal transparent visible={openDropdown !== null} animationType="fade" onRequestClose={() => setOpenDropdown(null)}>
         <Pressable className="flex-1 bg-background/80 px-4 pt-24" onPress={() => setOpenDropdown(null)}>
           <Pressable
-            className="rounded-xl border border-border/50 bg-muted p-2"
+            className="rounded-xl border border-border/10 bg-muted p-2"
             onPress={(event) => {
               event.stopPropagation();
             }}

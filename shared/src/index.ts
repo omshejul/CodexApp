@@ -42,10 +42,27 @@ export const ThreadSummarySchema = z.object({
   name: z.string().optional(),
   title: z.string().optional(),
   updatedAt: z.string().optional(),
+  cwd: z.string().optional(),
 });
 
 export const ThreadsResponseSchema = z.object({
   threads: z.array(ThreadSummarySchema),
+});
+
+export const WorkspacesResponseSchema = z.object({
+  workspaces: z.array(z.string().min(1)),
+  defaultCwd: z.string().min(1).optional(),
+});
+
+export const DirectoryEntrySchema = z.object({
+  name: z.string().min(1),
+  path: z.string().min(1),
+});
+
+export const DirectoryBrowseResponseSchema = z.object({
+  currentPath: z.string().min(1),
+  parentPath: z.string().min(1).nullable(),
+  folders: z.array(DirectoryEntrySchema),
 });
 
 export const ThreadResponseSchema = z.object({
@@ -55,6 +72,18 @@ export const ThreadResponseSchema = z.object({
   turns: z.array(z.unknown()),
 });
 
+export const ThreadEventSchema = z.object({
+  id: z.number().int().positive(),
+  threadId: z.string().min(1),
+  method: z.string().min(1),
+  params: z.unknown(),
+  createdAt: z.string().datetime(),
+});
+
+export const ThreadEventsResponseSchema = z.object({
+  events: z.array(ThreadEventSchema),
+});
+
 export const ThreadResumeResponseSchema = z.object({
   ok: z.literal(true),
 });
@@ -62,6 +91,20 @@ export const ThreadResumeResponseSchema = z.object({
 export const ThreadCreateResponseSchema = z.object({
   ok: z.literal(true),
   threadId: z.string().min(1),
+});
+
+export const ThreadCreateRequestSchema = z.object({
+  cwd: z.string().min(1).optional(),
+});
+
+export const ThreadNameSetRequestSchema = z.object({
+  name: z.string().trim().min(1).max(200),
+});
+
+export const ThreadNameSetResponseSchema = z.object({
+  ok: z.literal(true),
+  threadId: z.string().min(1),
+  name: z.string().min(1),
 });
 
 export const ThreadMessageRequestSchema = z.object({
@@ -105,9 +148,17 @@ export type AuthRefreshResponse = z.infer<typeof AuthRefreshResponseSchema>;
 export type AuthLogoutRequest = z.infer<typeof AuthLogoutRequestSchema>;
 export type ThreadSummary = z.infer<typeof ThreadSummarySchema>;
 export type ThreadsResponse = z.infer<typeof ThreadsResponseSchema>;
+export type WorkspacesResponse = z.infer<typeof WorkspacesResponseSchema>;
+export type DirectoryEntry = z.infer<typeof DirectoryEntrySchema>;
+export type DirectoryBrowseResponse = z.infer<typeof DirectoryBrowseResponseSchema>;
 export type ThreadResponse = z.infer<typeof ThreadResponseSchema>;
+export type ThreadEvent = z.infer<typeof ThreadEventSchema>;
+export type ThreadEventsResponse = z.infer<typeof ThreadEventsResponseSchema>;
 export type ThreadResumeResponse = z.infer<typeof ThreadResumeResponseSchema>;
 export type ThreadCreateResponse = z.infer<typeof ThreadCreateResponseSchema>;
+export type ThreadCreateRequest = z.infer<typeof ThreadCreateRequestSchema>;
+export type ThreadNameSetRequest = z.infer<typeof ThreadNameSetRequestSchema>;
+export type ThreadNameSetResponse = z.infer<typeof ThreadNameSetResponseSchema>;
 export type ThreadMessageRequest = z.infer<typeof ThreadMessageRequestSchema>;
 export type ThreadMessageResponse = z.infer<typeof ThreadMessageResponseSchema>;
 export type ModelOption = z.infer<typeof ModelOptionSchema>;

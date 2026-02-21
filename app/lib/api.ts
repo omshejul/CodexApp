@@ -1,14 +1,18 @@
 import {
   AuthRefreshResponseSchema,
+  DirectoryBrowseResponseSchema,
   GatewayOptionsResponseSchema,
+  ThreadCreateRequest,
   PairClaimRequest,
   PairClaimResponseSchema,
   ThreadMessageRequest,
   ThreadMessageResponseSchema,
   ThreadCreateResponseSchema,
+  ThreadEventsResponseSchema,
   ThreadResponseSchema,
   ThreadResumeResponseSchema,
   ThreadsResponseSchema,
+  WorkspacesResponseSchema,
 } from "@codex-phone/shared";
 import * as SecureStore from "expo-secure-store";
 
@@ -249,11 +253,31 @@ export async function getThread(threadId: string) {
   return ThreadResponseSchema.parse(payload);
 }
 
-export async function createThread() {
+export async function getThreadEvents(threadId: string) {
+  const payload = await authenticatedRequest<unknown>(`/threads/${encodeURIComponent(threadId)}/events`);
+  return ThreadEventsResponseSchema.parse(payload);
+}
+
+export async function createThread(request?: ThreadCreateRequest) {
   const payload = await authenticatedRequest<unknown>("/threads", {
     method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request ?? {}),
   });
   return ThreadCreateResponseSchema.parse(payload);
+}
+
+export async function getWorkspaces() {
+  const payload = await authenticatedRequest<unknown>("/workspaces");
+  return WorkspacesResponseSchema.parse(payload);
+}
+
+export async function getDirectories(pathValue?: string) {
+  const query = pathValue ? `?path=${encodeURIComponent(pathValue)}` : "";
+  const payload = await authenticatedRequest<unknown>(`/directories${query}`);
+  return DirectoryBrowseResponseSchema.parse(payload);
 }
 
 export async function resumeThread(threadId: string) {

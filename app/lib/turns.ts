@@ -10,6 +10,8 @@ export interface RenderedTurn {
       path: string;
       additions: number;
       deletions: number;
+      snippets?: string[];
+      diff?: string;
     }>;
   };
   activity?: {
@@ -154,6 +156,13 @@ function statFromUnifiedDiff(diff: string): { additions: number; deletions: numb
   return { additions, deletions };
 }
 
+function snippetFromUnifiedDiff(diff: string): string[] {
+  return diff
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .slice(0, 400);
+}
+
 function toCommandActivity(record: Record<string, unknown>, id: string): RenderedTurn {
   const actions = Array.isArray(record.commandActions) ? (record.commandActions as Array<Record<string, unknown>>) : [];
   const readAction = actions.find((action) => action?.type === "read" && typeof action.path === "string");
@@ -210,13 +219,16 @@ function toFileChangeSummary(record: Record<string, unknown>, id: string): Rende
         return null;
       }
       const stat = statFromUnifiedDiff(diff);
+      const snippets = snippetFromUnifiedDiff(diff);
       return {
         path,
         additions: stat.additions,
         deletions: stat.deletions,
+        snippets,
+        diff,
       };
     })
-    .filter((entry): entry is { path: string; additions: number; deletions: number } => entry !== null);
+    .filter((entry): entry is { path: string; additions: number; deletions: number; snippets: string[]; diff: string } => entry !== null);
 
   if (!files.length) {
     return null;

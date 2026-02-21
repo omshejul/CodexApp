@@ -1,7 +1,8 @@
 import path from "node:path";
+import fs from "node:fs";
 import type { IncomingMessage } from "node:http";
 import { ChildProcess, execFileSync, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import dotenv from "dotenv";
 import Fastify, { FastifyReply, FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
@@ -15,15 +16,21 @@ import {
   AuthRefreshResponseSchema,
   GatewayOptionsResponseSchema,
   HealthResponseSchema,
+  DirectoryBrowseResponseSchema,
   PairClaimRequestSchema,
   PairClaimResponseSchema,
   PairCreateResponseSchema,
+  ThreadCreateRequestSchema,
   ThreadMessageRequestSchema,
   ThreadMessageResponseSchema,
+  ThreadNameSetRequestSchema,
+  ThreadNameSetResponseSchema,
   ThreadCreateResponseSchema,
+  ThreadEventsResponseSchema,
   ThreadResponseSchema,
   ThreadResumeResponseSchema,
   ThreadsResponseSchema,
+  WorkspacesResponseSchema,
 } from "@codex-phone/shared";
 import { CodexRpcClient } from "./codex-rpc";
 import { GatewayDatabase, PairSessionRow, RefreshTokenRow } from "./db";
@@ -61,6 +68,7 @@ const prettyLogsEnabled = (process.env.LOG_PRETTY ?? "1") !== "0";
 
 const codex = new CodexRpcClient(codexWsUrl, GATEWAY_NAME, GATEWAY_VERSION);
 let managedCodexProcess: ChildProcess | null = null;
+const threadDiffHashes = new Map<string, string>();
 
 let cachedDetectedBaseUrl: string | null = null;
 
@@ -460,7 +468,148 @@ function getWsBearerToken(request: IncomingMessage, parsedUrl: URL): string | nu
   return null;
 }
 
-function normalizeThreads(result: unknown): Array<{ id: string; name?: string; title?: string; updatedAt?: string }> {
+function parseThreadNameUpdate(
+  method: string,
+  params: unknown
+): {
+  threadId: string;
+  name: string;
+} | null {
+  const pickNonEmptyString = (...values: unknown[]): string | null => {
+    for (const value of values) {
+      if (typeof value === "string" && value.trim().length > 0) {
+        return value.trim();
+      }
+    }
+    return null;
+  };
+
+  if (!params || typeof params !== "object") {
+    return null;
+  }
+
+  if (method !== "thread/name/updated" && method !== "codex/event/thread_name_updated") {
+    return null;
+  }
+
+  const record = params as Record<string, unknown>;
+  const nestedMsg = record.msg && typeof record.msg === "object" ? (record.msg as Record<string, unknown>) : null;
+  const threadId = pickNonEmptyString(record.threadId, record.thread_id, nestedMsg?.threadId, nestedMsg?.thread_id);
+  const name = pickNonEmptyString(record.threadName, record.thread_name, record.name, nestedMsg?.threadName, nestedMsg?.thread_name);
+  if (!threadId || !name) {
+    return null;
+  }
+
+  return {
+    threadId,
+    name,
+  };
+}
+
+function extractThreadIdFromParams(value: unknown): string | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const found = extractThreadIdFromParams(entry);
+      if (found) {
+        return found;
+      }
+    }
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const candidates = [record.threadId, record.thread_id, record.threadID, record.conversationId];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate.trim();
+    }
+  }
+  for (const nested of Object.values(record)) {
+    const found = extractThreadIdFromParams(nested);
+    if (found) {
+      return found;
+    }
+  }
+  return null;
+}
+
+function runGitDiffAllowExitOne(args: string[]): string {
+  try {
+    return execFileSync("git", args, {
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024 * 8,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch (error) {
+    if (error && typeof error === "object" && "stdout" in error) {
+      const stdout = (error as { stdout?: unknown }).stdout;
+      if (typeof stdout === "string") {
+        return stdout;
+      }
+      if (Buffer.isBuffer(stdout)) {
+        return stdout.toString("utf8");
+      }
+    }
+    return "";
+  }
+}
+
+function buildThreadDiffSnapshotEvent(threadId: string): { method: string; params: { threadId: string; cwd: string; diff: string } } | null {
+  const threadCwd = db.getThreadCwd(threadId);
+  const cwd = threadCwd?.cwd?.trim();
+  if (!cwd) {
+    return null;
+  }
+
+  try {
+    const trackedDiff = execFileSync("git", ["-C", cwd, "diff", "--no-color", "--no-ext-diff", "--", "."], {
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024 * 8,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const untrackedRaw = execFileSync("git", ["-C", cwd, "ls-files", "--others", "--exclude-standard", "--", "."], {
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024 * 2,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const untrackedFiles = untrackedRaw
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+
+    const untrackedDiffs = untrackedFiles
+      .map((relativePath) =>
+        runGitDiffAllowExitOne(["-C", cwd, "diff", "--no-color", "--no-ext-diff", "--no-index", "--", "/dev/null", relativePath])
+      )
+      .filter((chunk) => chunk.trim().length > 0);
+
+    const diff = [trackedDiff, ...untrackedDiffs].filter((chunk) => chunk.trim().length > 0).join("\n").trim();
+    if (!diff.includes("diff --git")) {
+      return null;
+    }
+
+    const hash = createHash("sha1").update(diff).digest("hex");
+    const previous = threadDiffHashes.get(threadId);
+    if (previous === hash) {
+      return null;
+    }
+    threadDiffHashes.set(threadId, hash);
+    return {
+      method: "gateway/diff/snapshot",
+      params: {
+        threadId,
+        cwd,
+        diff,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeThreads(result: unknown): Array<{ id: string; name?: string; title?: string; updatedAt?: string; cwd?: string }> {
   const pickNonEmptyString = (...values: unknown[]): string | undefined => {
     for (const value of values) {
       if (typeof value === "string" && value.trim().length > 0) {
@@ -468,6 +617,13 @@ function normalizeThreads(result: unknown): Array<{ id: string; name?: string; t
       }
     }
     return undefined;
+  };
+  const summarizePreview = (value: string): string => {
+    const singleLine = value.replace(/\s+/g, " ").trim();
+    if (singleLine.length <= 140) {
+      return singleLine;
+    }
+    return `${singleLine.slice(0, 137)}...`;
   };
 
   const asObject = result && typeof result === "object" ? (result as Record<string, unknown>) : null;
@@ -481,7 +637,7 @@ function normalizeThreads(result: unknown): Array<{ id: string; name?: string; t
     ? (asObject.items as unknown[])
     : [];
 
-  return threadArray.reduce<Array<{ id: string; name?: string; title?: string; updatedAt?: string }>>((acc, item) => {
+  return threadArray.reduce<Array<{ id: string; name?: string; title?: string; updatedAt?: string; cwd?: string }>>((acc, item) => {
     if (!item || typeof item !== "object") {
       return acc;
     }
@@ -494,7 +650,9 @@ function normalizeThreads(result: unknown): Array<{ id: string; name?: string; t
     }
 
     const name = pickNonEmptyString(row.name, row.threadName, nested?.name, nested?.threadName, row.title, nested?.title);
-    const title = pickNonEmptyString(row.title, nested?.title);
+    const previewValue = pickNonEmptyString(row.preview, nested?.preview);
+    const title = pickNonEmptyString(row.title, nested?.title) ?? (previewValue ? summarizePreview(previewValue) : undefined);
+    const cwd = pickNonEmptyString(row.cwd, row.workingDirectory, row.workdir, nested?.cwd, nested?.workingDirectory, nested?.workdir);
     const updatedRaw = row.updatedAt ?? row.updated_at ?? row.createdAt ?? row.created_at ?? nested?.updatedAt ?? nested?.updated_at;
     const updatedAt =
       typeof updatedRaw === "string"
@@ -502,9 +660,89 @@ function normalizeThreads(result: unknown): Array<{ id: string; name?: string; t
         : typeof updatedRaw === "number" && Number.isFinite(updatedRaw)
         ? new Date(updatedRaw * 1000).toISOString()
         : undefined;
-    acc.push({ id, name, title, updatedAt });
+    acc.push({ id, name, title, updatedAt, cwd });
     return acc;
   }, []);
+}
+
+function listChildDirectories(root: string, limit = 50): string[] {
+  try {
+    const entries = execFileSync("find", [root, "-mindepth", "1", "-maxdepth", "1", "-type", "d"], {
+      encoding: "utf8",
+      maxBuffer: 1024 * 512,
+    })
+      .split(/\r?\n/)
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0)
+      .slice(0, limit);
+    return entries;
+  } catch {
+    return [];
+  }
+}
+
+function buildWorkspaceSuggestions(): { defaultCwd: string; workspaces: string[] } {
+  const defaultCwd = process.cwd();
+  const suggestions = new Set<string>([defaultCwd]);
+  const parent = path.resolve(defaultCwd, "..");
+  if (parent !== defaultCwd) {
+    suggestions.add(parent);
+  }
+  const envRoots = (process.env.WORKSPACE_ROOTS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+  const roots = envRoots.length > 0 ? envRoots : [parent];
+  for (const root of roots) {
+    suggestions.add(root);
+    for (const child of listChildDirectories(root)) {
+      suggestions.add(child);
+    }
+  }
+  return {
+    defaultCwd,
+    workspaces: Array.from(suggestions),
+  };
+}
+
+function normalizeBrowsePath(raw: unknown): string {
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    return process.cwd();
+  }
+  const resolved = path.resolve(raw.trim());
+  if (!fs.existsSync(resolved)) {
+    return process.cwd();
+  }
+  try {
+    const stats = fs.statSync(resolved);
+    return stats.isDirectory() ? resolved : path.dirname(resolved);
+  } catch {
+    return process.cwd();
+  }
+}
+
+function browseDirectories(rawPath: unknown): { currentPath: string; parentPath: string | null; folders: Array<{ name: string; path: string }> } {
+  const currentPath = normalizeBrowsePath(rawPath);
+  let entries: Array<{ name: string; path: string }> = [];
+  try {
+    entries = fs
+      .readdirSync(currentPath, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => ({
+        name: entry.name,
+        path: path.join(currentPath, entry.name),
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+  } catch {
+    entries = [];
+  }
+  const parentPath = path.dirname(currentPath);
+
+  return {
+    currentPath,
+    parentPath: parentPath === currentPath ? null : parentPath,
+    folders: entries,
+  };
 }
 
 function normalizeThread(result: unknown, fallbackId: string): { id: string; name?: string; title?: string; turns: unknown[] } {
@@ -652,6 +890,35 @@ async function bootstrap() {
       "Codex app-server requested interactive approval/input; denying because gateway is non-interactive"
     );
     throw new Error("Interactive approval requests are not supported by codex-phone gateway");
+  });
+
+  codex.onNotification((method, params) => {
+    const threadId = extractThreadIdFromParams(params);
+    if (threadId) {
+      try {
+        db.insertThreadEvent(threadId, method, JSON.stringify(params ?? null), Date.now());
+        if (method === "turn/completed") {
+          const snapshot = buildThreadDiffSnapshotEvent(threadId);
+          if (snapshot) {
+            db.insertThreadEvent(threadId, snapshot.method, JSON.stringify(snapshot.params), Date.now());
+            runtimeLogs.event("thread.events.synthetic_diff", { threadId, source: "notification" });
+          }
+        }
+      } catch (error) {
+        runtimeLogs.error("thread.events.persist_failed", error, { threadId, method });
+      }
+    }
+
+    const update = parseThreadNameUpdate(method, params);
+    if (!update) {
+      return;
+    }
+    db.upsertThreadName({
+      threadId: update.threadId,
+      name: update.name,
+      updatedAt: Date.now(),
+    });
+    runtimeLogs.event("thread.name.synced", { method, threadId: update.threadId });
   });
 
   await ensureCodexAppServerRunning();
@@ -905,16 +1172,51 @@ async function bootstrap() {
 
   app.get("/threads", { preHandler: [requireAuth] }, async (_request, reply) => {
     const result = await codex.call("thread/list", {});
+    const normalized = normalizeThreads(result);
+    const persistedNames = db.getThreadNames(normalized.map((item) => item.id));
+    const persistedCwds = db.getThreadCwds(normalized.map((item) => item.id));
+    const now = Date.now();
+    for (const item of normalized) {
+      if (item.cwd && item.cwd.trim().length > 0) {
+        db.upsertThreadCwd({
+          threadId: item.id,
+          cwd: item.cwd.trim(),
+          updatedAt: now,
+        });
+      }
+    }
     const payload = ThreadsResponseSchema.parse({
-      threads: normalizeThreads(result),
+      threads: normalized.map((item) => ({
+        ...item,
+        name: persistedNames.get(item.id)?.name ?? item.name,
+        cwd: persistedCwds.get(item.id)?.cwd ?? item.cwd,
+      })),
     });
     return reply.send(payload);
   });
 
-  app.post("/threads", { preHandler: [requireAuth] }, async (_request, reply) => {
+  app.get("/workspaces", { preHandler: [requireAuth] }, async (_request, reply) => {
+    const payload = WorkspacesResponseSchema.parse(buildWorkspaceSuggestions());
+    return reply.send(payload);
+  });
+
+  app.get("/directories", { preHandler: [requireAuth] }, async (request, reply) => {
+    const query = request.query as { path?: string };
+    const payload = DirectoryBrowseResponseSchema.parse(browseDirectories(query.path));
+    return reply.send(payload);
+  });
+
+  app.post("/threads", { preHandler: [requireAuth] }, async (request, reply) => {
+    const parsedBody = ThreadCreateRequestSchema.safeParse(request.body ?? {});
+    if (!parsedBody.success) {
+      return reply.code(400).send({ error: parsedBody.error.flatten() });
+    }
+
+    const trimmedCwd = parsedBody.data.cwd?.trim();
     const result = await codex.call("thread/start", {
       approvalPolicy: "never",
       sandboxPolicy: buildDefaultDangerFullAccessSandboxPolicy(),
+      ...(trimmedCwd ? { cwd: trimmedCwd } : {}),
     });
 
     const threadId = (() => {
@@ -937,6 +1239,14 @@ async function bootstrap() {
 
     if (!threadId) {
       throw new Error("thread/start returned no thread id");
+    }
+
+    if (trimmedCwd && trimmedCwd.length > 0) {
+      db.upsertThreadCwd({
+        threadId,
+        cwd: trimmedCwd,
+        updatedAt: Date.now(),
+      });
     }
 
     const payload = ThreadCreateResponseSchema.parse({
@@ -966,7 +1276,73 @@ async function bootstrap() {
     }
 
     const normalized = normalizeThread(result, params.id);
-    const payload = ThreadResponseSchema.parse(normalized);
+    const persisted = db.getThreadName(normalized.id);
+    const payload = ThreadResponseSchema.parse({
+      ...normalized,
+      name: persisted?.name ?? normalized.name,
+    });
+    return reply.send(payload);
+  });
+
+  app.get("/threads/:id/events", { preHandler: [requireAuth] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const rows = db.listThreadEvents(params.id, 1000);
+    const payload = ThreadEventsResponseSchema.parse({
+      events: rows.map((row) => {
+        let parsedParams: unknown = null;
+        try {
+          parsedParams = JSON.parse(row.paramsJson);
+        } catch {
+          parsedParams = null;
+        }
+        return {
+          id: row.id,
+          threadId: row.threadId,
+          method: row.method,
+          params: parsedParams,
+          createdAt: new Date(row.createdAt).toISOString(),
+        };
+      }),
+    });
+    return reply.send(payload);
+  });
+
+  app.post("/threads/:id/name", { preHandler: [requireAuth] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const parsedBody = ThreadNameSetRequestSchema.safeParse(request.body);
+    if (!parsedBody.success) {
+      return reply.code(400).send({ error: parsedBody.error.flatten() });
+    }
+
+    const name = parsedBody.data.name.trim();
+    try {
+      await codex.call("thread/resume", {
+        threadId: params.id,
+        approvalPolicy: "never",
+        sandbox: "danger-full-access",
+      });
+    } catch (error) {
+      if (!isUnmaterializedThreadError(error)) {
+        throw error;
+      }
+    }
+
+    await codex.call("thread/name/set", {
+      threadId: params.id,
+      name,
+    });
+
+    db.upsertThreadName({
+      threadId: params.id,
+      name,
+      updatedAt: Date.now(),
+    });
+
+    const payload = ThreadNameSetResponseSchema.parse({
+      ok: true,
+      threadId: params.id,
+      name,
+    });
     return reply.send(payload);
   });
 
@@ -1053,6 +1429,15 @@ async function bootstrap() {
       runtimeLogs.event("stream.sse.event", { threadId: params.id, method: payload.method });
       reply.raw.write(`event: codex\n`);
       reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
+      if (payload.method === "turn/completed") {
+        const snapshot = buildThreadDiffSnapshotEvent(params.id);
+        if (snapshot) {
+          db.insertThreadEvent(params.id, snapshot.method, JSON.stringify(snapshot.params), Date.now());
+          runtimeLogs.event("thread.events.synthetic_diff", { threadId: params.id });
+          reply.raw.write(`event: codex\n`);
+          reply.raw.write(`data: ${JSON.stringify(snapshot)}\n\n`);
+        }
+      }
     };
 
     sendEvent({
@@ -1137,6 +1522,14 @@ async function bootstrap() {
         }
         runtimeLogs.event("stream.ws.event", { threadId, method: payload.method });
         ws.send(JSON.stringify(payload));
+        if (payload.method === "turn/completed") {
+          const snapshot = buildThreadDiffSnapshotEvent(threadId);
+          if (snapshot) {
+            db.insertThreadEvent(threadId, snapshot.method, JSON.stringify(snapshot.params), Date.now());
+            runtimeLogs.event("thread.events.synthetic_diff", { threadId });
+            ws.send(JSON.stringify(snapshot));
+          }
+        }
       };
 
       sendPayload({

@@ -20,6 +20,26 @@ export interface RefreshTokenRow {
   deviceName: string;
 }
 
+export interface ThreadNameRow {
+  threadId: string;
+  name: string;
+  updatedAt: number;
+}
+
+export interface ThreadCwdRow {
+  threadId: string;
+  cwd: string;
+  updatedAt: number;
+}
+
+export interface ThreadEventRow {
+  id: number;
+  threadId: string;
+  method: string;
+  paramsJson: string;
+  createdAt: number;
+}
+
 interface SettingsRow {
   id: number;
   jwtSecret: string;
@@ -62,9 +82,32 @@ export class GatewayDatabase {
         createdAt INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS thread_names (
+        threadId TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        updatedAt INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS thread_cwds (
+        threadId TEXT PRIMARY KEY,
+        cwd TEXT NOT NULL,
+        updatedAt INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS thread_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        threadId TEXT NOT NULL,
+        method TEXT NOT NULL,
+        paramsJson TEXT NOT NULL,
+        createdAt INTEGER NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_pair_expires ON pair_sessions (expiresAt);
       CREATE INDEX IF NOT EXISTS idx_refresh_expires ON refresh_tokens (expiresAt);
       CREATE INDEX IF NOT EXISTS idx_refresh_revoked ON refresh_tokens (revokedAt);
+      CREATE INDEX IF NOT EXISTS idx_thread_names_updated ON thread_names (updatedAt);
+      CREATE INDEX IF NOT EXISTS idx_thread_cwds_updated ON thread_cwds (updatedAt);
+      CREATE INDEX IF NOT EXISTS idx_thread_events_thread_created ON thread_events (threadId, createdAt);
     `);
   }
 
@@ -147,5 +190,87 @@ export class GatewayDatabase {
          ORDER BY createdAt DESC`
       )
       .all(now) as Array<Pick<RefreshTokenRow, "id" | "deviceId" | "deviceName" | "createdAt" | "expiresAt">>;
+  }
+
+  upsertThreadName(threadName: ThreadNameRow) {
+    this.db
+      .prepare(
+        `INSERT INTO thread_names (threadId, name, updatedAt)
+         VALUES (?, ?, ?)
+         ON CONFLICT(threadId) DO UPDATE SET
+           name = excluded.name,
+           updatedAt = excluded.updatedAt`
+      )
+      .run(threadName.threadId, threadName.name, threadName.updatedAt);
+  }
+
+  getThreadName(threadId: string): ThreadNameRow | null {
+    const row = this.db
+      .prepare("SELECT threadId, name, updatedAt FROM thread_names WHERE threadId = ?")
+      .get(threadId) as ThreadNameRow | undefined;
+    return row ?? null;
+  }
+
+  getThreadNames(threadIds: string[]): Map<string, ThreadNameRow> {
+    const result = new Map<string, ThreadNameRow>();
+    for (const threadId of threadIds) {
+      const row = this.getThreadName(threadId);
+      if (row) {
+        result.set(threadId, row);
+      }
+    }
+    return result;
+  }
+
+  upsertThreadCwd(threadCwd: ThreadCwdRow) {
+    this.db
+      .prepare(
+        `INSERT INTO thread_cwds (threadId, cwd, updatedAt)
+         VALUES (?, ?, ?)
+         ON CONFLICT(threadId) DO UPDATE SET
+           cwd = excluded.cwd,
+           updatedAt = excluded.updatedAt`
+      )
+      .run(threadCwd.threadId, threadCwd.cwd, threadCwd.updatedAt);
+  }
+
+  getThreadCwd(threadId: string): ThreadCwdRow | null {
+    const row = this.db
+      .prepare("SELECT threadId, cwd, updatedAt FROM thread_cwds WHERE threadId = ?")
+      .get(threadId) as ThreadCwdRow | undefined;
+    return row ?? null;
+  }
+
+  getThreadCwds(threadIds: string[]): Map<string, ThreadCwdRow> {
+    const result = new Map<string, ThreadCwdRow>();
+    for (const threadId of threadIds) {
+      const row = this.getThreadCwd(threadId);
+      if (row) {
+        result.set(threadId, row);
+      }
+    }
+    return result;
+  }
+
+  insertThreadEvent(threadId: string, method: string, paramsJson: string, createdAt: number) {
+    this.db
+      .prepare("INSERT INTO thread_events (threadId, method, paramsJson, createdAt) VALUES (?, ?, ?, ?)")
+      .run(threadId, method, paramsJson, createdAt);
+  }
+
+  listThreadEvents(threadId: string, limit = 500): ThreadEventRow[] {
+    return this.db
+      .prepare(
+        `SELECT id, threadId, method, paramsJson, createdAt
+         FROM thread_events
+         WHERE threadId = ?
+         ORDER BY id ASC
+         LIMIT ?`
+      )
+      .all(threadId, limit) as ThreadEventRow[];
+  }
+
+  cleanupThreadEventsOlderThan(cutoffMs: number) {
+    this.db.prepare("DELETE FROM thread_events WHERE createdAt < ?").run(cutoffMs);
   }
 }
