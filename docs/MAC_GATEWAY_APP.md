@@ -61,6 +61,14 @@ Set:
 - `SIGN_IDENTITY` (Developer ID Application certificate name)
 - `NOTARYTOOL_PROFILE` (saved keychain profile for `xcrun notarytool`)
 
+Quick command (current project setup):
+
+```bash
+SIGN_IDENTITY="Developer ID Application: Om Shejul (M4K84L4TKR)" \
+NOTARYTOOL_PROFILE="codex-gateway" \
+/Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/scripts/build_app.sh --release
+```
+
 Then run:
 
 ```bash
@@ -114,6 +122,14 @@ NOTARYTOOL_PROFILE="codex-gateway" \
 spctl -a -t exec -vv /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.app
 spctl -a -t open -vv /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.dmg
 codesign --verify --deep --strict --verbose=2 /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.app
+xcrun stapler validate /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.app
+xcrun stapler validate /Users/omshejul/Code/CodexApp/mac/CodexGatewayMenu/build/CodexGatewayMenu.dmg
+```
+
+6. Optional notarization history check:
+
+```bash
+xcrun notarytool history --keychain-profile codex-gateway
 ```
 
 Notes:
