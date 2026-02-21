@@ -648,16 +648,39 @@ function toWebSearchActivity(queries: string[]): { title: string; detail?: strin
   };
 }
 
+function normalizePathForChangeKey(rawPath: string): string {
+  const normalizedSlashes = rawPath.replace(/\\/g, "/").trim().replace(/^[ab]\//, "");
+  if (!normalizedSlashes.startsWith("/")) {
+    return normalizedSlashes;
+  }
+
+  const markers = ["/app/", "/gateway/", "/shared/", "/mac/", "/docs/"];
+  for (const marker of markers) {
+    const markerIndex = normalizedSlashes.indexOf(marker);
+    if (markerIndex >= 0) {
+      return normalizedSlashes.slice(markerIndex + 1);
+    }
+  }
+
+  return normalizedSlashes
+    .split("/")
+    .filter((part) => part.length > 0)
+    .slice(-6)
+    .join("/");
+}
+
+function changeSummarySignature(summary: NonNullable<RenderedTurn["summary"]>, turnAnchor = ""): string {
+  const files = summary.files
+    .map((file) => `${normalizePathForChangeKey(file.path)}:${file.additions}:${file.deletions}`)
+    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
+    .join(";");
+  return `change:${turnAnchor}:${files}`;
+}
+
 function turnContentSignature(item: RenderedTurn): string {
   const turnAnchor = item.turnId ?? "";
   if (item.kind === "changeSummary" && item.summary) {
-    const files = item.summary.files
-      .map(
-        (file) =>
-          `${file.path}:${file.additions}:${file.deletions}:${file.diff?.length ?? 0}:${(file.snippets ?? []).join("|")}`
-      )
-      .join(";");
-    return `change:${turnAnchor}:${files}`;
+    return changeSummarySignature(item.summary, turnAnchor);
   }
   if (item.kind === "activity" && item.activity) {
     return `activity:${turnAnchor}:${item.activity.title}:${item.activity.detail ?? ""}`;
@@ -1340,6 +1363,27 @@ function sanitizeAssistantDisplayText(text: string): string {
   return cleaned.trim();
 }
 
+function extractApiErrorMessage(body: string): string | null {
+  const trimmed = body.trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    const message =
+      (typeof parsed.error === "string" && parsed.error) ||
+      (typeof parsed.message === "string" && parsed.message) ||
+      null;
+    const detail = typeof parsed.detail === "string" && parsed.detail ? parsed.detail : null;
+    if (message && detail) {
+      return `${message} (${detail})`;
+    }
+    return message || detail || trimmed;
+  } catch {
+    return trimmed;
+  }
+}
+
 export default function ThreadScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const threadId = useMemo(() => (Array.isArray(id) ? id[0] : id), [id]);
@@ -1383,6 +1427,8 @@ export default function ThreadScreen() {
   const [headerTitle, setHeaderTitle] = useState("Chat");
   const [headerPath, setHeaderPath] = useState<string | null>(null);
   const [lastCopiedTurnId, setLastCopiedTurnId] = useState<string | null>(null);
+  const [lastCopiedDiffId, setLastCopiedDiffId] = useState<string | null>(null);
+  const [wrappedDiffIds, setWrappedDiffIds] = useState<Set<string>>(new Set());
 
   const streamSocketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1826,7 +1872,7 @@ export default function ThreadScreen() {
 
           const summary = extractChangeSummaryFromEvent(method, payload.params);
           if (summary) {
-            const key = JSON.stringify(summary);
+            const key = changeSummarySignature(summary);
             if (!seenChangeHashesRef.current.has(key)) {
               seenChangeHashesRef.current.add(key);
               setTurns((existing) => [
@@ -1997,7 +2043,7 @@ export default function ThreadScreen() {
         seenChangeHashesRef.current = new Set(
           withPersistedEvents
             .filter((item) => item.kind === "changeSummary" && item.summary)
-            .map((item) => JSON.stringify(item.summary))
+            .map((item) => turnContentSignature(item))
         );
         await connectStream();
       } catch (setupError) {
@@ -2075,7 +2121,7 @@ export default function ThreadScreen() {
           seenChangeHashesRef.current = new Set(
             withPersistedEvents
               .filter((item) => item.kind === "changeSummary" && item.summary)
-              .map((item) => JSON.stringify(item.summary))
+              .map((item) => turnContentSignature(item))
           );
         }
         markConnectionRecovered();
@@ -2176,6 +2222,34 @@ export default function ThreadScreen() {
     }
   }, []);
 
+  const copyDiffText = useCallback(async (diffId: string, diffText?: string) => {
+    if (!diffText) {
+      return;
+    }
+
+    try {
+      await Clipboard.setStringAsync(diffText);
+      setLastCopiedDiffId(diffId);
+      setTimeout(() => {
+        setLastCopiedDiffId((existing) => (existing === diffId ? null : existing));
+      }, 1200);
+    } catch {
+      // no-op
+    }
+  }, []);
+
+  const toggleDiffWrap = useCallback((diffId: string) => {
+    setWrappedDiffIds((existing) => {
+      const next = new Set(existing);
+      if (next.has(diffId)) {
+        next.delete(diffId);
+      } else {
+        next.add(diffId);
+      }
+      return next;
+    });
+  }, []);
+
   useEffect(() => {
     if (!threadId || !activeMention) {
       setMentionFiles([]);
@@ -2206,10 +2280,15 @@ export default function ThreadScreen() {
           return;
         }
         setMentionFiles([]);
-        if (mentionFetchError instanceof ApiHttpError && mentionFetchError.status === 404) {
-          setMentionError("Files API unavailable. Restart gateway.");
+        if (mentionFetchError instanceof ApiHttpError) {
+          if (mentionFetchError.status === 404) {
+            setMentionError("Files API unavailable. Restart gateway.");
+          } else {
+            const serverMessage = extractApiErrorMessage(mentionFetchError.body);
+            setMentionError(serverMessage ?? `Request failed (${mentionFetchError.status})`);
+          }
         } else {
-          setMentionError("Unable to load files");
+          setMentionError(mentionFetchError instanceof Error ? mentionFetchError.message : "Unable to load files");
         }
       } finally {
         if (active && mentionRequestRef.current === requestId) {
@@ -2714,56 +2793,89 @@ export default function ThreadScreen() {
             >
               {item.kind === "changeSummary" && item.summary ? (
                 <View className="w-full rounded-2xl border border-border/10 bg-card px-4 py-4">
-                  <Text className="text-2xl font-bold text-card-foreground">
+                  <Text className="text-lg font-bold text-card-foreground">
                     {item.summary.filesChanged} file{item.summary.filesChanged === 1 ? "" : "s"} changed
                   </Text>
-                  {item.summary.files.map((file) => (
-                    <View key={`${item.id}-${file.path}`} className="mt-3">
+                  {item.summary.files.map((file) => {
+                    const diffId = `${item.id}:${file.path}`;
+                    const isWrapped = wrappedDiffIds.has(diffId);
+                    return (
+                    <View key={`${item.id}-${file.path}`} className="">
                       <View className="flex-row items-center justify-between">
-                        <Text className="max-w-[70%] text-base text-foreground" numberOfLines={1}>
+                        <Text className="max-w-[70%] flex-shrink text-xs leading-5 text-foreground">
                           {file.path}
                         </Text>
-                        <Text className="text-2xl font-semibold">
+                        <Text className="text-lg font-semibold">
                           <Text className="text-emerald-400">+{file.additions}</Text>
                           <Text className="text-red-400"> -{file.deletions}</Text>
                         </Text>
                       </View>
                       {typeof file.diff === "string" && file.diff.length > 0 ? (
                         <View className="mt-2 rounded-lg border border-border/40 bg-muted/60 px-2.5 py-2">
+                          <View className="mb-1 flex-row justify-end">
+                            <Pressable
+                              onPress={() => toggleDiffWrap(diffId)}
+                              className="mr-1 flex-row items-center justify-center rounded-full bg-black/20 px-2.5 py-2.5"
+                            >
+                              <Ionicons name={isWrapped ? "arrow-forward-outline" : "return-down-back-outline"} size={12} className="text-primary-foreground" />
+                            </Pressable>
+                            <Pressable
+                              onPress={() => copyDiffText(diffId, file.diff)}
+                              className="flex-row items-center justify-center rounded-full bg-black/20 px-2.5 py-2.5"
+                            >
+                              <Ionicons
+                                name={lastCopiedDiffId === diffId ? "checkmark" : "copy-outline"}
+                                size={12}
+                                className="text-primary-foreground"
+                              />
+                            </Pressable>
+                          </View>
                           {(() => {
                             const diffLines = toDisplayDiffLines(file.diff);
                             return (
-                              <View className="flex-row">
-                                <View className="w-9 pr-2">
-                                  {diffLines.map(({ lineNumber }, lineIndex) => (
-                                    <Text
-                                      key={`${item.id}-${file.path}-line-number-${lineIndex}`}
-                                      className="text-right text-[10px] leading-5 text-slate-500"
-                                    >
-                                      {lineNumber ?? ""}
-                                    </Text>
-                                  ))}
-                                </View>
-                                <ScrollView horizontal showsHorizontalScrollIndicator>
+                              <>
+                                {isWrapped ? (
                                   <View className="pr-2">
-                                    {diffLines.map(({ line, tone }, lineIndex) => (
-                                      <Text
-                                        key={`${item.id}-${file.path}-line-code-${lineIndex}`}
-                                        className={`text-[12px] leading-5 ${tone}`}
-                                        style={{ fontFamily: MONO_FONT, fontWeight: "600" }}
-                                      >
-                                        {line.length > 0 ? line : " "}
-                                      </Text>
+                                    {diffLines.map(({ lineNumber, line, tone }, lineIndex) => (
+                                      <View key={`${item.id}-${file.path}-line-row-${lineIndex}`} className="flex-row items-start">
+                                        <Text className="w-9 pr-2 text-right text-[10px] leading-5 text-slate-500">
+                                          {lineNumber ?? ""}
+                                        </Text>
+                                        <Text
+                                          className={`flex-1 text-[12px] leading-5 ${tone}`}
+                                          style={{ fontFamily: MONO_FONT, fontWeight: "600" }}
+                                        >
+                                          {line.length > 0 ? line : " "}
+                                        </Text>
+                                      </View>
                                     ))}
                                   </View>
-                                </ScrollView>
-                              </View>
+                                ) : (
+                                  <ScrollView horizontal showsHorizontalScrollIndicator>
+                                    <View className="pr-2">
+                                      {diffLines.map(({ lineNumber, line, tone }, lineIndex) => (
+                                        <View key={`${item.id}-${file.path}-line-row-${lineIndex}`} className="flex-row items-start">
+                                          <Text className="w-9 pr-2 text-right text-[10px] leading-5 text-slate-500">
+                                            {lineNumber ?? ""}
+                                          </Text>
+                                          <Text
+                                            className={`text-[12px] leading-5 ${tone}`}
+                                            style={{ fontFamily: MONO_FONT, fontWeight: "600" }}
+                                          >
+                                            {line.length > 0 ? line : " "}
+                                          </Text>
+                                        </View>
+                                      ))}
+                                    </View>
+                                  </ScrollView>
+                                )}
+                              </>
                             );
                           })()}
                         </View>
                       ) : null}
                     </View>
-                  ))}
+                  )})}
                 </View>
               ) : (
               item.kind === "activity" && item.activity ? (
