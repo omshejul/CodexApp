@@ -1,7 +1,9 @@
-import "../global.css";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
+import * as SplashScreen from "expo-splash-screen";
+import { useEffect } from "react";
 import { Platform } from "react-native";
+import "../global.css";
 
 const SYSTEM_FONT = Platform.select({
   ios: "System",
@@ -10,12 +12,20 @@ const SYSTEM_FONT = Platform.select({
 });
 
 export default function RootLayout() {
+  useEffect(() => {
+    SplashScreen.hideAsync().catch(() => undefined);
+  }, []);
+
   return (
     <>
       <StatusBar style="light" backgroundColor="#0a0a0a" />
       <Stack
+        initialRouteName="index"
         screenOptions={{
           headerShown: false,
+          contentStyle: {
+            backgroundColor: "#ffffff",
+          },
           headerTitleStyle: {
             fontWeight: "700",
             fontFamily: SYSTEM_FONT,

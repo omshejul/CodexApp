@@ -99,11 +99,18 @@ bun run typecheck
 
 ## iOS Device Build
 
-Build and run on a connected iPhone:
+Build and run on a connected iPhone (Debug/dev build, requires Metro):
 
 ```bash
 cd app
 bun run ios --device
+```
+
+Build and run a standalone local Release app on a connected iPhone (no Metro required):
+
+```bash
+cd app
+bunx expo run:ios --device --configuration Release
 ```
 
 Notes:
