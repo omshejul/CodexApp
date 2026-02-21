@@ -12,7 +12,10 @@ let package = Package(
   targets: [
     .executableTarget(
       name: "CodexGatewayMenu",
-      path: "Sources/CodexGatewayMenu"
+      path: "Sources/CodexGatewayMenu",
+      resources: [
+        .process("Resources")
+      ]
     )
   ]
 )
