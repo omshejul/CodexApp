@@ -10,6 +10,7 @@ import {
   NativeSyntheticEvent,
   Platform,
   Pressable,
+  ScrollView,
   Text,
   TextInput,
   View,
@@ -76,100 +77,158 @@ const SYSTEM_FONT = Platform.select({
   default: "System",
 });
 
+const MONO_FONT = Platform.select({
+  ios: "Menlo",
+  android: "monospace",
+  default: "monospace",
+});
+
 const markdownStyles = {
   body: {
-    color: "#e6edf7",
-    fontSize: 14,
-    lineHeight: 21,
+    color: "#d1dced",
+    fontSize: 15,
+    lineHeight: 23,
     fontFamily: SYSTEM_FONT,
   },
-  heading1: { color: "#f5f8ff", fontSize: 22, marginTop: 10, marginBottom: 8, fontFamily: SYSTEM_FONT },
-  heading2: { color: "#f5f8ff", fontSize: 19, marginTop: 8, marginBottom: 6, fontFamily: SYSTEM_FONT },
-  heading3: { color: "#f5f8ff", fontSize: 17, marginTop: 6, marginBottom: 4, fontFamily: SYSTEM_FONT },
-  paragraph: { marginTop: 0, marginBottom: 8 },
+  heading1: {
+    color: "#f0f6ff",
+    fontSize: 22,
+    fontWeight: "700" as const,
+    marginTop: 16,
+    marginBottom: 8,
+    fontFamily: SYSTEM_FONT,
+  },
+  heading2: {
+    color: "#ecf2fc",
+    fontSize: 19,
+    fontWeight: "600" as const,
+    marginTop: 14,
+    marginBottom: 6,
+    fontFamily: SYSTEM_FONT,
+  },
+  heading3: {
+    color: "#e4ecf8",
+    fontSize: 16,
+    fontWeight: "600" as const,
+    marginTop: 10,
+    marginBottom: 4,
+    fontFamily: SYSTEM_FONT,
+  },
+  paragraph: { marginTop: 0, marginBottom: 10 },
   bullet_list: { marginTop: 0, marginBottom: 8 },
   ordered_list: { marginTop: 0, marginBottom: 8 },
   list_item: { marginBottom: 4 },
   ordered_list_content: { flex: 1, flexShrink: 1 },
   bullet_list_content: { flex: 1, flexShrink: 1 },
   code_inline: {
-    backgroundColor: "#333333",
-    color: "#d4e6ff",
-    borderRadius: 6,
+    backgroundColor: "rgba(240,246,255,0.08)",
+    color: "#a5d6ff",
+    borderRadius: 5,
     paddingHorizontal: 6,
-    paddingVertical: 2,
-    fontFamily: SYSTEM_FONT,
+    paddingVertical: 1.5,
+    fontFamily: MONO_FONT,
+    fontSize: 13.5,
   },
   code_block: {
-    backgroundColor: "#0a1220",
-    color: "#d4e6ff",
-    borderRadius: 10,
-    padding: 10,
-    marginTop: 4,
-    marginBottom: 10,
-    fontFamily: SYSTEM_FONT,
+    backgroundColor: "#0d1117",
+    color: "#e6edf3",
+    borderRadius: 12,
+    padding: 14,
+    marginTop: 6,
+    marginBottom: 12,
+    fontFamily: MONO_FONT,
+    fontSize: 13,
+    lineHeight: 20,
   },
   fence: {
-    backgroundColor: "#0a1220",
-    color: "#d4e6ff",
-    borderRadius: 10,
-    padding: 10,
-    marginTop: 4,
-    marginBottom: 10,
-    fontFamily: SYSTEM_FONT,
+    backgroundColor: "#0d1117",
+    color: "#e6edf3",
+    borderRadius: 12,
+    padding: 14,
+    marginTop: 6,
+    marginBottom: 12,
+    fontFamily: MONO_FONT,
+    fontSize: 13,
+    lineHeight: 20,
   },
   blockquote: {
-    backgroundColor: "#0f1a2c",
+    backgroundColor: "rgba(56,139,253,0.06)",
     borderLeftWidth: 3,
-    borderLeftColor: "#3a80d9",
-    color: "#bfd7f6",
-    paddingHorizontal: 10,
+    borderLeftColor: "#388bfd",
+    paddingHorizontal: 12,
     paddingVertical: 6,
+    marginVertical: 8,
   },
-  hr: { backgroundColor: "#203552", marginVertical: 12 },
-  strong: { color: "#f7fbff" },
-  em: { color: "#d4e6ff" },
-  link: { color: "#6eb5ff" },
+  hr: { backgroundColor: "rgba(255,255,255,0.08)", marginVertical: 16 },
+  strong: { color: "#f0f6ff", fontWeight: "600" as const },
+  em: { color: "#c9d8ec" },
+  link: { color: "#58a6ff" },
 };
 
 const userMarkdownStyles = {
   ...markdownStyles,
   body: {
-    color: "#f8fbff",
-    fontSize: 14,
-    lineHeight: 21,
+    color: "#f4f8ff",
+    fontSize: 15,
+    lineHeight: 23,
     fontFamily: SYSTEM_FONT,
   },
-  heading1: { color: "#ffffff", fontSize: 22, marginTop: 10, marginBottom: 8, fontFamily: SYSTEM_FONT },
-  heading2: { color: "#ffffff", fontSize: 19, marginTop: 8, marginBottom: 6, fontFamily: SYSTEM_FONT },
-  heading3: { color: "#ffffff", fontSize: 17, marginTop: 6, marginBottom: 4, fontFamily: SYSTEM_FONT },
-  code_inline: {
-    backgroundColor: "#333333",
-    color: "#eff7ff",
-    borderRadius: 6,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
+  heading1: {
+    color: "#ffffff",
+    fontSize: 22,
+    fontWeight: "700" as const,
+    marginTop: 16,
+    marginBottom: 8,
     fontFamily: SYSTEM_FONT,
+  },
+  heading2: {
+    color: "#ffffff",
+    fontSize: 19,
+    fontWeight: "600" as const,
+    marginTop: 14,
+    marginBottom: 6,
+    fontFamily: SYSTEM_FONT,
+  },
+  heading3: {
+    color: "#f4f8ff",
+    fontSize: 16,
+    fontWeight: "600" as const,
+    marginTop: 10,
+    marginBottom: 4,
+    fontFamily: SYSTEM_FONT,
+  },
+  code_inline: {
+    backgroundColor: "rgba(255,255,255,0.12)",
+    color: "#d6ebff",
+    borderRadius: 5,
+    paddingHorizontal: 6,
+    paddingVertical: 1.5,
+    fontFamily: MONO_FONT,
+    fontSize: 13.5,
   },
   code_block: {
-    backgroundColor: "#2059a8",
-    color: "#eff7ff",
-    borderRadius: 10,
-    padding: 10,
-    marginTop: 4,
-    marginBottom: 10,
-    fontFamily: SYSTEM_FONT,
+    backgroundColor: "rgba(0,0,0,0.3)",
+    color: "#e6edf3",
+    borderRadius: 12,
+    padding: 14,
+    marginTop: 6,
+    marginBottom: 12,
+    fontFamily: MONO_FONT,
+    fontSize: 13,
+    lineHeight: 20,
   },
   fence: {
-    backgroundColor: "#2059a8",
-    color: "#eff7ff",
-    borderRadius: 10,
-    padding: 10,
-    marginTop: 4,
-    marginBottom: 10,
-    fontFamily: SYSTEM_FONT,
+    backgroundColor: "rgba(0,0,0,0.3)",
+    color: "#e6edf3",
+    borderRadius: 12,
+    padding: 14,
+    marginTop: 6,
+    marginBottom: 12,
+    fontFamily: MONO_FONT,
+    fontSize: 13,
+    lineHeight: 20,
   },
-  link: { color: "#d6ebff" },
+  link: { color: "#93ccff" },
 };
 
 const selectableMarkdownRules: RenderRules = {
@@ -209,10 +268,19 @@ const selectableMarkdownRules: RenderRules = {
       content = node.content.substring(0, node.content.length - 1);
     }
 
+    const { backgroundColor, borderRadius, padding, marginTop, marginBottom, ...textStyle } = styles.code_block;
     return (
-      <Text key={node.key} selectable style={[inheritedStyles, styles.code_block]}>
-        {content}
-      </Text>
+      <ScrollView
+        key={node.key}
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={{ backgroundColor, borderRadius, marginTop, marginBottom }}
+        contentContainerStyle={{ padding }}
+      >
+        <Text selectable style={[inheritedStyles, textStyle]}>
+          {content}
+        </Text>
+      </ScrollView>
     );
   },
   fence: (node, _children, _parent, styles, inheritedStyles = {}) => {
@@ -221,10 +289,19 @@ const selectableMarkdownRules: RenderRules = {
       content = node.content.substring(0, node.content.length - 1);
     }
 
+    const { backgroundColor, borderRadius, padding, marginTop, marginBottom, ...textStyle } = styles.fence;
     return (
-      <Text key={node.key} selectable style={[inheritedStyles, styles.fence]}>
-        {content}
-      </Text>
+      <ScrollView
+        key={node.key}
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={{ backgroundColor, borderRadius, marginTop, marginBottom }}
+        contentContainerStyle={{ padding }}
+      >
+        <Text selectable style={[inheritedStyles, textStyle]}>
+          {content}
+        </Text>
+      </ScrollView>
     );
   },
   hardbreak: (node, _children, _parent, styles) => (
@@ -2265,7 +2342,7 @@ export default function ThreadScreen() {
     <SafeAreaView className="flex-1 bg-background" edges={["top", "left", "right"]}>
       <KeyboardAvoidingView
         className="flex-1"
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
         keyboardVerticalOffset={0}
       >
       <View className="flex-1 bg-background px-4 pt-1">
