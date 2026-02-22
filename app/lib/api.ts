@@ -3,6 +3,8 @@ import {
   AuthRefreshResponseSchema,
   DirectoryBrowseResponseSchema,
   GatewayOptionsResponseSchema,
+  InteractiveRequestRespondResponseSchema,
+  InteractiveRequestsResponseSchema,
   PairedDevicesResponseSchema,
   PushTokenUpsertResponseSchema,
   ThreadCreateRequest,
@@ -402,6 +404,25 @@ export async function getStreamConfig(threadId: string): Promise<{ wsUrl: string
 export async function getGatewayOptions() {
   const payload = await authenticatedRequest<unknown>("/options");
   return GatewayOptionsResponseSchema.parse(payload);
+}
+
+export async function getInteractiveRequests(threadId?: string) {
+  const pathname = threadId
+    ? `/threads/${encodeURIComponent(threadId)}/interactive-requests`
+    : "/interactive-requests";
+  const payload = await authenticatedRequest<unknown>(pathname);
+  return InteractiveRequestsResponseSchema.parse(payload);
+}
+
+export async function respondToInteractiveRequest(requestId: string, result: unknown) {
+  const payload = await authenticatedRequest<unknown>(`/interactive-requests/${encodeURIComponent(requestId)}/respond`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ result }),
+  });
+  return InteractiveRequestRespondResponseSchema.parse(payload);
 }
 
 export async function getPairedDevices() {

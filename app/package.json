@@ -1,6 +1,6 @@
 {
   "name": "@codex-phone/app",
-  "version": "0.1.9",
+  "version": "0.2.3",
   "private": true,
   "main": "expo-router/entry",
   "scripts": {

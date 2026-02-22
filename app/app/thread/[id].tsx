@@ -22,12 +22,14 @@ import * as ImageManipulator from "expo-image-manipulator";
 import * as Clipboard from "expo-clipboard";
 import { AnimatePresence, MotiView } from "moti";
 import { Ionicons } from "@expo/vector-icons";
+import FontAwesome6 from "@expo/vector-icons/FontAwesome6";
 import Markdown, { RenderRules } from "react-native-markdown-display";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   ApiHttpError,
   ReauthRequiredError,
   clearSession,
+  getInteractiveRequests,
   getGatewayOptions,
   getStreamConfig,
   getThreads,
@@ -35,6 +37,7 @@ import {
   getThread,
   getThreadEvents,
   interruptThreadTurn,
+  respondToInteractiveRequest,
   resumeThread,
   sendThreadMessage,
 } from "@/lib/api";
@@ -47,6 +50,7 @@ interface CodexSseEvent {
 }
 
 type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+type CollaborationMode = "default" | "plan";
 
 interface ModelOption {
   label: string;
@@ -75,6 +79,29 @@ interface MentionToken {
   query: string;
 }
 
+interface RequestUserInputOption {
+  label: string;
+  description: string;
+}
+
+interface RequestUserInputQuestion {
+  id: string;
+  header: string;
+  question: string;
+  isOther: boolean;
+  isSecret: boolean;
+  options: RequestUserInputOption[] | null;
+}
+
+interface PendingRequestUserInput {
+  id: string;
+  threadId: string | null;
+  turnId: string | null;
+  createdAtMs: number;
+  expiresAtMs: number;
+  questions: RequestUserInputQuestion[];
+}
+
 const DIRECTIVE_LINE_PATTERN = /^::[a-z][a-z0-9-]*\{.*\}\s*$/i;
 
 const DEFAULT_REASONING_OPTIONS: ReasoningOption[] = [
@@ -83,6 +110,11 @@ const DEFAULT_REASONING_OPTIONS: ReasoningOption[] = [
   { label: "Medium", value: "medium" },
   { label: "High", value: "high" },
 ];
+
+const INTERACTIVE_REQUEST_USER_INPUT_METHOD = "item/tool/requestuserinput";
+const STREAM_METHOD_INTERACTIVE_REQUESTED = "gateway/interactive/requested";
+const STREAM_METHOD_INTERACTIVE_RESPONDED = "gateway/interactive/responded";
+const STREAM_METHOD_INTERACTIVE_EXPIRED = "gateway/interactive/expired";
 
 type OpenDropdown = "model" | "reasoning" | null;
 type StreamStatusTone = "ok" | "warn" | "error";
@@ -293,7 +325,7 @@ const selectableMarkdownRules: RenderRules = {
         style={{ backgroundColor, borderRadius, marginTop, marginBottom }}
         contentContainerStyle={{ padding }}
       >
-        <Text selectable style={[inheritedStyles, textStyle]}>
+        <Text style={[inheritedStyles, textStyle]}>
           {content}
         </Text>
       </ScrollView>
@@ -314,7 +346,7 @@ const selectableMarkdownRules: RenderRules = {
         style={{ backgroundColor, borderRadius, marginTop, marginBottom }}
         contentContainerStyle={{ padding }}
       >
-        <Text selectable style={[inheritedStyles, textStyle]}>
+        <Text style={[inheritedStyles, textStyle]}>
           {content}
         </Text>
       </ScrollView>
@@ -465,6 +497,189 @@ function firstNonEmptyString(...values: unknown[]): string | null {
     }
   }
   return null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function toBooleanFlag(value: unknown): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    return normalized === "true" || normalized === "1" || normalized === "yes";
+  }
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+  return false;
+}
+
+function normalizeRequestUserInputQuestions(value: unknown): RequestUserInputQuestion[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const questions: RequestUserInputQuestion[] = [];
+
+  for (const [index, entry] of value.entries()) {
+    const record = asRecord(entry);
+    if (!record) {
+      continue;
+    }
+
+    const id = firstNonEmptyString(record.id) ?? `question-${index + 1}`;
+    const header = firstNonEmptyString(record.header, record.title) ?? `Question ${index + 1}`;
+    const question = firstNonEmptyString(record.question, record.prompt, record.message);
+    if (!question) {
+      continue;
+    }
+
+    const optionsValue = Array.isArray(record.options) ? record.options : null;
+    const options: RequestUserInputOption[] =
+      optionsValue?.flatMap((option) => {
+        const optionRecord = asRecord(option);
+        if (!optionRecord) {
+          return [];
+        }
+        const label = firstNonEmptyString(optionRecord.label, optionRecord.value);
+        if (!label) {
+          return [];
+        }
+        const description = firstNonEmptyString(optionRecord.description) ?? "";
+        return [{ label, description }];
+      }) ?? [];
+
+    questions.push({
+      id,
+      header,
+      question,
+      isOther: toBooleanFlag(record.isOther ?? record.is_other),
+      isSecret: toBooleanFlag(record.isSecret ?? record.is_secret),
+      options: options.length > 0 ? options : null,
+    });
+  }
+
+  return questions;
+}
+
+function toPendingRequestUserInput(value: unknown): PendingRequestUserInput | null {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  const id = firstNonEmptyString(record.id);
+  if (!id) {
+    return null;
+  }
+
+  const method = firstNonEmptyString(record.method)?.toLowerCase() ?? "";
+  if (method !== INTERACTIVE_REQUEST_USER_INPUT_METHOD) {
+    return null;
+  }
+
+  const params = asRecord(record.params) ?? {};
+  const questions = normalizeRequestUserInputQuestions(params.questions);
+  if (questions.length === 0) {
+    return null;
+  }
+
+  const createdAtMs = parseTimestampMs(record.createdAt) ?? Date.now();
+  const expiresAtMs = parseTimestampMs(record.expiresAt) ?? createdAtMs + 5 * 60 * 1000;
+
+  return {
+    id,
+    threadId: firstNonEmptyString(record.threadId, params.threadId, params.thread_id),
+    turnId: firstNonEmptyString(record.turnId, params.turnId, params.turn_id),
+    createdAtMs,
+    expiresAtMs,
+    questions,
+  };
+}
+
+function toPendingRequestUserInputList(value: unknown[]): PendingRequestUserInput[] {
+  const byId = new Map<string, PendingRequestUserInput>();
+
+  for (const entry of value) {
+    const parsed = toPendingRequestUserInput(entry);
+    if (!parsed) {
+      continue;
+    }
+    byId.set(parsed.id, parsed);
+  }
+
+  return Array.from(byId.values()).sort((left, right) => {
+    if (left.createdAtMs !== right.createdAtMs) {
+      return left.createdAtMs - right.createdAtMs;
+    }
+    return left.id.localeCompare(right.id);
+  });
+}
+
+function upsertPendingRequestUserInput(
+  existing: PendingRequestUserInput[],
+  candidate: PendingRequestUserInput
+): PendingRequestUserInput[] {
+  const next = existing.filter((request) => request.id !== candidate.id);
+  next.push(candidate);
+  next.sort((left, right) => {
+    if (left.createdAtMs !== right.createdAtMs) {
+      return left.createdAtMs - right.createdAtMs;
+    }
+    return left.id.localeCompare(right.id);
+  });
+  return next;
+}
+
+function extractInteractiveLifecycleRequestId(params: unknown): string | null {
+  const record = asRecord(params);
+  if (!record) {
+    return null;
+  }
+  const nestedRequest = asRecord(record.request);
+  return firstNonEmptyString(record.id, nestedRequest?.id);
+}
+
+function extractTurnIdFromUnknown(value: unknown): string | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const found = extractTurnIdFromUnknown(entry);
+      if (found) {
+        return found;
+      }
+    }
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const direct = firstNonEmptyString(record.turnId, record.turn_id, record.turnID);
+  if (direct) {
+    return direct;
+  }
+  const nestedTurn = asRecord(record.turn);
+  const nestedId = firstNonEmptyString(nestedTurn?.id);
+  if (nestedId) {
+    return nestedId;
+  }
+  for (const nested of Object.values(record)) {
+    const found = extractTurnIdFromUnknown(nested);
+    if (found) {
+      return found;
+    }
+  }
+  return null;
+}
+
+function uniqueAnswerValues(values: string[]): string[] {
+  return Array.from(new Set(values.map((value) => value.trim()).filter((value) => value.length > 0)));
 }
 
 function isLikelyWebSearchToolName(value: string): boolean {
@@ -1416,6 +1631,8 @@ export default function ThreadScreen() {
   const [isThinking, setIsThinking] = useState(false);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [selectedReasoning, setSelectedReasoning] = useState<ReasoningEffort | null>(null);
+  const [selectedCollaborationMode, setSelectedCollaborationMode] = useState<CollaborationMode>("default");
+  const [planModeToast, setPlanModeToast] = useState<string | null>(null);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const [expandedActivityIds, setExpandedActivityIds] = useState<Set<string>>(new Set());
@@ -1438,6 +1655,12 @@ export default function ThreadScreen() {
   const [lastCopiedDiffId, setLastCopiedDiffId] = useState<string | null>(null);
   const [wrappedDiffIds, setWrappedDiffIds] = useState<Set<string>>(new Set());
   const [wrapToast, setWrapToast] = useState<{ diffId: string; wrapped: boolean } | null>(null);
+  const [pendingRequestUserInputs, setPendingRequestUserInputs] = useState<PendingRequestUserInput[]>([]);
+  const [requestSelectionsByRequest, setRequestSelectionsByRequest] = useState<Record<string, Record<string, string[]>>>({});
+  const [requestTextByRequest, setRequestTextByRequest] = useState<Record<string, Record<string, string>>>({});
+  const [requestQuestionIndexByRequest, setRequestQuestionIndexByRequest] = useState<Record<string, number>>({});
+  const [requestErrorsById, setRequestErrorsById] = useState<Record<string, string>>({});
+  const [requestSubmittingIds, setRequestSubmittingIds] = useState<Set<string>>(new Set());
 
   const streamSocketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1486,6 +1709,65 @@ export default function ThreadScreen() {
         : null,
     [currentReasoningOptions, selectedReasoning]
   );
+  const clearRequestError = useCallback((requestId: string) => {
+    setRequestErrorsById((existing) => {
+      if (!(requestId in existing)) {
+        return existing;
+      }
+      const { [requestId]: _removed, ...rest } = existing;
+      return rest;
+    });
+  }, []);
+
+  const refreshInteractiveRequests = useCallback(async () => {
+    if (!threadId) {
+      return;
+    }
+    const payload = await getInteractiveRequests(threadId);
+    setPendingRequestUserInputs(toPendingRequestUserInputList(payload.requests));
+  }, [threadId]);
+
+  const upsertInteractiveRequest = useCallback((candidate: PendingRequestUserInput) => {
+    setPendingRequestUserInputs((existing) => upsertPendingRequestUserInput(existing, candidate));
+  }, []);
+
+  const removeInteractiveRequestById = useCallback((requestId: string) => {
+    setPendingRequestUserInputs((existing) => existing.filter((request) => request.id !== requestId));
+  }, []);
+
+  useEffect(() => {
+    const activeRequestIds = new Set(pendingRequestUserInputs.map((request) => request.id));
+
+    const pruneByRequest = <T,>(record: Record<string, T>): Record<string, T> => {
+      const next: Record<string, T> = {};
+      let changed = false;
+      for (const [key, value] of Object.entries(record)) {
+        if (activeRequestIds.has(key)) {
+          next[key] = value;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : record;
+    };
+
+    setRequestSelectionsByRequest((existing) => pruneByRequest(existing));
+    setRequestTextByRequest((existing) => pruneByRequest(existing));
+    setRequestQuestionIndexByRequest((existing) => pruneByRequest(existing));
+    setRequestErrorsById((existing) => pruneByRequest(existing));
+    setRequestSubmittingIds((existing) => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const requestId of existing) {
+        if (activeRequestIds.has(requestId)) {
+          next.add(requestId);
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : existing;
+    });
+  }, [pendingRequestUserInputs]);
 
   useEffect(() => {
     const showEvent = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
@@ -1497,6 +1779,12 @@ export default function ThreadScreen() {
       hideSub.remove();
     };
   }, []);
+
+  useEffect(() => {
+    if (planModeToast === null) return;
+    const t = setTimeout(() => setPlanModeToast(null), 1500);
+    return () => clearTimeout(t);
+  }, [planModeToast]);
 
   useEffect(() => {
     if (selectedReasoning === null) {
@@ -1800,6 +2088,11 @@ export default function ThreadScreen() {
     setTurns([]);
     setExpandedActivityIds(new Set());
     setExpandedTerminalIds(new Set());
+    setPendingRequestUserInputs([]);
+    setRequestSelectionsByRequest({});
+    setRequestTextByRequest({});
+    setRequestErrorsById({});
+    setRequestSubmittingIds(new Set());
     turnsSignatureRef.current = "";
     setStreamStatus({ tone: "warn", text: "Connecting" });
     reconnectAttemptRef.current = 0;
@@ -1841,6 +2134,9 @@ export default function ThreadScreen() {
         socket.onopen = () => {
           reconnectAttemptRef.current = 0;
           markConnectionRecovered();
+          refreshInteractiveRequests().catch(() => {
+            // Keep the current interactive queue if the endpoint is temporarily unavailable.
+          });
         };
 
         socket.onmessage = (event) => {
@@ -1855,8 +2151,29 @@ export default function ThreadScreen() {
           }
 
           const method = payload.method.toLowerCase();
+          const observedTurnId = extractTurnIdFromUnknown(payload.params);
+          if (observedTurnId && method !== "turn/completed" && method !== "turn/failed" && method !== "turn/cancelled") {
+            setActiveTurnId(observedTurnId);
+          }
 
           if (method === "stream/keepalive" || method === "stream/ready") {
+            return;
+          }
+
+          if (method === STREAM_METHOD_INTERACTIVE_REQUESTED) {
+            const paramsRecord = asRecord(payload.params);
+            const request = toPendingRequestUserInput(paramsRecord?.request ?? payload.params);
+            if (request) {
+              upsertInteractiveRequest(request);
+            }
+            return;
+          }
+
+          if (method === STREAM_METHOD_INTERACTIVE_RESPONDED || method === STREAM_METHOD_INTERACTIVE_EXPIRED) {
+            const requestId = extractInteractiveLifecycleRequestId(payload.params);
+            if (requestId) {
+              removeInteractiveRequestById(requestId);
+            }
             return;
           }
 
@@ -1931,7 +2248,7 @@ export default function ThreadScreen() {
               delta ||
               (payload.params && typeof payload.params === "object" ? JSON.stringify(payload.params, null, 2) : "");
             if (chunk) {
-              setStreamingPlan((existing) => `${existing}${existing && !chunk.startsWith("\n") ? "\n" : ""}${chunk}`);
+              setStreamingPlan((existing) => `${existing}${chunk}`);
             }
             return;
           }
@@ -1982,7 +2299,7 @@ export default function ThreadScreen() {
               delta ||
               (payload.params && typeof payload.params === "object" ? JSON.stringify(payload.params, null, 2) : "");
             if (chunk) {
-              setStreamingToolProgress((existing) => `${existing}${existing && !chunk.startsWith("\n") ? "\n" : ""}${chunk}`);
+              setStreamingToolProgress((existing) => `${existing}${chunk}`);
             }
             return;
           }
@@ -2037,10 +2354,11 @@ export default function ThreadScreen() {
 
       try {
         await resumeThread(threadId);
-        const [thread, eventsResponse, threadsResponse] = await Promise.all([
+        const [thread, eventsResponse, threadsResponse, interactiveResponse] = await Promise.all([
           getThread(threadId),
           getThreadEvents(threadId),
           getThreads(),
+          getInteractiveRequests(threadId).catch(() => null),
         ]);
         if (!active) {
           return;
@@ -2061,6 +2379,7 @@ export default function ThreadScreen() {
             .filter((item) => item.kind === "changeSummary" && item.summary)
             .map((item) => turnContentSignature(item))
         );
+        setPendingRequestUserInputs(interactiveResponse ? toPendingRequestUserInputList(interactiveResponse.requests) : []);
         await connectStream();
       } catch (setupError) {
         if (setupError instanceof ReauthRequiredError) {
@@ -2094,6 +2413,11 @@ export default function ThreadScreen() {
     };
   }, [
     threadId,
+    markConnectionRecovered,
+    refreshInteractiveRequests,
+    upsertInteractiveRequest,
+    removeInteractiveRequestById,
+    makeClientTurnId,
     flushStreamingAssistant,
     flushStreamingTerminalOutput,
     flushStreamingReasoning,
@@ -2118,7 +2442,11 @@ export default function ThreadScreen() {
     let active = true;
     const timer = setInterval(async () => {
       try {
-        const [thread, eventsResponse] = await Promise.all([getThread(threadId), getThreadEvents(threadId)]);
+        const [thread, eventsResponse, interactiveResponse] = await Promise.all([
+          getThread(threadId),
+          getThreadEvents(threadId),
+          getInteractiveRequests(threadId).catch(() => null),
+        ]);
         if (!active) {
           return;
         }
@@ -2139,6 +2467,9 @@ export default function ThreadScreen() {
               .filter((item) => item.kind === "changeSummary" && item.summary)
               .map((item) => turnContentSignature(item))
           );
+        }
+        if (interactiveResponse) {
+          setPendingRequestUserInputs(toPendingRequestUserInputList(interactiveResponse.requests));
         }
         markConnectionRecovered();
       } catch {
@@ -2355,6 +2686,146 @@ export default function ThreadScreen() {
     [activeMention, composerText]
   );
 
+  const setRequestQuestionText = useCallback(
+    (requestId: string, questionId: string, value: string) => {
+      setRequestTextByRequest((existing) => {
+        const requestDraft = existing[requestId] ?? {};
+        if (requestDraft[questionId] === value) {
+          return existing;
+        }
+        return {
+          ...existing,
+          [requestId]: {
+            ...requestDraft,
+            [questionId]: value,
+          },
+        };
+      });
+      clearRequestError(requestId);
+    },
+    [clearRequestError]
+  );
+
+  const toggleRequestQuestionOption = useCallback(
+    (requestId: string, questionId: string, optionLabel: string) => {
+      setRequestSelectionsByRequest((existing) => {
+        const requestDraft = existing[requestId] ?? {};
+        const currentValues = requestDraft[questionId] ?? [];
+        const nextValues = currentValues.includes(optionLabel)
+          ? currentValues.filter((value) => value !== optionLabel)
+          : [...currentValues, optionLabel];
+        return {
+          ...existing,
+          [requestId]: {
+            ...requestDraft,
+            [questionId]: nextValues,
+          },
+        };
+      });
+      clearRequestError(requestId);
+    },
+    [clearRequestError]
+  );
+
+  const submitRequestUserInput = useCallback(
+    async (request: PendingRequestUserInput) => {
+      if (requestSubmittingIds.has(request.id)) {
+        return;
+      }
+
+      const requestSelections = requestSelectionsByRequest[request.id] ?? {};
+      const requestTexts = requestTextByRequest[request.id] ?? {};
+      const answersByQuestion: Record<string, { answers: string[] }> = {};
+
+      for (const question of request.questions) {
+        const selectedAnswers = requestSelections[question.id] ?? [];
+        const textAnswer = (requestTexts[question.id] ?? "").trim();
+
+        const combinedAnswers = question.options
+          ? question.isOther && textAnswer
+            ? [...selectedAnswers, textAnswer]
+            : selectedAnswers
+          : textAnswer
+          ? [textAnswer]
+          : [];
+
+        const normalizedAnswers = uniqueAnswerValues(combinedAnswers);
+        if (normalizedAnswers.length === 0) {
+          setRequestErrorsById((existing) => ({
+            ...existing,
+            [request.id]: `${question.header}: an answer is required.`,
+          }));
+          return;
+        }
+
+        answersByQuestion[question.id] = {
+          answers: normalizedAnswers,
+        };
+      }
+
+      setRequestSubmittingIds((existing) => {
+        const next = new Set(existing);
+        next.add(request.id);
+        return next;
+      });
+      clearRequestError(request.id);
+
+      try {
+        await respondToInteractiveRequest(request.id, {
+          answers: answersByQuestion,
+        });
+        removeInteractiveRequestById(request.id);
+        setRequestSelectionsByRequest((existing) => {
+          if (!(request.id in existing)) {
+            return existing;
+          }
+          const { [request.id]: _removed, ...rest } = existing;
+          return rest;
+        });
+        setRequestTextByRequest((existing) => {
+          if (!(request.id in existing)) {
+            return existing;
+          }
+          const { [request.id]: _removed, ...rest } = existing;
+          return rest;
+        });
+        setRequestQuestionIndexByRequest((existing) => {
+          if (!(request.id in existing)) {
+            return existing;
+          }
+          const { [request.id]: _removed, ...rest } = existing;
+          return rest;
+        });
+      } catch (submitError) {
+        setRequestErrorsById((existing) => ({
+          ...existing,
+          [request.id]: submitError instanceof Error ? submitError.message : "Unable to submit input.",
+        }));
+        refreshInteractiveRequests().catch(() => {
+          // Keep stale queue visible until a successful refresh.
+        });
+      } finally {
+        setRequestSubmittingIds((existing) => {
+          if (!existing.has(request.id)) {
+            return existing;
+          }
+          const next = new Set(existing);
+          next.delete(request.id);
+          return next;
+        });
+      }
+    },
+    [
+      clearRequestError,
+      refreshInteractiveRequests,
+      removeInteractiveRequestById,
+      setRequestQuestionIndexByRequest,
+      requestSelectionsByRequest,
+      requestSubmittingIds,
+      requestTextByRequest,
+    ]
+  );
+
   const onSend = async () => {
     if (!threadId || sending) {
       return;
@@ -2391,6 +2862,7 @@ export default function ThreadScreen() {
         images: queuedImages.map((image) => ({ imageUrl: image.imageUrl })),
         model: resolvedSelectedModel ?? undefined,
         reasoningEffort: resolvedSelectedReasoning ?? undefined,
+        collaborationMode: resolvedSelectedModel ? selectedCollaborationMode : undefined,
       });
       if (response.turnId) {
         setActiveTurnId(response.turnId);
@@ -2407,18 +2879,32 @@ export default function ThreadScreen() {
     }
   };
 
+  const latestKnownTurnId = useMemo(() => {
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      const turnId = firstNonEmptyString(turns[index]?.turnId);
+      if (turnId) {
+        return turnId;
+      }
+    }
+    return null;
+  }, [turns]);
+
   const onStopResponse = useCallback(async () => {
     if (!threadId || stopping) {
       return;
     }
-    if (!activeTurnId) {
-      setError("Unable to stop response right now. Please try again in a moment.");
-      return;
-    }
+    const resolvedTurnId = activeTurnId ?? latestKnownTurnId;
 
     setStopping(true);
     try {
-      await interruptThreadTurn(threadId, { turnId: activeTurnId });
+      await interruptThreadTurn(
+        threadId,
+        resolvedTurnId
+          ? {
+              turnId: resolvedTurnId,
+            }
+          : {}
+      );
       setIsThinking(false);
       setActiveTurnId(null);
       flushStreamingAssistant();
@@ -2441,6 +2927,7 @@ export default function ThreadScreen() {
     flushStreamingPlan,
     flushStreamingFileChanges,
     flushStreamingToolProgress,
+    latestKnownTurnId,
     stopping,
     threadId,
   ]);
@@ -2491,6 +2978,80 @@ export default function ThreadScreen() {
       setError(pickError instanceof Error ? pickError.message : "Unable to pick image");
     }
   }, []);
+
+  const activeRequestUserInput = pendingRequestUserInputs[0] ?? null;
+  const activeRequestSelections = activeRequestUserInput
+    ? requestSelectionsByRequest[activeRequestUserInput.id] ?? {}
+    : {};
+  const activeRequestText = activeRequestUserInput ? requestTextByRequest[activeRequestUserInput.id] ?? {} : {};
+  const activeRequestQuestionIndex = activeRequestUserInput
+    ? Math.min(
+        requestQuestionIndexByRequest[activeRequestUserInput.id] ?? 0,
+        Math.max(activeRequestUserInput.questions.length - 1, 0)
+      )
+    : 0;
+  const activeRequestQuestion = activeRequestUserInput?.questions[activeRequestQuestionIndex] ?? null;
+  const activeRequestError = activeRequestUserInput ? requestErrorsById[activeRequestUserInput.id] : null;
+  const activeRequestSubmitting = activeRequestUserInput ? requestSubmittingIds.has(activeRequestUserInput.id) : false;
+  const activeRequestExpiryLabel = activeRequestUserInput
+    ? new Date(activeRequestUserInput.expiresAtMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+    : null;
+
+  const getRequestQuestionAnswers = useCallback(
+    (
+      requestId: string,
+      question: PendingRequestUserInput["questions"][number]
+    ): string[] => {
+      const requestSelections = requestSelectionsByRequest[requestId] ?? {};
+      const requestTexts = requestTextByRequest[requestId] ?? {};
+      const selectedAnswers = requestSelections[question.id] ?? [];
+      const textAnswer = (requestTexts[question.id] ?? "").trim();
+
+      const combinedAnswers = question.options
+        ? question.isOther && textAnswer
+          ? [...selectedAnswers, textAnswer]
+          : selectedAnswers
+        : textAnswer
+        ? [textAnswer]
+        : [];
+
+      return uniqueAnswerValues(combinedAnswers);
+    },
+    [requestSelectionsByRequest, requestTextByRequest]
+  );
+
+  const onAdvanceRequestQuestion = useCallback(() => {
+    if (!activeRequestUserInput || !activeRequestQuestion) {
+      return;
+    }
+    const normalizedAnswers = getRequestQuestionAnswers(activeRequestUserInput.id, activeRequestQuestion);
+    if (normalizedAnswers.length === 0) {
+      setRequestErrorsById((existing) => ({
+        ...existing,
+        [activeRequestUserInput.id]: `${activeRequestQuestion.header}: an answer is required.`,
+      }));
+      return;
+    }
+    clearRequestError(activeRequestUserInput.id);
+    setRequestQuestionIndexByRequest((existing) => ({
+      ...existing,
+      [activeRequestUserInput.id]: Math.min(
+        (existing[activeRequestUserInput.id] ?? 0) + 1,
+        activeRequestUserInput.questions.length - 1
+      ),
+    }));
+  }, [activeRequestQuestion, activeRequestUserInput, clearRequestError, getRequestQuestionAnswers]);
+
+  const onBackRequestQuestion = useCallback(() => {
+    if (!activeRequestUserInput) {
+      return;
+    }
+    clearRequestError(activeRequestUserInput.id);
+    setRequestQuestionIndexByRequest((existing) => ({
+      ...existing,
+      [activeRequestUserInput.id]: Math.max((existing[activeRequestUserInput.id] ?? 0) - 1, 0),
+    }));
+  }, [activeRequestUserInput, clearRequestError]);
 
   const isResponding =
     sending ||
@@ -3206,6 +3767,122 @@ export default function ThreadScreen() {
         {(() => {
           const composerContent = (
             <>
+              {activeRequestUserInput ? (
+                <View className="mb-2 rounded-2xl border border-border/40 bg-card px-3 py-3">
+                  <View className="mb-2 flex-row items-center justify-between">
+                    <View className="flex-row items-center gap-2">
+                      <Ionicons name="help-circle-outline" size={16} color="#e5e7eb" />
+                      <Text className="text-sm font-semibold text-foreground">Input required</Text>
+                    </View>
+                    <Text className="text-[11px] text-muted-foreground">
+                      {pendingRequestUserInputs.length > 1
+                        ? `1/${pendingRequestUserInputs.length} pending`
+                        : activeRequestExpiryLabel
+                        ? `Expires ${activeRequestExpiryLabel}`
+                        : "Pending"}
+                    </Text>
+                  </View>
+
+                  {activeRequestQuestion ? (
+                    (() => {
+                      const question = activeRequestQuestion;
+                      const selectedAnswers = activeRequestSelections[question.id] ?? [];
+                      const textValue = activeRequestText[question.id] ?? "";
+                      const hasOptions = Array.isArray(question.options) && question.options.length > 0;
+                      const isLastQuestion = activeRequestQuestionIndex === activeRequestUserInput.questions.length - 1;
+
+                      return (
+                        <View key={`${activeRequestUserInput.id}-${question.id}`}>
+                          <Text className="text-[11px] text-muted-foreground">
+                            Question {activeRequestQuestionIndex + 1}/{activeRequestUserInput.questions.length}
+                          </Text>
+                          <Text className="mt-1 text-xs font-semibold uppercase tracking-[0.7px] text-muted-foreground">
+                            {question.header}
+                          </Text>
+                          <Text className="mt-1 text-sm text-foreground">{question.question}</Text>
+
+                          {hasOptions ? (
+                            <View className="mt-2 gap-2">
+                              {question.options?.map((option) => {
+                                const selected = selectedAnswers.includes(option.label);
+                                return (
+                                  <Pressable
+                                    key={`${activeRequestUserInput.id}-${question.id}-${option.label}`}
+                                    onPress={() => toggleRequestQuestionOption(activeRequestUserInput.id, question.id, option.label)}
+                                    className={`rounded-xl border px-3 py-2 ${
+                                      selected ? "border-border bg-muted" : "border-border/40 bg-black/20"
+                                    }`}
+                                  >
+                                    <View className="flex-row items-start gap-2">
+                                      <Ionicons
+                                        name={selected ? "checkmark-circle" : "ellipse-outline"}
+                                        size={18}
+                                        color={selected ? "#e5e7eb" : "#9ca3af"}
+                                      />
+                                      <View className="flex-1">
+                                        <Text className="text-sm font-semibold text-foreground">{option.label}</Text>
+                                        {option.description ? (
+                                          <Text className="mt-0.5 text-xs leading-4 text-muted-foreground">{option.description}</Text>
+                                        ) : null}
+                                      </View>
+                                    </View>
+                                  </Pressable>
+                                );
+                              })}
+                            </View>
+                          ) : null}
+
+                          {!hasOptions || question.isOther ? (
+                            <TextInput
+                              value={textValue}
+                              onChangeText={(value) => setRequestQuestionText(activeRequestUserInput.id, question.id, value)}
+                              placeholder={hasOptions ? "Other" : "Type your answer"}
+                              placeholderTextColor="#6b7280"
+                              secureTextEntry={question.isSecret}
+                              multiline={!question.isSecret}
+                              className="mt-2 rounded-xl border border-border/40 bg-black/20 px-3 py-2 text-sm text-foreground"
+                            />
+                          ) : null}
+
+                          {activeRequestError ? <Text className="mt-2 text-xs text-red-300">{activeRequestError}</Text> : null}
+
+                          <View className="mt-3 flex-row items-center justify-between gap-2">
+                            <Pressable
+                              onPress={onBackRequestQuestion}
+                              disabled={activeRequestQuestionIndex === 0 || activeRequestSubmitting}
+                              className={`h-10 flex-1 items-center justify-center rounded-xl border ${
+                                activeRequestQuestionIndex === 0 || activeRequestSubmitting
+                                  ? "border-border/20 bg-muted/30"
+                                  : "border-border/40 bg-black/20"
+                              }`}
+                            >
+                              <Text className="text-sm font-semibold text-foreground">Back</Text>
+                            </Pressable>
+
+                            <Pressable
+                              disabled={activeRequestSubmitting}
+                              onPress={
+                                isLastQuestion
+                                  ? () => submitRequestUserInput(activeRequestUserInput)
+                                  : onAdvanceRequestQuestion
+                              }
+                              className={`h-10 flex-1 items-center justify-center rounded-xl ${
+                                activeRequestSubmitting ? "bg-muted" : "bg-foreground"
+                              }`}
+                            >
+                              <Text className={`text-sm font-semibold ${activeRequestSubmitting ? "text-muted-foreground" : "text-background"}`}>
+                                {activeRequestSubmitting ? "Submitting..." : isLastQuestion ? "Submit input" : "Next"}
+                              </Text>
+                            </Pressable>
+                          </View>
+                        </View>
+                      );
+                    })()
+                  ) : null}
+
+                </View>
+              ) : null}
+
               {optionsLoaded && resolvedSelectedModel && currentReasoningOptions.length > 0 ? (
                 <View className="mb-1.5 flex-row justify-between gap-2">
                   <View className="flex-row gap-2">
@@ -3230,6 +3907,20 @@ export default function ThreadScreen() {
                       <View className="w-4 items-center justify-center">
                         <Ionicons name="chevron-up" size={14} className="text-foreground" />
                       </View>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => {
+                        const next = selectedCollaborationMode === "default" ? "plan" : "default";
+                        setSelectedCollaborationMode(next);
+                        setPlanModeToast(next === "plan" ? "Plan mode on" : "Plan mode off");
+                      }}
+                      className="h-9 w-9 items-center justify-center rounded-full"
+                    >
+                      <FontAwesome6
+                        name="list-check"
+                        size={16}
+                        color={selectedCollaborationMode === "plan" ? "#3b82f6" : "#64748b"}
+                      />
                     </Pressable>
                   </View>
                   {keyboardVisible ? (
@@ -3359,10 +4050,10 @@ export default function ThreadScreen() {
                   className="max-h-36 flex-1 rounded-3xl border border-border/10 bg-muted px-4 py-3 text-foreground"
                 />
                 <Pressable
-                  disabled={isResponding ? stopping || !activeTurnId : sending || !composerHasDraft}
+                  disabled={isResponding ? stopping : sending || !composerHasDraft || Boolean(activeRequestUserInput)}
                   onPress={isResponding ? onStopResponse : onSend}
                   className={`h-11 w-11 items-center justify-center rounded-full ${
-                    isResponding || sending || !composerHasDraft ? "bg-secondary" : "bg-primary"
+                    isResponding || sending || !composerHasDraft || activeRequestUserInput ? "bg-secondary" : "bg-primary"
                   }`}
                 >
                   <AnimatePresence>
@@ -3403,6 +4094,24 @@ export default function ThreadScreen() {
       </View>
       </KeyboardAvoidingView>
 
+      <AnimatePresence>
+        {planModeToast !== null && (
+          <MotiView
+            from={{ opacity: 0, translateY: 20 }}
+            animate={{ opacity: 1, translateY: 0 }}
+            exit={{ opacity: 0, translateY: 20 }}
+            transition={{ type: "timing", duration: 200 }}
+            className="absolute left-0 right-0 items-center"
+            style={{ bottom: Math.max(insets.bottom, 8) + 100 }}
+            pointerEvents="none"
+          >
+            <View className="rounded-full bg-muted px-4 py-2 border border-border/10">
+              <Text className="text-sm font-medium text-foreground">{planModeToast}</Text>
+            </View>
+          </MotiView>
+        )}
+      </AnimatePresence>
+
       <Modal
         transparent
         visible={openDropdown !== null && optionsLoaded}
@@ -3428,15 +4137,20 @@ export default function ThreadScreen() {
                     event.stopPropagation();
                   }}
                 >
-                  {(openDropdown === "model" ? modelOptions : currentReasoningOptions).map((option) => {
-                    const isModel = openDropdown === "model";
-                    const active = isModel ? resolvedSelectedModel === option.value : resolvedSelectedReasoning === option.value;
+                  {(openDropdown === "model"
+                    ? modelOptions
+                    : currentReasoningOptions
+                  ).map((option) => {
+                    const active =
+                      openDropdown === "model"
+                        ? resolvedSelectedModel === option.value
+                        : resolvedSelectedReasoning === option.value;
                     return (
                       <Pressable
                         key={`${openDropdown}-${option.label}`}
                         className={`rounded-lg px-3 py-3 flex-row items-center justify-between ${active ? "bg-card" : "bg-transparent"}`}
                         onPress={() => {
-                          if (isModel) {
+                          if (openDropdown === "model") {
                             setSelectedModel(option.value as string);
                           } else {
                             setSelectedReasoning(option.value as ReasoningEffort);

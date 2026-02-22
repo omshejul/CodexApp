@@ -19,6 +19,9 @@ import {
   AuthLogoutRequestSchema,
   AuthRefreshRequestSchema,
   AuthRefreshResponseSchema,
+  InteractiveRequestRespondRequestSchema,
+  InteractiveRequestRespondResponseSchema,
+  InteractiveRequestsResponseSchema,
   GatewayOptionsResponseSchema,
   HealthResponseSchema,
   DirectoryBrowseResponseSchema,
@@ -90,10 +93,18 @@ const EXPO_PUSH_TOKEN_PATTERN = /^ExponentPushToken\[[A-Za-z0-9+\-_=]+\]$/;
 const COMPLETION_FALLBACK_DUP_WINDOW_MS = 2_000;
 const APP_PRESENCE_HEARTBEAT_INTERVAL_MS = 30_000;
 const APP_PRESENCE_ACTIVE_TTL_MS = 75_000;
+const APP_PRESENCE_CODEX_HEALTH_CHECK_INTERVAL_MS = 20_000;
+const INTERACTIVE_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+const INTERACTIVE_REQUEST_MAX_PENDING = 200;
+const STREAM_METHOD_INTERACTIVE_REQUESTED = "gateway/interactive/requested";
+const STREAM_METHOD_INTERACTIVE_RESPONDED = "gateway/interactive/responded";
+const STREAM_METHOD_INTERACTIVE_EXPIRED = "gateway/interactive/expired";
 
 const codex = new CodexRpcClient(codexWsUrl, GATEWAY_NAME, GATEWAY_VERSION);
 let managedCodexProcess: ChildProcess | null = null;
 let sleepInhibitorProcess: ChildProcess | null = null;
+let codexHealthCheckPromise: Promise<{ reachable: boolean; error?: string }> | null = null;
+let lastPresenceCodexHealthCheckAt = 0;
 
 let cachedDetectedBaseUrl: string | null = null;
 const appPresenceByDeviceId = new Map<string, AppPresenceRecord>();
@@ -146,6 +157,29 @@ interface PendingExpoPushReceipt {
 interface AppPresenceRecord {
   state: AppPresenceState;
   updatedAt: number;
+}
+
+type JsonRpcId = number | string;
+
+interface StreamPayload {
+  method: string;
+  params: unknown;
+}
+
+type ThreadStreamListener = (payload: StreamPayload) => void;
+
+interface PendingInteractiveRequest {
+  id: string;
+  rpcId: JsonRpcId;
+  method: string;
+  params: unknown;
+  threadId: string | null;
+  turnId: string | null;
+  createdAt: number;
+  expiresAt: number;
+  timeout: NodeJS.Timeout;
+  resolve: (result: unknown) => void;
+  reject: (reason?: unknown) => void;
 }
 
 function sanitizeBaseUrl(value: string): string {
@@ -1388,6 +1422,64 @@ function isCodexDisconnectedError(error: unknown): boolean {
   );
 }
 
+function errorMessageOrUnknown(error: unknown): string {
+  if (error instanceof Error && error.message.trim().length > 0) {
+    return error.message;
+  }
+  return "unknown error";
+}
+
+async function checkCodexReachableWithRecovery(reason: string): Promise<{ reachable: boolean; error?: string }> {
+  if (codexHealthCheckPromise) {
+    return codexHealthCheckPromise;
+  }
+
+  codexHealthCheckPromise = (async () => {
+    try {
+      await codex.call("thread/list", { limit: 1 });
+      return { reachable: true };
+    } catch (error) {
+      const firstErrorMessage = errorMessageOrUnknown(error);
+      if (!isCodexDisconnectedError(error)) {
+        runtimeLogs.error("codex.health_check.failed", error, { reason });
+        return { reachable: false, error: firstErrorMessage };
+      }
+
+      runtimeLogs.event("codex.health_check.reconnect_attempt", {
+        reason,
+        error: firstErrorMessage,
+      });
+
+      try {
+        await codex.reconnect();
+      } catch (reconnectError) {
+        const reconnectErrorMessage = errorMessageOrUnknown(reconnectError);
+        runtimeLogs.error("codex.health_check.reconnect_failed", reconnectError, {
+          reason,
+          initialError: firstErrorMessage,
+        });
+        return { reachable: false, error: reconnectErrorMessage };
+      }
+
+      try {
+        await codex.call("thread/list", { limit: 1 });
+        runtimeLogs.event("codex.health_check.recovered", { reason });
+        return { reachable: true };
+      } catch (retryError) {
+        const retryErrorMessage = errorMessageOrUnknown(retryError);
+        runtimeLogs.error("codex.health_check.post_reconnect_failed", retryError, {
+          reason,
+        });
+        return { reachable: false, error: retryErrorMessage };
+      }
+    }
+  })().finally(() => {
+    codexHealthCheckPromise = null;
+  });
+
+  return codexHealthCheckPromise;
+}
+
 function isDeriveConfigMissingPathError(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
@@ -1562,6 +1654,9 @@ async function bootstrap() {
   const notifiedCompletionTurnKeys: string[] = [];
   const notifiedCompletionTurnSet = new Set<string>();
   const recentCompletionFallbackByThread = new Map<string, { fingerprint: string; seenAt: number }>();
+  const gatewayThreadListeners = new Map<string, Set<ThreadStreamListener>>();
+  const pendingInteractiveRequestsById = new Map<string, PendingInteractiveRequest>();
+  const pendingInteractiveRequestOrder: string[] = [];
 
   if (!isLocalHost(host)) {
     throw new Error(`Refusing to start gateway on non-local HOST='${host}'. Use 127.0.0.1 or localhost.`);
@@ -1569,12 +1664,248 @@ async function bootstrap() {
 
   startSleepInhibitor();
 
-  codex.setServerRequestHandler(async ({ method }) => {
-    app.log.warn(
-      { method },
-      "Codex app-server requested interactive approval/input; denying because gateway is non-interactive"
-    );
-    throw new Error("Interactive approval requests are not supported by codex-phone gateway");
+  const persistThreadEvent = (threadId: string, turnId: string | null, method: string, params: unknown) => {
+    try {
+      db.insertThreadEvent(threadId, turnId, method, safeJsonStringify(params), Date.now());
+    } catch (error) {
+      runtimeLogs.error("thread.events.persist_failed", error, { threadId, method });
+    }
+  };
+
+  const toInteractiveRequestPayload = (request: PendingInteractiveRequest) => ({
+    id: request.id,
+    method: request.method,
+    threadId: request.threadId ?? undefined,
+    turnId: request.turnId ?? undefined,
+    params: request.params,
+    createdAt: new Date(request.createdAt).toISOString(),
+    expiresAt: new Date(request.expiresAt).toISOString(),
+  });
+
+  const subscribeGatewayThread = (threadId: string, listener: ThreadStreamListener): (() => void) => {
+    const listeners = gatewayThreadListeners.get(threadId) ?? new Set<ThreadStreamListener>();
+    listeners.add(listener);
+    gatewayThreadListeners.set(threadId, listeners);
+    return () => {
+      const existing = gatewayThreadListeners.get(threadId);
+      if (!existing) {
+        return;
+      }
+      existing.delete(listener);
+      if (existing.size === 0) {
+        gatewayThreadListeners.delete(threadId);
+      }
+    };
+  };
+
+  const emitGatewayThreadPayload = (threadId: string, payload: StreamPayload) => {
+    const listeners = gatewayThreadListeners.get(threadId);
+    if (!listeners || listeners.size === 0) {
+      return;
+    }
+    for (const listener of listeners) {
+      try {
+        listener(payload);
+      } catch (error) {
+        runtimeLogs.error("stream.gateway_listener.emit_failed", error, { threadId, method: payload.method });
+      }
+    }
+  };
+
+  const emitInteractiveLifecycleEvent = (
+    threadId: string,
+    turnId: string | null,
+    method: string,
+    params: Record<string, unknown>
+  ) => {
+    persistThreadEvent(threadId, turnId, method, params);
+    emitGatewayThreadPayload(threadId, {
+      method,
+      params,
+    });
+  };
+
+  const removePendingInteractiveRequest = (requestId: string): PendingInteractiveRequest | null => {
+    const pending = pendingInteractiveRequestsById.get(requestId);
+    if (!pending) {
+      return null;
+    }
+    pendingInteractiveRequestsById.delete(requestId);
+    const index = pendingInteractiveRequestOrder.indexOf(requestId);
+    if (index >= 0) {
+      pendingInteractiveRequestOrder.splice(index, 1);
+    }
+    clearTimeout(pending.timeout);
+    return pending;
+  };
+
+  const expirePendingInteractiveRequest = (requestId: string, reason: "timeout" | "cleanup") => {
+    const pending = removePendingInteractiveRequest(requestId);
+    if (!pending) {
+      return;
+    }
+
+    const error = new Error(`Timed out waiting for mobile response to '${pending.method}'`);
+    pending.reject(error);
+    runtimeLogs.event("interactive.request.expired", {
+      id: pending.id,
+      method: pending.method,
+      threadId: pending.threadId ?? undefined,
+      turnId: pending.turnId ?? undefined,
+      reason,
+      timeoutMs: INTERACTIVE_REQUEST_TIMEOUT_MS,
+    });
+    if (pending.threadId) {
+      emitInteractiveLifecycleEvent(pending.threadId, pending.turnId, STREAM_METHOD_INTERACTIVE_EXPIRED, {
+        id: pending.id,
+        method: pending.method,
+        threadId: pending.threadId,
+        turnId: pending.turnId ?? undefined,
+        expiredAt: new Date().toISOString(),
+      });
+    }
+  };
+
+  const cleanupExpiredInteractiveRequests = () => {
+    const now = Date.now();
+    const snapshot = [...pendingInteractiveRequestOrder];
+    for (const requestId of snapshot) {
+      const pending = pendingInteractiveRequestsById.get(requestId);
+      if (!pending) {
+        const index = pendingInteractiveRequestOrder.indexOf(requestId);
+        if (index >= 0) {
+          pendingInteractiveRequestOrder.splice(index, 1);
+        }
+        continue;
+      }
+      if (pending.expiresAt <= now) {
+        expirePendingInteractiveRequest(requestId, "cleanup");
+      }
+    }
+  };
+
+  const listPendingInteractiveRequests = (threadId: string | null) => {
+    cleanupExpiredInteractiveRequests();
+    const rows: Array<ReturnType<typeof toInteractiveRequestPayload>> = [];
+    for (const requestId of pendingInteractiveRequestOrder) {
+      const pending = pendingInteractiveRequestsById.get(requestId);
+      if (!pending) {
+        continue;
+      }
+      if (threadId && pending.threadId !== threadId) {
+        continue;
+      }
+      rows.push(toInteractiveRequestPayload(pending));
+    }
+    return rows;
+  };
+
+  const respondToInteractiveRequest = (requestId: string, result: unknown, respondedByDeviceId?: string) => {
+    const pending = removePendingInteractiveRequest(requestId);
+    if (!pending) {
+      return null;
+    }
+    pending.resolve(result);
+    runtimeLogs.event("interactive.request.responded", {
+      id: pending.id,
+      method: pending.method,
+      threadId: pending.threadId ?? undefined,
+      turnId: pending.turnId ?? undefined,
+      respondedByDeviceId,
+    });
+    if (pending.threadId) {
+      emitInteractiveLifecycleEvent(pending.threadId, pending.turnId, STREAM_METHOD_INTERACTIVE_RESPONDED, {
+        id: pending.id,
+        method: pending.method,
+        threadId: pending.threadId,
+        turnId: pending.turnId ?? undefined,
+        respondedAt: new Date().toISOString(),
+      });
+    }
+    return pending;
+  };
+
+  const rejectAllPendingInteractiveRequests = (reason: string) => {
+    const ids = [...pendingInteractiveRequestOrder];
+    for (const requestId of ids) {
+      const pending = removePendingInteractiveRequest(requestId);
+      if (!pending) {
+        continue;
+      }
+      const error = new Error(reason);
+      pending.reject(error);
+      runtimeLogs.event("interactive.request.rejected_all", {
+        id: pending.id,
+        method: pending.method,
+        threadId: pending.threadId ?? undefined,
+        turnId: pending.turnId ?? undefined,
+        reason,
+      });
+      if (pending.threadId) {
+        emitInteractiveLifecycleEvent(pending.threadId, pending.turnId, STREAM_METHOD_INTERACTIVE_EXPIRED, {
+          id: pending.id,
+          method: pending.method,
+          threadId: pending.threadId,
+          turnId: pending.turnId ?? undefined,
+          expiredAt: new Date().toISOString(),
+          reason: "gateway_shutdown",
+        });
+      }
+    }
+  };
+
+  codex.setServerRequestHandler(async ({ id, method, params }) => {
+    cleanupExpiredInteractiveRequests();
+    if (pendingInteractiveRequestsById.size >= INTERACTIVE_REQUEST_MAX_PENDING) {
+      runtimeLogs.event("interactive.request.dropped_over_capacity", {
+        method,
+        maxPending: INTERACTIVE_REQUEST_MAX_PENDING,
+      });
+      throw new Error(`Too many pending interactive requests (max ${INTERACTIVE_REQUEST_MAX_PENDING})`);
+    }
+
+    const threadId = extractThreadIdFromParams(params);
+    const turnId = extractTurnIdFromParams(params) ?? (threadId ? activeTurnIdByThread.get(threadId) ?? null : null);
+    const requestId = randomUUID();
+    const createdAt = Date.now();
+    const expiresAt = createdAt + INTERACTIVE_REQUEST_TIMEOUT_MS;
+
+    const result = await new Promise<unknown>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        expirePendingInteractiveRequest(requestId, "timeout");
+      }, INTERACTIVE_REQUEST_TIMEOUT_MS);
+      timeout.unref?.();
+
+      pendingInteractiveRequestsById.set(requestId, {
+        id: requestId,
+        rpcId: id,
+        method,
+        params,
+        threadId,
+        turnId,
+        createdAt,
+        expiresAt,
+        timeout,
+        resolve,
+        reject,
+      });
+      pendingInteractiveRequestOrder.push(requestId);
+      runtimeLogs.event("interactive.request.queued", {
+        id: requestId,
+        method,
+        threadId: threadId ?? undefined,
+        turnId: turnId ?? undefined,
+        timeoutMs: INTERACTIVE_REQUEST_TIMEOUT_MS,
+      });
+      const pending = pendingInteractiveRequestsById.get(requestId);
+      if (threadId && pending) {
+        emitInteractiveLifecycleEvent(threadId, turnId, STREAM_METHOD_INTERACTIVE_REQUESTED, {
+          request: toInteractiveRequestPayload(pending),
+        });
+      }
+    });
+
+    return result;
   });
 
   codex.onNotification((method, params) => {
@@ -1687,21 +2018,13 @@ async function bootstrap() {
   });
 
   app.get("/health", async (_request, reply) => {
-    let codexReachable = true;
-    let codexError: string | undefined;
-
-    try {
-      await codex.call("thread/list", { limit: 1 });
-    } catch (error) {
-      codexReachable = false;
-      codexError = error instanceof Error ? error.message : "unknown error";
-    }
+    const codexStatus = await checkCodexReachableWithRecovery("health_route");
 
     const payload = HealthResponseSchema.parse({
       ok: true,
-      codexReachable,
+      codexReachable: codexStatus.reachable,
       gatewayVersion: GATEWAY_VERSION,
-      codexError,
+      codexError: codexStatus.error,
     });
     return reply.send(payload);
   });
@@ -2023,6 +2346,20 @@ async function bootstrap() {
 
     recordAppPresence(request.auth.deviceId, parsedBody.data.state, Date.now());
 
+    if (parsedBody.data.state === "active") {
+      const now = Date.now();
+      if (now - lastPresenceCodexHealthCheckAt >= APP_PRESENCE_CODEX_HEALTH_CHECK_INTERVAL_MS) {
+        lastPresenceCodexHealthCheckAt = now;
+        void checkCodexReachableWithRecovery("presence_active").then((status) => {
+          if (!status.reachable) {
+            runtimeLogs.event("codex.health_check.presence_unreachable", {
+              error: status.error ?? "unknown error",
+            });
+          }
+        });
+      }
+    }
+
     const payload = AppPresenceUpsertResponseSchema.parse({ ok: true });
     return reply.send(payload);
   });
@@ -2068,6 +2405,40 @@ async function bootstrap() {
       prunePresenceForDevice(record.deviceId);
     }
     return reply.send({ ok: true });
+  });
+
+  app.get("/interactive-requests", { preHandler: [requireAuth] }, async (_request, reply) => {
+    const payload = InteractiveRequestsResponseSchema.parse({
+      requests: listPendingInteractiveRequests(null),
+    });
+    return reply.send(payload);
+  });
+
+  app.get("/threads/:id/interactive-requests", { preHandler: [requireAuth] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const payload = InteractiveRequestsResponseSchema.parse({
+      requests: listPendingInteractiveRequests(params.id),
+    });
+    return reply.send(payload);
+  });
+
+  app.post("/interactive-requests/:id/respond", { preHandler: [requireAuth] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const parsedBody = InteractiveRequestRespondRequestSchema.safeParse(request.body ?? {});
+    if (!parsedBody.success) {
+      return reply.code(400).send({ error: parsedBody.error.flatten() });
+    }
+
+    const pending = respondToInteractiveRequest(params.id, parsedBody.data.result, request.auth?.deviceId);
+    if (!pending) {
+      return reply.code(404).send({ error: "Interactive request not found or already resolved." });
+    }
+
+    const payload = InteractiveRequestRespondResponseSchema.parse({
+      ok: true,
+      id: params.id,
+    });
+    return reply.send(payload);
   });
 
   app.get("/threads", { preHandler: [requireAuth] }, async (_request, reply) => {
@@ -2336,32 +2707,39 @@ async function bootstrap() {
       ...imageInputs,
     ];
 
-    const result = await codex.call("turn/start", {
+    const turnStartParams: Record<string, unknown> = {
       threadId: params.id,
       approvalPolicy: "never",
       sandboxPolicy: buildDefaultDangerFullAccessSandboxPolicy(),
       model: parsedBody.data.model ?? null,
       effort: parsedBody.data.reasoningEffort ?? null,
       input,
-    });
+    };
 
-    const turnId = (() => {
-      if (!result || typeof result !== "object") {
-        return undefined;
+    const collaborationMode = parsedBody.data.collaborationMode;
+    if (collaborationMode) {
+      const collaborationModeModel = parsedBody.data.model;
+      if (!collaborationModeModel) {
+        return reply.code(400).send({
+          error: "collaborationMode requires a model value.",
+        });
       }
+      turnStartParams.collaborationMode = {
+        mode: collaborationMode,
+        settings: {
+          model: collaborationModeModel,
+          reasoning_effort: parsedBody.data.reasoningEffort ?? null,
+          developer_instructions: null,
+        },
+      };
+    }
 
-      const topLevel = result as Record<string, unknown>;
-      if (typeof topLevel.turnId === "string" && topLevel.turnId.length > 0) {
-        return topLevel.turnId;
-      }
+    const result = await codex.call("turn/start", turnStartParams);
 
-      const turn = topLevel.turn;
-      if (turn && typeof turn === "object" && typeof (turn as Record<string, unknown>).id === "string") {
-        return (turn as Record<string, string>).id;
-      }
-
-      return undefined;
-    })();
+    const turnId = extractTurnIdFromParams(result) ?? undefined;
+    if (turnId) {
+      activeTurnIdByThread.set(params.id, turnId);
+    }
 
     const payload = ThreadMessageResponseSchema.parse({
       ok: true,
@@ -2378,9 +2756,16 @@ async function bootstrap() {
       return reply.code(400).send({ error: parsedBody.error.flatten() });
     }
 
+    const resolvedTurnId = parsedBody.data.turnId ?? activeTurnIdByThread.get(params.id) ?? null;
+    if (!resolvedTurnId) {
+      return reply.code(409).send({
+        error: "No active turnId is available yet for this thread. Retry in a moment.",
+      });
+    }
+
     await codex.call("turn/interrupt", {
       threadId: params.id,
-      ...(parsedBody.data.turnId ? { turnId: parsedBody.data.turnId } : {}),
+      turnId: resolvedTurnId,
     });
 
     const payload = ThreadInterruptResponseSchema.parse({ ok: true });
@@ -2425,7 +2810,8 @@ async function bootstrap() {
       },
     });
 
-    const unsubscribe = codex.subscribeThread(params.id, sendEvent);
+    const unsubscribeCodex = codex.subscribeThread(params.id, sendEvent);
+    const unsubscribeGateway = subscribeGatewayThread(params.id, sendEvent);
     const keepAlive = setInterval(() => {
       reply.raw.write(`: keepalive ${Date.now()}\n\n`);
     }, 15_000);
@@ -2433,7 +2819,8 @@ async function bootstrap() {
     request.raw.on("close", () => {
       runtimeLogs.event("stream.sse.close", { threadId: params.id, ip: request.ip });
       clearInterval(keepAlive);
-      unsubscribe();
+      unsubscribeCodex();
+      unsubscribeGateway();
       reply.raw.end();
     });
   });
@@ -2460,6 +2847,7 @@ async function bootstrap() {
 
   const shutdown = async () => {
     try {
+      rejectAllPendingInteractiveRequests("Gateway is shutting down before interactive request was resolved.");
       try {
         await app.close();
       } finally {
@@ -2534,7 +2922,8 @@ async function bootstrap() {
         },
       });
 
-      const unsubscribe = codex.subscribeThread(threadId, sendPayload);
+      const unsubscribeCodex = codex.subscribeThread(threadId, sendPayload);
+      const unsubscribeGateway = subscribeGatewayThread(threadId, sendPayload);
       const keepAlive = setInterval(() => {
         sendPayload({
           method: "stream/keepalive",
@@ -2547,13 +2936,15 @@ async function bootstrap() {
       ws.on("close", () => {
         runtimeLogs.event("stream.ws.close", { threadId, ip: request.socket.remoteAddress });
         clearInterval(keepAlive);
-        unsubscribe();
+        unsubscribeCodex();
+        unsubscribeGateway();
       });
 
       ws.on("error", (error) => {
         runtimeLogs.error("stream.ws.error", error, { threadId, ip: request.socket.remoteAddress });
         clearInterval(keepAlive);
-        unsubscribe();
+        unsubscribeCodex();
+        unsubscribeGateway();
       });
     });
   });

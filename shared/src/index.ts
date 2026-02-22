@@ -96,6 +96,29 @@ export const ThreadEventsResponseSchema = z.object({
   events: z.array(ThreadEventSchema),
 });
 
+export const InteractiveRequestSchema = z.object({
+  id: z.string().min(1),
+  method: z.string().min(1),
+  threadId: z.string().min(1).optional(),
+  turnId: z.string().min(1).optional(),
+  params: z.unknown(),
+  createdAt: z.string().datetime(),
+  expiresAt: z.string().datetime(),
+});
+
+export const InteractiveRequestsResponseSchema = z.object({
+  requests: z.array(InteractiveRequestSchema),
+});
+
+export const InteractiveRequestRespondRequestSchema = z.object({
+  result: z.unknown(),
+});
+
+export const InteractiveRequestRespondResponseSchema = z.object({
+  ok: z.literal(true),
+  id: z.string().min(1),
+});
+
 export const ThreadResumeResponseSchema = z.object({
   ok: z.literal(true),
 });
@@ -119,6 +142,8 @@ export const ThreadNameSetResponseSchema = z.object({
   name: z.string().min(1),
 });
 
+export const CollaborationModeSchema = z.enum(["default", "plan"]);
+
 export const ThreadMessageRequestSchema = z.object({
   text: z.string().optional(),
   images: z
@@ -130,6 +155,7 @@ export const ThreadMessageRequestSchema = z.object({
     .optional(),
   model: z.string().min(1).optional(),
   reasoningEffort: z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]).optional(),
+  collaborationMode: CollaborationModeSchema.optional(),
 }).superRefine((value, ctx) => {
   const hasText = typeof value.text === "string" && value.text.trim().length > 0;
   const hasImages = Array.isArray(value.images) && value.images.length > 0;
@@ -225,11 +251,16 @@ export type ThreadFilesResponse = z.infer<typeof ThreadFilesResponseSchema>;
 export type ThreadResponse = z.infer<typeof ThreadResponseSchema>;
 export type ThreadEvent = z.infer<typeof ThreadEventSchema>;
 export type ThreadEventsResponse = z.infer<typeof ThreadEventsResponseSchema>;
+export type InteractiveRequest = z.infer<typeof InteractiveRequestSchema>;
+export type InteractiveRequestsResponse = z.infer<typeof InteractiveRequestsResponseSchema>;
+export type InteractiveRequestRespondRequest = z.infer<typeof InteractiveRequestRespondRequestSchema>;
+export type InteractiveRequestRespondResponse = z.infer<typeof InteractiveRequestRespondResponseSchema>;
 export type ThreadResumeResponse = z.infer<typeof ThreadResumeResponseSchema>;
 export type ThreadCreateResponse = z.infer<typeof ThreadCreateResponseSchema>;
 export type ThreadCreateRequest = z.infer<typeof ThreadCreateRequestSchema>;
 export type ThreadNameSetRequest = z.infer<typeof ThreadNameSetRequestSchema>;
 export type ThreadNameSetResponse = z.infer<typeof ThreadNameSetResponseSchema>;
+export type CollaborationMode = z.infer<typeof CollaborationModeSchema>;
 export type ThreadMessageRequest = z.infer<typeof ThreadMessageRequestSchema>;
 export type ThreadMessageResponse = z.infer<typeof ThreadMessageResponseSchema>;
 export type ThreadInterruptRequest = z.infer<typeof ThreadInterruptRequestSchema>;

@@ -168,6 +168,21 @@ Documented behavior:
 - Turn-level overrides can become defaults for later turns on that thread.
 - `outputSchema` applies only to current turn.
 
+### Collaboration Mode and Plan Mode
+
+Generated `v2/TurnStartParams` includes optional:
+- `collaborationMode?: CollaborationMode | null`
+
+Plan mode is represented through `turn/start.params.collaborationMode` (for example `mode: "plan"`), not through a separate `plan-mode` RPC method.
+
+Generated shapes (`codex-cli 0.104.x`) include:
+- `ModeKind = "plan" | "default"`
+- `CollaborationMode = { mode: ModeKind, settings: Settings }`
+- `Settings = { model: string, reasoning_effort: ReasoningEffort | null, developer_instructions: string | null }`
+
+Practical client note:
+- app-level slash commands like `/plan-mode` are client UX controls; they affect subsequent `turn/start` payloads rather than mapping to a standalone app-server method.
+
 `turn/steer` constraints (official docs):
 - must include `expectedTurnId`
 - fails when no active turn exists
@@ -264,6 +279,9 @@ Modern integrations should prefer `thread/*` + `turn/*` unless you explicitly ta
 
 ### Client request methods
 `initialize`, `thread/start`, `thread/resume`, `thread/fork`, `thread/archive`, `thread/name/set`, `thread/unarchive`, `thread/compact/start`, `thread/rollback`, `thread/list`, `thread/loaded/list`, `thread/read`, `skills/list`, `skills/remote/list`, `skills/remote/export`, `app/list`, `skills/config/write`, `turn/start`, `turn/steer`, `turn/interrupt`, `review/start`, `model/list`, `experimentalFeature/list`, `mcpServer/oauth/login`, `config/mcpServer/reload`, `mcpServerStatus/list`, `account/login/start`, `account/login/cancel`, `account/logout`, `account/rateLimits/read`, `feedback/upload`, `command/exec`, `config/read`, `config/value/write`, `config/batchWrite`, `configRequirements/read`, `account/read`, `newConversation`, `getConversationSummary`, `listConversations`, `resumeConversation`, `forkConversation`, `archiveConversation`, `sendUserMessage`, `sendUserTurn`, `interruptConversation`, `addConversationListener`, `removeConversationListener`, `gitDiffToRemote`, `loginApiKey`, `loginChatGpt`, `cancelLoginChatGpt`, `logoutChatGpt`, `getAuthStatus`, `getUserSavedConfig`, `setDefaultModel`, `getUserAgent`, `userInfo`, `fuzzyFileSearch`, `execOneOffCommand`.
+
+Note:
+- `plan-mode` is not a standalone client request method in generated app-server contracts; use `turn/start.collaborationMode`.
 
 ### Server notification methods
 `error`, `thread/started`, `thread/archived`, `thread/unarchived`, `thread/name/updated`, `thread/tokenUsage/updated`, `turn/started`, `turn/completed`, `turn/diff/updated`, `turn/plan/updated`, `item/started`, `item/completed`, `rawResponseItem/completed`, `item/agentMessage/delta`, `item/plan/delta`, `item/commandExecution/outputDelta`, `item/commandExecution/terminalInteraction`, `item/fileChange/outputDelta`, `item/mcpToolCall/progress`, `mcpServer/oauthLogin/completed`, `account/updated`, `account/rateLimits/updated`, `app/list/updated`, `item/reasoning/summaryTextDelta`, `item/reasoning/summaryPartAdded`, `item/reasoning/textDelta`, `thread/compacted`, `model/rerouted`, `deprecationNotice`, `configWarning`, `fuzzyFileSearch/sessionUpdated`, `fuzzyFileSearch/sessionCompleted`, `windows/worldWritableWarning`, `account/login/completed`, `authStatusChange`, `loginChatGptComplete`, `sessionConfigured`.
@@ -381,7 +399,7 @@ Resume:
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":5,"method":"turn/start","params":{"threadId":"<thread-id>","input":[{"type":"text","text":"Summarize the latest errors","text_elements":[]}],"approvalPolicy":"never"}}
+{"jsonrpc":"2.0","id":5,"method":"turn/start","params":{"threadId":"<thread-id>","input":[{"type":"text","text":"Summarize the latest errors","text_elements":[]}],"approvalPolicy":"never","collaborationMode":{"mode":"plan","settings":{"model":"gpt-5.3-codex","reasoning_effort":"high","developer_instructions":null}}}}
 ```
 
 Response:

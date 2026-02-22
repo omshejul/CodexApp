@@ -48,14 +48,17 @@ export default function RootLayout() {
   useEffect(() => {
     const stopAppPresenceSync = startAppPresenceSync();
     SplashScreen.hideAsync().catch(() => undefined);
-    try {
-      configurePushNotifications();
-    } catch (error) {
-      reportPushSetupError(error);
+    const shouldSkipPushSetup = __DEV__;
+    if (!shouldSkipPushSetup) {
+      try {
+        configurePushNotifications();
+      } catch (error) {
+        reportPushSetupError(error);
+      }
+      registerPushTokenWithGatewayIfPossible().catch((error) => {
+        reportPushSetupError(error);
+      });
     }
-    registerPushTokenWithGatewayIfPossible().catch((error) => {
-      reportPushSetupError(error);
-    });
 
     return () => {
       stopAppPresenceSync();

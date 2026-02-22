@@ -148,7 +148,9 @@ export class CodexRpcClient extends EventEmitter {
           name: this.clientName,
           version: this.clientVersion,
         },
-        capabilities: null,
+        capabilities: {
+          experimentalApi: true,
+        },
       });
     } catch {
       // Not all Codex builds expose initialize; continue with a best effort session.
