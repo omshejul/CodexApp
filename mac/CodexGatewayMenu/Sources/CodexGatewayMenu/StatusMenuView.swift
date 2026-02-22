@@ -20,6 +20,37 @@ struct StatusMenuView: View {
     return "Paired Devices (\(suffix))"
   }
 
+  private var isGatewayTransitioning: Bool {
+    manager.isStarting
+      || manager.isStopping
+      || manager.isFixingSetup
+      || manager.statusMessage == "Quitting..."
+  }
+
+  private var gatewayTransitionLabel: String? {
+    if manager.isStarting { return "Starting..." }
+    if manager.isStopping { return "Stopping..." }
+    if manager.isFixingSetup { return "Checking..." }
+    if manager.statusMessage == "Quitting..." { return "Quitting..." }
+    return nil
+  }
+
+  private var gatewayToggleBinding: Binding<Bool> {
+    Binding(
+      get: { manager.isRunning || manager.isStarting },
+      set: { isEnabled in
+        guard !manager.needsFullDiskAccess && !isGatewayTransitioning else { return }
+        if isEnabled {
+          guard !manager.isRunning else { return }
+          Task { await manager.start() }
+        } else {
+          guard manager.isRunning else { return }
+          manager.stop()
+        }
+      }
+    )
+  }
+
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
       HStack {
@@ -31,6 +62,19 @@ struct StatusMenuView: View {
             .fontWeight(.semibold)
         }
         Spacer()
+        HStack(spacing: 8) {
+          if let gatewayTransitionLabel {
+            ProgressView()
+              .controlSize(.small)
+            Text(gatewayTransitionLabel)
+              .font(.caption2)
+              .foregroundStyle(.secondary)
+          }
+          Toggle("", isOn: gatewayToggleBinding)
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .disabled(manager.needsFullDiskAccess || isGatewayTransitioning)
+        }
         Button {
           manager.quitApplication()
         } label: {
@@ -57,7 +101,7 @@ struct StatusMenuView: View {
       }
 
       if manager.statusMessage != "Running" && manager.statusMessage != "Ready" {
-        Text("Click Start to verify Codex CLI, Tailscale auth, and route configuration.")
+        Text("Turn on Gateway to verify Codex CLI, Tailscale auth, and route configuration.")
           .font(.caption2)
           .foregroundStyle(.secondary)
       }
@@ -65,24 +109,6 @@ struct StatusMenuView: View {
       Divider()
 
       VStack(spacing: 8) {
-        HStack(spacing: 8) {
-          Button {
-            Task { await manager.start() }
-          } label: {
-            Label("Start", systemImage: "play.fill")
-              .frame(maxWidth: .infinity, alignment: .center)
-          }
-          .disabled(manager.needsFullDiskAccess || manager.isRunning || manager.isFixingSetup || manager.isStarting)
-
-          Button {
-            manager.stop()
-          } label: {
-            Label("Stop", systemImage: "stop.fill")
-              .frame(maxWidth: .infinity, alignment: .center)
-          }
-          .disabled(!manager.isRunning || manager.isFixingSetup || manager.isStarting)
-        }
-
         HStack(spacing: 8) {
           Button {
             manager.openPairPage()

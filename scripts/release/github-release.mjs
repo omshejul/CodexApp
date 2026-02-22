@@ -51,20 +51,12 @@ const releaseMeta =
     ? {
         tag: `CodexGatewayAndroid-${versions.app}`,
         title: `CodexGatewayAndroid-${versions.app}`,
-        notes: [
-          `Android app release ${versions.app}`,
-          "",
-          "Generated from versions.json.",
-        ].join("\n"),
+        notes: `Android app release ${versions.app}`,
       }
     : {
         tag: `CodexGatewayMac-${versions.mac}`,
         title: `CodexGatewayMac-${versions.mac}`,
-        notes: [
-          `Mac app release ${versions.mac}`,
-          "",
-          "Generated from versions.json.",
-        ].join("\n"),
+        notes: `Mac app release ${versions.mac}`,
       };
 
 const releaseView = capture("gh", ["release", "view", releaseMeta.tag, "--json", "tagName"]);

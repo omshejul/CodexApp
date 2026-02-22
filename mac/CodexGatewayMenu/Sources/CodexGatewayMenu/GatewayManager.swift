@@ -37,6 +37,7 @@ final class GatewayManager: ObservableObject {
   @Published var config: AppConfig = .default
   @Published var isRunning = false
   @Published var isStarting = false
+  @Published var isStopping = false
   @Published var isFixingSetup = false
   @Published var isLoadingDevices = false
   @Published var conflictingPID: Int32?
@@ -293,13 +294,20 @@ final class GatewayManager: ObservableObject {
   }
 
   func stop() {
+    guard !isStopping else { return }
+    isStopping = true
+    defer { isStopping = false }
+
+    statusMessage = "Stopping..."
+    appendOutput("Stopping gateway process")
+
     _ = stopLaunchAgent(removePlist: true)
     cleanupManagedProcess()
     isRunning = false
     conflictingPID = nil
     disableTailscaleServeIfManagedByApp()
-    statusMessage = "Stopping..."
-    appendOutput("Stopping gateway process")
+    refreshSetupStatus()
+
     Task { await refreshPairedDevices() }
   }
 
