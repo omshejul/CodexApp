@@ -77,8 +77,14 @@ const prettyLogsEnabled = (process.env.LOG_PRETTY ?? "1") !== "0";
 const preventSystemSleepWhileGatewayActive =
   process.platform === "darwin" && (process.env.PREVENT_SYSTEM_SLEEP_WHILE_GATEWAY_ACTIVE ?? "1") !== "0";
 const EXPO_PUSH_ENDPOINT = "https://exp.host/--/api/v2/push/send";
+const EXPO_PUSH_RECEIPTS_ENDPOINT = "https://exp.host/--/api/v2/push/getReceipts";
 const EXPO_PUSH_BATCH_SIZE = 100;
+const EXPO_PUSH_RECEIPTS_BATCH_SIZE = 300;
+const EXPO_PUSH_RECEIPT_INITIAL_DELAY_MS = 4_000;
+const EXPO_PUSH_RECEIPT_RETRY_DELAY_MS = 8_000;
+const EXPO_PUSH_RECEIPT_MAX_ATTEMPTS = 3;
 const EXPO_PUSH_TOKEN_PATTERN = /^ExponentPushToken\[[A-Za-z0-9+\-_=]+\]$/;
+const COMPLETION_FALLBACK_DUP_WINDOW_MS = 2_000;
 
 const codex = new CodexRpcClient(codexWsUrl, GATEWAY_NAME, GATEWAY_VERSION);
 let managedCodexProcess: ChildProcess | null = null;
@@ -99,6 +105,36 @@ interface ExpoPushMessage {
   data?: Record<string, unknown>;
   sound?: "default";
   priority?: "high";
+}
+
+interface ExpoPushTicket {
+  id?: string;
+  status?: string;
+  details?: {
+    error?: string;
+  };
+  message?: string;
+}
+
+interface ExpoPushReceipt {
+  status?: string;
+  details?: {
+    error?: string;
+  };
+  message?: string;
+}
+
+interface ExpoPushReceiptsResponse {
+  data?: Record<string, ExpoPushReceipt>;
+  errors?: Array<{
+    code?: string;
+    message?: string;
+  }>;
+}
+
+interface PendingExpoPushReceipt {
+  id: string;
+  token: string;
 }
 
 function sanitizeBaseUrl(value: string): string {
@@ -624,9 +660,129 @@ function chunkArray<T>(values: T[], size: number): T[][] {
   return chunks;
 }
 
+function safeJsonStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value ?? null) ?? "null";
+  } catch {
+    return "[unserializable]";
+  }
+}
+
+function scheduleExpoPushReceiptCheck(threadId: string, receipts: PendingExpoPushReceipt[], attempt = 1) {
+  if (receipts.length === 0) {
+    return;
+  }
+  const delayMs = attempt <= 1 ? EXPO_PUSH_RECEIPT_INITIAL_DELAY_MS : EXPO_PUSH_RECEIPT_RETRY_DELAY_MS;
+  const timer = setTimeout(() => {
+    void checkExpoPushReceipts(threadId, receipts, attempt);
+  }, delayMs);
+  timer.unref?.();
+}
+
+async function checkExpoPushReceipts(threadId: string, receipts: PendingExpoPushReceipt[], attempt: number) {
+  const unresolved: PendingExpoPushReceipt[] = [];
+  let okCount = 0;
+  let errorCount = 0;
+
+  for (const chunk of chunkArray(receipts, EXPO_PUSH_RECEIPTS_BATCH_SIZE)) {
+    const receiptById = new Map(chunk.map((entry) => [entry.id, entry]));
+    try {
+      const response = await fetch(EXPO_PUSH_RECEIPTS_ENDPOINT, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          ids: chunk.map((entry) => entry.id),
+        }),
+      });
+      const payload = (await response.json().catch(() => null)) as ExpoPushReceiptsResponse | null;
+      if (!response.ok) {
+        runtimeLogs.event("push.expo.receipts_request_failed", {
+          threadId,
+          attempt,
+          status: response.status,
+          batchSize: chunk.length,
+        });
+        unresolved.push(...chunk);
+        continue;
+      }
+
+      const apiErrors = Array.isArray(payload?.errors) ? payload.errors : [];
+      if (apiErrors.length > 0) {
+        runtimeLogs.event("push.expo.receipts_api_errors", {
+          threadId,
+          attempt,
+          count: apiErrors.length,
+        });
+      }
+
+      const responseData = payload?.data ?? {};
+      for (const [receiptId, entry] of receiptById.entries()) {
+        const receipt = responseData[receiptId];
+        if (!receipt || (receipt.status !== "ok" && receipt.status !== "error")) {
+          unresolved.push(entry);
+          continue;
+        }
+
+        if (receipt.status === "ok") {
+          okCount += 1;
+          runtimeLogs.event("push.expo.receipt_ok", {
+            threadId,
+            attempt,
+          });
+          continue;
+        }
+
+        errorCount += 1;
+        const errorCode = receipt.details?.error;
+        runtimeLogs.event("push.expo.receipt_error", {
+          threadId,
+          attempt,
+          errorCode: errorCode ?? "unknown",
+          message: receipt.message ?? undefined,
+        });
+        if (errorCode === "DeviceNotRegistered") {
+          db.deletePushToken(entry.token);
+        }
+      }
+    } catch (error) {
+      runtimeLogs.error("push.expo.receipts_fetch_failed", error, {
+        threadId,
+        attempt,
+        batchSize: chunk.length,
+      });
+      unresolved.push(...chunk);
+    }
+  }
+
+  runtimeLogs.event("push.expo.receipts_checked", {
+    threadId,
+    attempt,
+    checkedCount: receipts.length,
+    okCount,
+    errorCount,
+    unresolvedCount: unresolved.length,
+  });
+
+  if (unresolved.length > 0) {
+    if (attempt < EXPO_PUSH_RECEIPT_MAX_ATTEMPTS) {
+      scheduleExpoPushReceiptCheck(threadId, unresolved, attempt + 1);
+      return;
+    }
+    runtimeLogs.event("push.expo.receipts_unresolved", {
+      threadId,
+      attempts: attempt,
+      unresolvedCount: unresolved.length,
+    });
+  }
+}
+
 async function sendCompletionPushNotification(threadId: string, turnId: string | null) {
   const recipients = db.listPushTokensForActiveDevices().filter((entry) => isExpoPushToken(entry.token));
   if (recipients.length === 0) {
+    runtimeLogs.event("push.expo.skipped_no_recipients", { threadId });
     return;
   }
 
@@ -646,7 +802,15 @@ async function sendCompletionPushNotification(threadId: string, turnId: string |
     },
   }));
 
+  const pendingReceiptsById = new Map<string, PendingExpoPushReceipt>();
+  let attemptedBatchCount = 0;
+  let successfulBatchCount = 0;
+  let sentMessageCount = 0;
+  let ticketOkCount = 0;
+  let ticketErrorCount = 0;
+
   for (const batch of chunkArray(messages, EXPO_PUSH_BATCH_SIZE)) {
+    attemptedBatchCount += 1;
     try {
       const response = await fetch(EXPO_PUSH_ENDPOINT, {
         method: "POST",
@@ -656,9 +820,7 @@ async function sendCompletionPushNotification(threadId: string, turnId: string |
         },
         body: JSON.stringify(batch),
       });
-      const payload = (await response.json().catch(() => null)) as
-        | { data?: Array<{ status?: string; details?: { error?: string } }> }
-        | null;
+      const payload = (await response.json().catch(() => null)) as { data?: ExpoPushTicket[] } | null;
 
       if (!response.ok) {
         runtimeLogs.event("push.expo.request_failed", {
@@ -669,20 +831,49 @@ async function sendCompletionPushNotification(threadId: string, turnId: string |
         continue;
       }
 
+      successfulBatchCount += 1;
+      sentMessageCount += batch.length;
       const tickets = Array.isArray(payload?.data) ? payload.data : [];
+      let batchTicketOkCount = 0;
+      let batchTicketErrorCount = 0;
+      let batchReceiptIdCount = 0;
+
       tickets.forEach((ticket, index) => {
-        if (ticket?.status !== "error") {
+        if (ticket?.status === "ok") {
+          batchTicketOkCount += 1;
+        } else if (ticket?.status === "error") {
+          batchTicketErrorCount += 1;
+          const token = batch[index]?.to;
+          const errorCode = ticket?.details?.error;
+          runtimeLogs.event("push.expo.ticket_error", {
+            threadId,
+            errorCode: errorCode ?? "unknown",
+            message: ticket?.message ?? undefined,
+          });
+          if (token && errorCode === "DeviceNotRegistered") {
+            db.deletePushToken(token);
+          }
+        }
+
+        const token = batch[index]?.to;
+        const receiptId = typeof ticket?.id === "string" && ticket.id.trim().length > 0 ? ticket.id.trim() : null;
+        if (!token || !receiptId) {
           return;
         }
-        const token = batch[index]?.to;
-        const errorCode = ticket?.details?.error;
-        runtimeLogs.event("push.expo.ticket_error", {
-          threadId,
-          errorCode: errorCode ?? "unknown",
-        });
-        if (token && errorCode === "DeviceNotRegistered") {
-          db.deletePushToken(token);
-        }
+        pendingReceiptsById.set(receiptId, { id: receiptId, token });
+        batchReceiptIdCount += 1;
+      });
+
+      ticketOkCount += batchTicketOkCount;
+      ticketErrorCount += batchTicketErrorCount;
+      runtimeLogs.event("push.expo.request_ok", {
+        threadId,
+        status: response.status,
+        batchSize: batch.length,
+        ticketCount: tickets.length,
+        ticketOkCount: batchTicketOkCount,
+        ticketErrorCount: batchTicketErrorCount,
+        receiptIdCount: batchReceiptIdCount,
       });
     } catch (error) {
       runtimeLogs.error("push.expo.send_failed", error, {
@@ -690,6 +881,21 @@ async function sendCompletionPushNotification(threadId: string, turnId: string |
         batchSize: batch.length,
       });
     }
+  }
+
+  runtimeLogs.event("push.expo.dispatch_complete", {
+    threadId,
+    recipientCount: recipients.length,
+    attemptedBatchCount,
+    successfulBatchCount,
+    sentMessageCount,
+    ticketOkCount,
+    ticketErrorCount,
+    pendingReceiptCount: pendingReceiptsById.size,
+  });
+
+  if (pendingReceiptsById.size > 0) {
+    scheduleExpoPushReceiptCheck(threadId, [...pendingReceiptsById.values()], 1);
   }
 }
 
@@ -1294,6 +1500,7 @@ async function bootstrap() {
   const activeTurnIdByThread = new Map<string, string>();
   const notifiedCompletionTurnKeys: string[] = [];
   const notifiedCompletionTurnSet = new Set<string>();
+  const recentCompletionFallbackByThread = new Map<string, { fingerprint: string; seenAt: number }>();
 
   if (!isLocalHost(host)) {
     throw new Error(`Refusing to start gateway on non-local HOST='${host}'. Use 127.0.0.1 or localhost.`);
@@ -1331,17 +1538,42 @@ async function bootstrap() {
     }
 
     if (threadId && lowerMethod === "turn/completed") {
-      const dedupeKey = `${threadId}:${turnId ?? "unknown"}`;
-      if (!notifiedCompletionTurnSet.has(dedupeKey)) {
-        notifiedCompletionTurnSet.add(dedupeKey);
-        notifiedCompletionTurnKeys.push(dedupeKey);
-        if (notifiedCompletionTurnKeys.length > 5000) {
-          const removed = notifiedCompletionTurnKeys.shift();
-          if (removed) {
-            notifiedCompletionTurnSet.delete(removed);
+      const resolvedTurnId = turnId ?? activeTurnIdByThread.get(threadId) ?? null;
+      let shouldNotify = false;
+      if (resolvedTurnId) {
+        const dedupeKey = `${threadId}:${resolvedTurnId}`;
+        if (!notifiedCompletionTurnSet.has(dedupeKey)) {
+          notifiedCompletionTurnSet.add(dedupeKey);
+          notifiedCompletionTurnKeys.push(dedupeKey);
+          if (notifiedCompletionTurnKeys.length > 5000) {
+            const removed = notifiedCompletionTurnKeys.shift();
+            if (removed) {
+              notifiedCompletionTurnSet.delete(removed);
+            }
           }
+          shouldNotify = true;
         }
-        void sendCompletionPushNotification(threadId, turnId ?? null);
+      } else {
+        const now = Date.now();
+        const fingerprint = hashValue(safeJsonStringify(params), tokenHashSecret).slice(0, 24);
+        const previous = recentCompletionFallbackByThread.get(threadId);
+        const isImmediateDuplicate =
+          previous !== undefined &&
+          previous.fingerprint === fingerprint &&
+          now - previous.seenAt <= COMPLETION_FALLBACK_DUP_WINDOW_MS;
+        recentCompletionFallbackByThread.set(threadId, { fingerprint, seenAt: now });
+        if (!isImmediateDuplicate) {
+          shouldNotify = true;
+        } else {
+          runtimeLogs.event("push.expo.completion_duplicate_suppressed", {
+            threadId,
+            strategy: "fallback_fingerprint",
+          });
+        }
+      }
+
+      if (shouldNotify) {
+        void sendCompletionPushNotification(threadId, resolvedTurnId);
       }
     }
 
