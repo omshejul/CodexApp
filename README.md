@@ -151,6 +151,6 @@ bunx eas-cli build --platform android --profile preview
 - Signed/notarized release build:
 ```bash
 SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
-NOTARYTOOL_PROFILE="codex-notary" \
+NOTARYTOOL_PROFILE="codex-gateway" \
 ./mac/CodexGatewayMenu/scripts/build_app.sh --release
 ```

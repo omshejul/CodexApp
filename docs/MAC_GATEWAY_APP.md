@@ -52,7 +52,7 @@ From repo root:
 
 ```bash
 SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
-NOTARYTOOL_PROFILE="codex-notary" \
+NOTARYTOOL_PROFILE="codex-gateway" \
 ./mac/CodexGatewayMenu/scripts/build_app.sh --release
 ```
 

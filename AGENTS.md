@@ -44,7 +44,7 @@ bun run build:mac
 
 ```bash
 SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
-NOTARYTOOL_PROFILE="codex-notary"
+NOTARYTOOL_PROFILE="codex-gateway"
 ```
 
 - Do not use unsigned build output for normal release/distribution workflows.
