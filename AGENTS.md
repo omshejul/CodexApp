@@ -104,3 +104,4 @@ If you think something is useful to be remembered for later and will save time i
 ## Useful Docs
 
 - `docs/mac-gateway-reliability.md`: Use for mac menu gateway reliability issues (sleep/wake behavior, launchd supervision, port conflict diagnosis, local network prompt timing).
+- `docs/RELEASE_RUNBOOK.md`: Use when doing a full release cycle (versioning, mac signed/notarized build, EAS Android/iOS build+submit, TestFlight, GitHub release publishing, push, and completion notification).

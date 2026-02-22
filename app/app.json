@@ -47,6 +47,7 @@
         "aps-environment": "development"
       },
       "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
         "NSUserNotificationUsageDescription": "Allow Codex to notify you when a response finishes.",
         "NSPhotoLibraryUsageDescription": "Allow Codex to access your photos so you can attach images in chat.",
         "NSPhotoLibraryAddUsageDescription": "Allow Codex to save images to your photo library."
