@@ -26,6 +26,9 @@ RELEASE_MODE=0
 NPM_CLI_REL="lib/node_modules/npm/bin/npm-cli.js"
 NODE_GYP_REL="lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js"
 ENTITLEMENTS_PATH="$STAGE_DIR/codesign.entitlements"
+VERSIONS_FILE="$REPO_ROOT/versions.json"
+MAC_APP_VERSION="${MAC_APP_VERSION:-}"
+MAC_APP_BUILD_VERSION="${MAC_APP_BUILD_VERSION:-}"
 
 if [ "${1:-}" = "--release" ]; then
   RELEASE_MODE=1
@@ -44,6 +47,33 @@ require_cmd() {
 for cmd in node python3 swift hdiutil; do
   require_cmd "$cmd"
 done
+
+if [ -z "$MAC_APP_VERSION" ]; then
+  if [ ! -f "$VERSIONS_FILE" ]; then
+    echo "Missing versions file: $VERSIONS_FILE"
+    exit 1
+  fi
+  MAC_APP_VERSION="$(VERSIONS_FILE_FOR_NODE="$VERSIONS_FILE" node <<'NODE'
+const fs = require("fs");
+
+const versionsPath = process.env.VERSIONS_FILE_FOR_NODE;
+if (!versionsPath) {
+  throw new Error("VERSIONS_FILE_FOR_NODE is required");
+}
+const versions = JSON.parse(fs.readFileSync(versionsPath, "utf8"));
+if (typeof versions.mac !== "string" || !/^\d+\.\d+\.\d+$/.test(versions.mac)) {
+  throw new Error("versions.json must contain a semver mac field");
+}
+process.stdout.write(versions.mac);
+NODE
+)"
+fi
+
+if [ -z "$MAC_APP_BUILD_VERSION" ]; then
+  MAC_APP_BUILD_VERSION="$MAC_APP_VERSION"
+fi
+
+echo "==> Using mac app version ${MAC_APP_VERSION} (${MAC_APP_BUILD_VERSION})"
 
 run_tsc() {
   local project_file="$1"
@@ -173,9 +203,9 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.2</string>
+  <string>${MAC_APP_VERSION}</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>${MAC_APP_BUILD_VERSION}</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSUIElement</key>

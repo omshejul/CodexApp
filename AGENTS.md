@@ -21,6 +21,9 @@ Guidelines for coding agents working in this repository.
 - Make minimal, targeted edits; do not refactor unrelated areas.
 - Do not revert user changes you did not make.
 - Keep secrets out of source control.
+- Do not allow the code to fail silently
+- Focus on good refactors then slapping if conditions
+- Use Official doc, Context7, and Deepwiki to get doc information
 
 ## Build And Test
 

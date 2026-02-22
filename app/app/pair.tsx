@@ -26,7 +26,10 @@ export default function PairScreen() {
       const parsed = parsePairingUrl(result.data);
       const identity = await getOrCreateDeviceIdentity();
       await claimPairing(parsed, identity);
-      await registerPushTokenWithGatewayIfPossible().catch(() => undefined);
+      await registerPushTokenWithGatewayIfPossible().catch((pushError) => {
+        const message = pushError instanceof Error ? pushError.message : "Unknown push token error";
+        console.warn("Push token registration skipped", message);
+      });
       router.replace("/threads");
     } catch (scanError) {
       const message = scanError instanceof Error ? scanError.message : "Unable to pair device.";

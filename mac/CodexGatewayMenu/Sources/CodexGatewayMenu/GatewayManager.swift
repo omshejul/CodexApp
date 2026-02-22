@@ -304,6 +304,17 @@ final class GatewayManager: ObservableObject {
   }
 
   func quitApplication() {
+    let keepLaunchAgentForAutoStart = config.autoStart
+    _ = stopLaunchAgent(removePlist: !keepLaunchAgentForAutoStart)
+    cleanupManagedProcess()
+    disableTailscaleServeIfManagedByApp()
+    isRunning = false
+    statusMessage = "Quitting..."
+    appendOutput(
+      keepLaunchAgentForAutoStart
+        ? "Quitting app and stopping gateway process (auto-start will resume on next startup)."
+        : "Quitting app and stopping gateway process."
+    )
     NSApplication.shared.terminate(nil)
   }
 

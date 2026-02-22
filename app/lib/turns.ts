@@ -405,6 +405,7 @@ export function toRenderedTurns(turns: unknown[]): RenderedTurn[] {
 
   for (let turnIndex = 0; turnIndex < turns.length; turnIndex += 1) {
     const turn = turns[turnIndex];
+    const turnRole = detectRole(turn);
     const turnRecord = turn && typeof turn === "object" ? (turn as Record<string, unknown>) : null;
     const turnId = turnRecord && typeof turnRecord.id === "string" ? turnRecord.id : undefined;
     const items = turnRecord ? turnRecord.items : null;
@@ -459,7 +460,7 @@ export function toRenderedTurns(turns: unknown[]): RenderedTurn[] {
 
         rendered.push({
           id: typeof record.id === "string" ? record.id : `turn-${turnIndex}-item-${itemIndex}`,
-          role: "user",
+          role: turnRole === "assistant" ? "assistant" : "user",
           text,
           images: imageUris.length > 0 ? imageUris : undefined,
           createdAtMs: createdAtMs ?? undefined,
