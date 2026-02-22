@@ -43,6 +43,7 @@ export const ThreadSummarySchema = z.object({
   title: z.string().optional(),
   updatedAt: z.string().optional(),
   cwd: z.string().optional(),
+  inProgress: z.boolean().optional(),
 });
 
 export const ThreadsResponseSchema = z.object({

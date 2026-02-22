@@ -25,6 +25,7 @@ interface ThreadItem {
   title?: string;
   updatedAt?: string;
   cwd?: string;
+  inProgress?: boolean;
 }
 
 interface ThreadSection {
@@ -352,7 +353,10 @@ export default function ThreadsScreen() {
         <Text className="min-w-0 flex-1 text-[15px] font-medium text-card-foreground" numberOfLines={2} ellipsizeMode="tail">
           {item.name || item.title || item.id}
         </Text>
-        <Text className="text-sm text-muted-foreground">{formatRelativeTime(item.updatedAt)}</Text>
+        <View className="flex-row items-center gap-2">
+          {item.inProgress ? <ActivityIndicator size="small" className="text-primary" /> : null}
+          <Text className="text-sm text-muted-foreground">{formatRelativeTime(item.updatedAt)}</Text>
+        </View>
       </Pressable>
     </MotiView>
   );

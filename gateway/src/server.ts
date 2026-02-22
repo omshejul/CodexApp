@@ -762,7 +762,14 @@ function extractTurnIdFromParams(value: unknown): string | null {
   return null;
 }
 
-function normalizeThreads(result: unknown): Array<{ id: string; name?: string; title?: string; updatedAt?: string; cwd?: string }> {
+function normalizeThreads(result: unknown): Array<{
+  id: string;
+  name?: string;
+  title?: string;
+  updatedAt?: string;
+  cwd?: string;
+  inProgress?: boolean;
+}> {
   const pickNonEmptyString = (...values: unknown[]): string | undefined => {
     for (const value of values) {
       if (typeof value === "string" && value.trim().length > 0) {
@@ -790,7 +797,16 @@ function normalizeThreads(result: unknown): Array<{ id: string; name?: string; t
     ? (asObject.items as unknown[])
     : [];
 
-  return threadArray.reduce<Array<{ id: string; name?: string; title?: string; updatedAt?: string; cwd?: string }>>((acc, item) => {
+  return threadArray.reduce<
+    Array<{
+      id: string;
+      name?: string;
+      title?: string;
+      updatedAt?: string;
+      cwd?: string;
+      inProgress?: boolean;
+    }>
+  >((acc, item) => {
     if (!item || typeof item !== "object") {
       return acc;
     }
@@ -813,7 +829,8 @@ function normalizeThreads(result: unknown): Array<{ id: string; name?: string; t
         : typeof updatedRaw === "number" && Number.isFinite(updatedRaw)
         ? new Date(updatedRaw * 1000).toISOString()
         : undefined;
-    acc.push({ id, name, title, updatedAt, cwd });
+    const inProgress = row.inProgress === true || row.isRunning === true || row.busy === true;
+    acc.push({ id, name, title, updatedAt, cwd, inProgress });
     return acc;
   }, []);
 }
@@ -1611,6 +1628,7 @@ async function bootstrap() {
         ...item,
         name: persistedNames.get(item.id)?.name ?? item.name,
         cwd: persistedCwds.get(item.id)?.cwd ?? item.cwd,
+        inProgress: item.inProgress === true || activeTurnIdByThread.has(item.id),
       })),
     });
     return reply.send(payload);
