@@ -24,6 +24,7 @@ Guidelines for coding agents working in this repository.
 - Do not allow the code to fail silently
 - Focus on good refactors then slapping if conditions
 - Use Official doc, Context7, and Deepwiki to get doc information
+- When user says "always do something" or "remember that": if it's more than 3 lines, create a doc in `docs/` and add a one-line reference in AGENTS.md; if 3 lines or less, add directly to AGENTS.md
 
 ## Build And Test
 
