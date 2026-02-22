@@ -41,6 +41,13 @@ export interface ThreadEventRow {
   createdAt: number;
 }
 
+export interface PushTokenRow {
+  deviceId: string;
+  token: string;
+  platform: "ios" | "android";
+  updatedAt: number;
+}
+
 interface SettingsRow {
   id: number;
   jwtSecret: string;
@@ -116,18 +123,31 @@ export class GatewayDatabase {
         createdAt INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS push_tokens (
+        token TEXT PRIMARY KEY,
+        deviceId TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        updatedAt INTEGER NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_pair_expires ON pair_sessions (expiresAt);
       CREATE INDEX IF NOT EXISTS idx_refresh_expires ON refresh_tokens (expiresAt);
       CREATE INDEX IF NOT EXISTS idx_refresh_revoked ON refresh_tokens (revokedAt);
       CREATE INDEX IF NOT EXISTS idx_thread_names_updated ON thread_names (updatedAt);
       CREATE INDEX IF NOT EXISTS idx_thread_cwds_updated ON thread_cwds (updatedAt);
       CREATE INDEX IF NOT EXISTS idx_thread_events_thread_created ON thread_events (threadId, createdAt);
+      CREATE INDEX IF NOT EXISTS idx_push_tokens_device_updated ON push_tokens (deviceId, updatedAt);
     `);
 
     // Forward-compatible migration for existing installs.
     const threadEventColumns = this.db.prepare("PRAGMA table_info(thread_events)").all() as Array<{ name: string }>;
     if (!threadEventColumns.some((column) => column.name === "turnId")) {
       this.db.exec("ALTER TABLE thread_events ADD COLUMN turnId TEXT NULL");
+    }
+
+    const pushTokenColumns = this.db.prepare("PRAGMA table_info(push_tokens)").all() as Array<{ name: string }>;
+    if (!pushTokenColumns.some((column) => column.name === "platform")) {
+      this.db.exec("ALTER TABLE push_tokens ADD COLUMN platform TEXT NOT NULL DEFAULT 'ios'");
     }
 
     this.backfillDeviceSequencesFromRefreshTokens();
@@ -341,5 +361,42 @@ export class GatewayDatabase {
 
   cleanupThreadEventsOlderThan(cutoffMs: number) {
     this.db.prepare("DELETE FROM thread_events WHERE createdAt < ?").run(cutoffMs);
+  }
+
+  upsertPushToken(entry: PushTokenRow) {
+    this.db
+      .prepare(
+        `INSERT INTO push_tokens (token, deviceId, platform, updatedAt)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(token) DO UPDATE SET
+           deviceId = excluded.deviceId,
+           platform = excluded.platform,
+           updatedAt = excluded.updatedAt`
+      )
+      .run(entry.token, entry.deviceId, entry.platform, entry.updatedAt);
+  }
+
+  deletePushToken(token: string) {
+    this.db.prepare("DELETE FROM push_tokens WHERE token = ?").run(token);
+  }
+
+  deletePushTokensByDeviceId(deviceId: string) {
+    this.db.prepare("DELETE FROM push_tokens WHERE deviceId = ?").run(deviceId);
+  }
+
+  listPushTokensForActiveDevices(): PushTokenRow[] {
+    return this.db
+      .prepare(
+        `SELECT pt.deviceId, pt.token, pt.platform, pt.updatedAt
+         FROM push_tokens pt
+         WHERE EXISTS (
+           SELECT 1
+           FROM refresh_tokens rt
+           WHERE rt.deviceId = pt.deviceId
+             AND rt.revokedAt IS NULL
+         )
+         ORDER BY pt.updatedAt DESC`
+      )
+      .all() as PushTokenRow[];
   }
 }

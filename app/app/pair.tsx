@@ -6,6 +6,7 @@ import { MotiView } from "moti";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { claimPairing, parsePairingUrl } from "@/lib/api";
 import { getOrCreateDeviceIdentity } from "@/lib/device";
+import { registerPushTokenWithGatewayIfPossible } from "@/lib/push-notifications";
 
 export default function PairScreen() {
   const [permission, requestPermission] = useCameraPermissions();
@@ -25,6 +26,7 @@ export default function PairScreen() {
       const parsed = parsePairingUrl(result.data);
       const identity = await getOrCreateDeviceIdentity();
       await claimPairing(parsed, identity);
+      await registerPushTokenWithGatewayIfPossible().catch(() => undefined);
       router.replace("/threads");
     } catch (scanError) {
       const message = scanError instanceof Error ? scanError.message : "Unable to pair device.";

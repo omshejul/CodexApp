@@ -3,6 +3,7 @@ import {
   DirectoryBrowseResponseSchema,
   GatewayOptionsResponseSchema,
   PairedDevicesResponseSchema,
+  PushTokenUpsertResponseSchema,
   ThreadCreateRequest,
   PairClaimRequest,
   PairClaimResponseSchema,
@@ -405,4 +406,15 @@ export async function getGatewayOptions() {
 export async function getPairedDevices() {
   const payload = await authenticatedRequest<unknown>("/devices/active");
   return PairedDevicesResponseSchema.parse(payload);
+}
+
+export async function upsertPushToken(request: { token: string; platform: "ios" | "android"; enabled?: boolean }) {
+  const payload = await authenticatedRequest<unknown>("/notifications/push-token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+  });
+  return PushTokenUpsertResponseSchema.parse(payload);
 }

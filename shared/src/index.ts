@@ -189,6 +189,16 @@ export const PairedDevicesResponseSchema = z.object({
   devices: z.array(PairedDeviceSchema),
 });
 
+export const PushTokenUpsertRequestSchema = z.object({
+  token: z.string().trim().min(1),
+  platform: z.enum(["ios", "android"]),
+  enabled: z.boolean().optional().default(true),
+});
+
+export const PushTokenUpsertResponseSchema = z.object({
+  ok: z.literal(true),
+});
+
 export type PairCreateResponse = z.infer<typeof PairCreateResponseSchema>;
 export type PairClaimRequest = z.infer<typeof PairClaimRequestSchema>;
 export type PairClaimResponse = z.infer<typeof PairClaimResponseSchema>;
@@ -219,3 +229,5 @@ export type GatewayOptionsResponse = z.infer<typeof GatewayOptionsResponseSchema
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;
 export type PairedDevice = z.infer<typeof PairedDeviceSchema>;
 export type PairedDevicesResponse = z.infer<typeof PairedDevicesResponseSchema>;
+export type PushTokenUpsertRequest = z.infer<typeof PushTokenUpsertRequestSchema>;
+export type PushTokenUpsertResponse = z.infer<typeof PushTokenUpsertResponseSchema>;

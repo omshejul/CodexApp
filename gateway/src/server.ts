@@ -37,6 +37,8 @@ import {
   ThreadResumeResponseSchema,
   ThreadsResponseSchema,
   WorkspacesResponseSchema,
+  PushTokenUpsertRequestSchema,
+  PushTokenUpsertResponseSchema,
 } from "@codex-phone/shared";
 import { CodexRpcClient } from "./codex-rpc";
 import { GatewayDatabase, PairSessionRow, RefreshTokenRow } from "./db";
@@ -74,6 +76,9 @@ const logLevel = process.env.LOG_LEVEL ?? "info";
 const prettyLogsEnabled = (process.env.LOG_PRETTY ?? "1") !== "0";
 const preventSystemSleepWhileGatewayActive =
   process.platform === "darwin" && (process.env.PREVENT_SYSTEM_SLEEP_WHILE_GATEWAY_ACTIVE ?? "1") !== "0";
+const EXPO_PUSH_ENDPOINT = "https://exp.host/--/api/v2/push/send";
+const EXPO_PUSH_BATCH_SIZE = 100;
+const EXPO_PUSH_TOKEN_PATTERN = /^ExponentPushToken\[[A-Za-z0-9+\-_=]+\]$/;
 
 const codex = new CodexRpcClient(codexWsUrl, GATEWAY_NAME, GATEWAY_VERSION);
 let managedCodexProcess: ChildProcess | null = null;
@@ -85,6 +90,15 @@ interface AccessTokenPayload {
   typ: "access";
   sub: string;
   deviceName?: string;
+}
+
+interface ExpoPushMessage {
+  to: string;
+  title?: string;
+  body?: string;
+  data?: Record<string, unknown>;
+  sound?: "default";
+  priority?: "high";
 }
 
 function sanitizeBaseUrl(value: string): string {
@@ -593,6 +607,90 @@ function verifyRefreshToken(rawToken: string): RefreshTokenRow | null {
 
   const candidateHash = hashValue(parsed.secret, tokenHashSecret);
   return safeEqualHex(candidateHash, row.tokenHash) ? row : null;
+}
+
+function isExpoPushToken(value: string): boolean {
+  return EXPO_PUSH_TOKEN_PATTERN.test(value.trim());
+}
+
+function chunkArray<T>(values: T[], size: number): T[][] {
+  if (size <= 0) {
+    return [values];
+  }
+  const chunks: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
+}
+
+async function sendCompletionPushNotification(threadId: string, turnId: string | null) {
+  const recipients = db.listPushTokensForActiveDevices().filter((entry) => isExpoPushToken(entry.token));
+  if (recipients.length === 0) {
+    return;
+  }
+
+  const threadName = db.getThreadName(threadId)?.name?.trim();
+  const title = threadName && threadName.length > 0 ? threadName : "Codex response finished";
+  const body = "A response just completed.";
+  const messages = recipients.map<ExpoPushMessage>((entry) => ({
+    to: entry.token,
+    title,
+    body,
+    sound: "default",
+    priority: "high",
+    data: {
+      threadId,
+      ...(turnId ? { turnId } : {}),
+      type: "turn_completed",
+    },
+  }));
+
+  for (const batch of chunkArray(messages, EXPO_PUSH_BATCH_SIZE)) {
+    try {
+      const response = await fetch(EXPO_PUSH_ENDPOINT, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(batch),
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | { data?: Array<{ status?: string; details?: { error?: string } }> }
+        | null;
+
+      if (!response.ok) {
+        runtimeLogs.event("push.expo.request_failed", {
+          status: response.status,
+          threadId,
+          batchSize: batch.length,
+        });
+        continue;
+      }
+
+      const tickets = Array.isArray(payload?.data) ? payload.data : [];
+      tickets.forEach((ticket, index) => {
+        if (ticket?.status !== "error") {
+          return;
+        }
+        const token = batch[index]?.to;
+        const errorCode = ticket?.details?.error;
+        runtimeLogs.event("push.expo.ticket_error", {
+          threadId,
+          errorCode: errorCode ?? "unknown",
+        });
+        if (token && errorCode === "DeviceNotRegistered") {
+          db.deletePushToken(token);
+        }
+      });
+    } catch (error) {
+      runtimeLogs.error("push.expo.send_failed", error, {
+        threadId,
+        batchSize: batch.length,
+      });
+    }
+  }
 }
 
 function ensureLocalRequest(request: FastifyRequest, reply: FastifyReply): boolean {
@@ -1194,6 +1292,8 @@ const app = Fastify({
 async function bootstrap() {
   runtimeLogs.event("gateway.bootstrap.start", { host, port, codexWsUrl, eventsLogPath, errorsLogPath });
   const activeTurnIdByThread = new Map<string, string>();
+  const notifiedCompletionTurnKeys: string[] = [];
+  const notifiedCompletionTurnSet = new Set<string>();
 
   if (!isLocalHost(host)) {
     throw new Error(`Refusing to start gateway on non-local HOST='${host}'. Use 127.0.0.1 or localhost.`);
@@ -1227,6 +1327,21 @@ async function bootstrap() {
         );
       } catch (error) {
         runtimeLogs.error("thread.events.persist_failed", error, { threadId, method });
+      }
+    }
+
+    if (threadId && lowerMethod === "turn/completed") {
+      const dedupeKey = `${threadId}:${turnId ?? "unknown"}`;
+      if (!notifiedCompletionTurnSet.has(dedupeKey)) {
+        notifiedCompletionTurnSet.add(dedupeKey);
+        notifiedCompletionTurnKeys.push(dedupeKey);
+        if (notifiedCompletionTurnKeys.length > 5000) {
+          const removed = notifiedCompletionTurnKeys.shift();
+          if (removed) {
+            notifiedCompletionTurnSet.delete(removed);
+          }
+        }
+        void sendCompletionPushNotification(threadId, turnId ?? null);
       }
     }
 
@@ -1582,7 +1697,11 @@ async function bootstrap() {
 
     const parsedToken = parseRefreshToken(parsedBody.data.refreshToken);
     if (parsedToken) {
+      const record = db.getRefreshToken(parsedToken.id);
       db.revokeRefreshToken(parsedToken.id, Date.now());
+      if (record) {
+        db.deletePushTokensByDeviceId(record.deviceId);
+      }
     }
 
     return reply.send({ ok: true });
@@ -1599,12 +1718,45 @@ async function bootstrap() {
     return reply.send({ devices: db.listActiveDevices().map((device) => withMemorableDeviceName(device)) });
   });
 
+  app.post("/notifications/push-token", { preHandler: [requireAuth] }, async (request, reply) => {
+    const parsedBody = PushTokenUpsertRequestSchema.safeParse(request.body ?? {});
+    if (!parsedBody.success) {
+      return reply.code(400).send({ error: parsedBody.error.flatten() });
+    }
+    if (!request.auth?.deviceId) {
+      return reply.code(401).send({ error: "Invalid access token" });
+    }
+
+    const token = parsedBody.data.token.trim();
+    if (!isExpoPushToken(token)) {
+      return reply.code(400).send({ error: "Invalid Expo push token format" });
+    }
+
+    if (parsedBody.data.enabled === false) {
+      db.deletePushToken(token);
+    } else {
+      db.upsertPushToken({
+        deviceId: request.auth.deviceId,
+        token,
+        platform: parsedBody.data.platform,
+        updatedAt: Date.now(),
+      });
+    }
+
+    const payload = PushTokenUpsertResponseSchema.parse({ ok: true });
+    return reply.send(payload);
+  });
+
   app.post("/devices/:id/revoke", async (request, reply) => {
     if (!ensureLocalRequest(request, reply)) {
       return;
     }
     const params = request.params as { id: string };
+    const record = db.getRefreshToken(params.id);
     db.revokeRefreshToken(params.id, Date.now());
+    if (record) {
+      db.deletePushTokensByDeviceId(record.deviceId);
+    }
     return reply.send({ ok: true });
   });
 

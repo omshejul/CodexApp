@@ -7,6 +7,7 @@ import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import "../global.css";
 import "../lib/interop";
+import { configurePushNotifications, registerPushTokenWithGatewayIfPossible } from "@/lib/push-notifications";
 
 const SYSTEM_FONT = Platform.select({
   ios: "System",
@@ -17,6 +18,8 @@ const SYSTEM_FONT = Platform.select({
 export default function RootLayout() {
   useEffect(() => {
     SplashScreen.hideAsync().catch(() => undefined);
+    configurePushNotifications();
+    registerPushTokenWithGatewayIfPossible().catch(() => undefined);
   }, []);
 
   return (
