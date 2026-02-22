@@ -152,8 +152,8 @@ node scripts/release/github-release.mjs mac mac/CodexGatewayMenu/build/CodexGate
 ```
 
 Tag conventions:
-- App: `v<app-version>`
-- Mac: `mac-v<mac-version>`
+- App: `CodexGatewayAndroid-<app-version>`
+- Mac: `CodexGatewayMac-<mac-version>`
 
 ## 10) Commit + Push
 

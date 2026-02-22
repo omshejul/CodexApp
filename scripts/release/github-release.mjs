@@ -49,17 +49,17 @@ ensureSemver("versions.mac", versions.mac);
 const releaseMeta =
   platform === "app"
     ? {
-        tag: `v${versions.app}`,
-        title: `v${versions.app}`,
+        tag: `CodexGatewayAndroid-${versions.app}`,
+        title: `CodexGatewayAndroid-${versions.app}`,
         notes: [
-          `App release ${versions.app}`,
+          `Android app release ${versions.app}`,
           "",
           "Generated from versions.json.",
         ].join("\n"),
       }
     : {
-        tag: `mac-v${versions.mac}`,
-        title: `mac-v${versions.mac}`,
+        tag: `CodexGatewayMac-${versions.mac}`,
+        title: `CodexGatewayMac-${versions.mac}`,
         notes: [
           `Mac app release ${versions.mac}`,
           "",
