@@ -199,6 +199,16 @@ export const PushTokenUpsertResponseSchema = z.object({
   ok: z.literal(true),
 });
 
+export const AppPresenceStateSchema = z.enum(["active", "background", "inactive"]);
+
+export const AppPresenceUpsertRequestSchema = z.object({
+  state: AppPresenceStateSchema,
+});
+
+export const AppPresenceUpsertResponseSchema = z.object({
+  ok: z.literal(true),
+});
+
 export type PairCreateResponse = z.infer<typeof PairCreateResponseSchema>;
 export type PairClaimRequest = z.infer<typeof PairClaimRequestSchema>;
 export type PairClaimResponse = z.infer<typeof PairClaimResponseSchema>;
@@ -231,3 +241,6 @@ export type PairedDevice = z.infer<typeof PairedDeviceSchema>;
 export type PairedDevicesResponse = z.infer<typeof PairedDevicesResponseSchema>;
 export type PushTokenUpsertRequest = z.infer<typeof PushTokenUpsertRequestSchema>;
 export type PushTokenUpsertResponse = z.infer<typeof PushTokenUpsertResponseSchema>;
+export type AppPresenceState = z.infer<typeof AppPresenceStateSchema>;
+export type AppPresenceUpsertRequest = z.infer<typeof AppPresenceUpsertRequestSchema>;
+export type AppPresenceUpsertResponse = z.infer<typeof AppPresenceUpsertResponseSchema>;

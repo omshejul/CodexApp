@@ -1,4 +1,5 @@
 import {
+  AppPresenceUpsertResponseSchema,
   AuthRefreshResponseSchema,
   DirectoryBrowseResponseSchema,
   GatewayOptionsResponseSchema,
@@ -417,4 +418,15 @@ export async function upsertPushToken(request: { token: string; platform: "ios" 
     body: JSON.stringify(request),
   });
   return PushTokenUpsertResponseSchema.parse(payload);
+}
+
+export async function upsertAppPresence(request: { state: "active" | "background" | "inactive" }) {
+  const payload = await authenticatedRequest<unknown>("/presence/app-state", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+  });
+  return AppPresenceUpsertResponseSchema.parse(payload);
 }

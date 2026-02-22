@@ -74,20 +74,20 @@ NOTARYTOOL_PROFILE="codex-gateway"
 
 - For Metro Restart say:
   `cd /Users/omshejul/Code/CodexApp/app`
-  `npx expo start --dev-client --clear`
+  `bunx expo start --dev-client --clear`
 - For build/reinstall iOS app say:
   `cd /Users/omshejul/Code/CodexApp/app`
-  `npx expo run:ios --device --no-bundler --configuration Debug`
+  `bunx expo run:ios --device --no-bundler --configuration Debug`
 - Standalone iOS build (no Metro):
   `cd /Users/omshejul/Code/CodexApp/app`
-  `npx expo run:ios --device --no-bundler --configuration Debug`
-  `npx expo run:ios --device --no-bundler --configuration Release `
+  `bunx expo run:ios --device --no-bundler --configuration Debug`
+  `bunx expo run:ios --device --no-bundler --configuration Release `
 - Standalone Android build (no Metro):
   `cd /Users/omshejul/Code/CodexApp/app`
-  `npx expo run:android --variant debug --no-bundler`
+  `bunx expo run:android --variant debug --no-bundler`
 - Local standalone Android APK build (no EAS, no Metro):
   `cd /Users/omshejul/Code/CodexApp/app`
-  `npx expo prebuild`
+  `bunx expo prebuild`
   `cd android && ./gradlew assembleRelease`
   Output: `/Users/omshejul/Code/CodexApp/app/android/app/build/outputs/apk/release/app-release.apk`
   Optional install via adb:

@@ -12,6 +12,7 @@ import {
   PushNotificationsSetupError,
   registerPushTokenWithGatewayIfPossible,
 } from "@/lib/push-notifications";
+import { startAppPresenceSync } from "@/lib/app-presence";
 
 const SYSTEM_FONT = Platform.select({
   ios: "System",
@@ -45,6 +46,7 @@ function reportPushSetupError(error: unknown) {
 
 export default function RootLayout() {
   useEffect(() => {
+    const stopAppPresenceSync = startAppPresenceSync();
     SplashScreen.hideAsync().catch(() => undefined);
     try {
       configurePushNotifications();
@@ -54,6 +56,10 @@ export default function RootLayout() {
     registerPushTokenWithGatewayIfPossible().catch((error) => {
       reportPushSetupError(error);
     });
+
+    return () => {
+      stopAppPresenceSync();
+    };
   }, []);
 
   return (

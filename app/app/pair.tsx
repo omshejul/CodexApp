@@ -7,6 +7,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { claimPairing, parsePairingUrl } from "@/lib/api";
 import { getOrCreateDeviceIdentity } from "@/lib/device";
 import { registerPushTokenWithGatewayIfPossible } from "@/lib/push-notifications";
+import { sendActivePresenceNowIfPaired } from "@/lib/app-presence";
 
 export default function PairScreen() {
   const [permission, requestPermission] = useCameraPermissions();
@@ -29,6 +30,10 @@ export default function PairScreen() {
       await registerPushTokenWithGatewayIfPossible().catch((pushError) => {
         const message = pushError instanceof Error ? pushError.message : "Unknown push token error";
         console.warn("Push token registration skipped", message);
+      });
+      await sendActivePresenceNowIfPaired().catch((presenceError) => {
+        const message = presenceError instanceof Error ? presenceError.message : "Unknown app presence error";
+        console.warn("App presence sync skipped", message);
       });
       router.replace("/threads");
     } catch (scanError) {

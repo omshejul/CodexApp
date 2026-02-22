@@ -13,6 +13,9 @@ import QRCode from "qrcode";
 import WebSocket from "ws";
 import { animals, colors, uniqueNamesGenerator } from "unique-names-generator";
 import {
+  AppPresenceUpsertRequestSchema,
+  AppPresenceUpsertResponseSchema,
+  type AppPresenceState,
   AuthLogoutRequestSchema,
   AuthRefreshRequestSchema,
   AuthRefreshResponseSchema,
@@ -85,12 +88,15 @@ const EXPO_PUSH_RECEIPT_RETRY_DELAY_MS = 8_000;
 const EXPO_PUSH_RECEIPT_MAX_ATTEMPTS = 3;
 const EXPO_PUSH_TOKEN_PATTERN = /^ExponentPushToken\[[A-Za-z0-9+\-_=]+\]$/;
 const COMPLETION_FALLBACK_DUP_WINDOW_MS = 2_000;
+const APP_PRESENCE_HEARTBEAT_INTERVAL_MS = 30_000;
+const APP_PRESENCE_ACTIVE_TTL_MS = 75_000;
 
 const codex = new CodexRpcClient(codexWsUrl, GATEWAY_NAME, GATEWAY_VERSION);
 let managedCodexProcess: ChildProcess | null = null;
 let sleepInhibitorProcess: ChildProcess | null = null;
 
 let cachedDetectedBaseUrl: string | null = null;
+const appPresenceByDeviceId = new Map<string, AppPresenceRecord>();
 
 interface AccessTokenPayload {
   typ: "access";
@@ -135,6 +141,11 @@ interface ExpoPushReceiptsResponse {
 interface PendingExpoPushReceipt {
   id: string;
   token: string;
+}
+
+interface AppPresenceRecord {
+  state: AppPresenceState;
+  updatedAt: number;
 }
 
 function sanitizeBaseUrl(value: string): string {
@@ -668,6 +679,35 @@ function safeJsonStringify(value: unknown): string {
   }
 }
 
+function recordAppPresence(deviceId: string, state: AppPresenceState, now: number) {
+  appPresenceByDeviceId.set(deviceId, {
+    state,
+    updatedAt: now,
+  });
+  runtimeLogs.event("presence.app_state_updated", {
+    deviceId,
+    state,
+    updatedAt: now,
+    activeTtlMs: APP_PRESENCE_ACTIVE_TTL_MS,
+    heartbeatIntervalMs: APP_PRESENCE_HEARTBEAT_INTERVAL_MS,
+  });
+}
+
+function prunePresenceForDevice(deviceId: string) {
+  if (!appPresenceByDeviceId.delete(deviceId)) {
+    return;
+  }
+  runtimeLogs.event("presence.app_state_removed", { deviceId });
+}
+
+function isDeviceForeground(deviceId: string, now: number): boolean {
+  const entry = appPresenceByDeviceId.get(deviceId);
+  if (!entry || entry.state !== "active") {
+    return false;
+  }
+  return now - entry.updatedAt <= APP_PRESENCE_ACTIVE_TTL_MS;
+}
+
 function scheduleExpoPushReceiptCheck(threadId: string, receipts: PendingExpoPushReceipt[], attempt = 1) {
   if (receipts.length === 0) {
     return;
@@ -780,9 +820,28 @@ async function checkExpoPushReceipts(threadId: string, receipts: PendingExpoPush
 }
 
 async function sendCompletionPushNotification(threadId: string, turnId: string | null) {
-  const recipients = db.listPushTokensForActiveDevices().filter((entry) => isExpoPushToken(entry.token));
-  if (recipients.length === 0) {
+  const candidateRecipients = db.listPushTokensForActiveDevices().filter((entry) => isExpoPushToken(entry.token));
+  if (candidateRecipients.length === 0) {
     runtimeLogs.event("push.expo.skipped_no_recipients", { threadId });
+    return;
+  }
+
+  const now = Date.now();
+  let suppressedForegroundCount = 0;
+  const recipients = candidateRecipients.filter((entry) => {
+    if (!isDeviceForeground(entry.deviceId, now)) {
+      return true;
+    }
+    suppressedForegroundCount += 1;
+    return false;
+  });
+  if (recipients.length === 0) {
+    runtimeLogs.event("push.expo.skipped_all_recipients_foreground", {
+      threadId,
+      candidateRecipientCount: candidateRecipients.length,
+      suppressedForegroundCount,
+      activeTtlMs: APP_PRESENCE_ACTIVE_TTL_MS,
+    });
     return;
   }
 
@@ -885,6 +944,8 @@ async function sendCompletionPushNotification(threadId: string, turnId: string |
 
   runtimeLogs.event("push.expo.dispatch_complete", {
     threadId,
+    candidateRecipientCount: candidateRecipients.length,
+    suppressedForegroundCount,
     recipientCount: recipients.length,
     attemptedBatchCount,
     successfulBatchCount,
@@ -1933,6 +1994,7 @@ async function bootstrap() {
       db.revokeRefreshToken(parsedToken.id, Date.now());
       if (record) {
         db.deletePushTokensByDeviceId(record.deviceId);
+        prunePresenceForDevice(record.deviceId);
       }
     }
 
@@ -1948,6 +2010,21 @@ async function bootstrap() {
 
   app.get("/devices/active", { preHandler: [requireAuth] }, async (_request, reply) => {
     return reply.send({ devices: db.listActiveDevices().map((device) => withMemorableDeviceName(device)) });
+  });
+
+  app.post("/presence/app-state", { preHandler: [requireAuth] }, async (request, reply) => {
+    const parsedBody = AppPresenceUpsertRequestSchema.safeParse(request.body ?? {});
+    if (!parsedBody.success) {
+      return reply.code(400).send({ error: parsedBody.error.flatten() });
+    }
+    if (!request.auth?.deviceId) {
+      return reply.code(401).send({ error: "Invalid access token" });
+    }
+
+    recordAppPresence(request.auth.deviceId, parsedBody.data.state, Date.now());
+
+    const payload = AppPresenceUpsertResponseSchema.parse({ ok: true });
+    return reply.send(payload);
   });
 
   app.post("/notifications/push-token", { preHandler: [requireAuth] }, async (request, reply) => {
@@ -1988,6 +2065,7 @@ async function bootstrap() {
     db.revokeRefreshToken(params.id, Date.now());
     if (record) {
       db.deletePushTokensByDeviceId(record.deviceId);
+      prunePresenceForDevice(record.deviceId);
     }
     return reply.send({ ok: true });
   });
