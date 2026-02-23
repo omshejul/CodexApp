@@ -175,12 +175,15 @@ final class CodexGatewayAppDelegate: NSObject, NSApplicationDelegate {
   let manager = GatewayManager()
   private var statusItemController: StatusItemController?
   private var settingsWindowController: SettingsWindowController?
+  private let menuIconBundleNames = [
+    "CodexGateway_CodexGateway",
+    "CodexGatewayMenu_CodexGatewayMenu",
+  ]
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     manager.bootstrap()
     settingsWindowController = SettingsWindowController(manager: manager)
-    let menuIcon = Bundle.module.url(forResource: "MenuBarIcon", withExtension: "png")
-      .flatMap { NSImage(contentsOf: $0) }
+    let menuIcon = loadMenuIcon()
     statusItemController = StatusItemController(
       manager: manager,
       menuIcon: menuIcon,
@@ -193,6 +196,43 @@ final class CodexGatewayAppDelegate: NSObject, NSApplicationDelegate {
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
     statusItemController?.showPopover()
     return true
+  }
+
+  private func loadMenuIcon() -> NSImage? {
+    let directCandidates = [
+      Bundle.main.url(forResource: "MenuBarIcon", withExtension: "png"),
+      Bundle.main.resourceURL?.appendingPathComponent("MenuBarIcon.png"),
+    ]
+
+    for candidate in directCandidates {
+      guard let candidate, let image = NSImage(contentsOf: candidate) else { continue }
+      return image
+    }
+
+    for bundleName in menuIconBundleNames {
+      guard let bundleURL = Bundle.main.url(forResource: bundleName, withExtension: "bundle") else {
+        continue
+      }
+
+      if let bundle = Bundle(url: bundleURL),
+         let iconURL = bundle.url(forResource: "MenuBarIcon", withExtension: "png"),
+         let image = NSImage(contentsOf: iconURL) {
+        return image
+      }
+
+      let legacyCandidates = [
+        bundleURL.appendingPathComponent("MenuBarIcon.png"),
+        bundleURL.appendingPathComponent("Contents/Resources/MenuBarIcon.png"),
+      ]
+      for candidate in legacyCandidates {
+        if let image = NSImage(contentsOf: candidate) {
+          return image
+        }
+      }
+    }
+
+    NSLog("CodexGateway: MenuBarIcon not found. Falling back to system symbol.")
+    return nil
   }
 }
 

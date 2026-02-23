@@ -13,6 +13,7 @@ DMG_RW_PATH="$OUT_DIR/$APP_NAME-rw.dmg"
 DMG_VOLUME_NAME="$APP_NAME Installer"
 EXECUTABLE="$BUILD_DIR/$APP_NAME"
 ICON_SRC="$ROOT_DIR/Resources/AppIcon.icns"
+MENU_ICON_SRC="$ROOT_DIR/Resources/MenuBarIcon.png"
 STAGE_DIR="$ROOT_DIR/.staging"
 DMG_STAGE="$STAGE_DIR/dmg-root"
 GATEWAY_STAGE="$STAGE_DIR/GatewayRuntime"
@@ -88,6 +89,61 @@ run_bundled_npm() {
   local cwd="$1"
   shift
   (cd "$cwd" && "$NODE_STAGE/bin/node" "$NODE_STAGE/$NPM_CLI_REL" "$@")
+}
+
+normalize_resource_bundle() {
+  local bundle_path="$1"
+  local bundle_name
+  local bundle_base
+  local bundle_id_suffix
+  local contents_dir
+  local resources_dir
+  local root_info
+  local contents_info
+
+  bundle_name="$(basename "$bundle_path")"
+  bundle_base="${bundle_name%.bundle}"
+  bundle_id_suffix="$(printf '%s' "$bundle_base" | tr -c 'A-Za-z0-9.-' '-')"
+  contents_dir="$bundle_path/Contents"
+  resources_dir="$contents_dir/Resources"
+  root_info="$bundle_path/Info.plist"
+  contents_info="$contents_dir/Info.plist"
+
+  mkdir -p "$resources_dir"
+
+  if [ -f "$root_info" ] && [ ! -f "$contents_info" ]; then
+    mv "$root_info" "$contents_info"
+  fi
+
+  while IFS= read -r entry; do
+    local entry_name
+    entry_name="$(basename "$entry")"
+    if [ "$entry_name" = "Contents" ]; then
+      continue
+    fi
+    mv "$entry" "$resources_dir/"
+  done < <(find "$bundle_path" -mindepth 1 -maxdepth 1)
+
+  if [ ! -f "$contents_info" ]; then
+    cat > "$contents_info" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.codex.gateway.resources.${bundle_id_suffix}</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>${bundle_base}</string>
+  <key>CFBundlePackageType</key>
+  <string>BNDL</string>
+</dict>
+</plist>
+PLIST
+  fi
 }
 
 echo "==> Building shared + gateway with Node toolchain"
@@ -170,10 +226,15 @@ chmod +x "$APP_DIR/Contents/MacOS/$APP_NAME"
 if [ -f "$ICON_SRC" ]; then
   cp "$ICON_SRC" "$APP_DIR/Contents/Resources/AppIcon.icns"
 fi
+if [ -f "$MENU_ICON_SRC" ]; then
+  cp "$MENU_ICON_SRC" "$APP_DIR/Contents/Resources/MenuBarIcon.png"
+fi
 
 for bundle in "$BUILD_DIR"/*.bundle; do
   if [ -d "$bundle" ]; then
-    cp -R "$bundle" "$APP_DIR/Contents/Resources/"
+    bundle_dest="$APP_DIR/Contents/Resources/$(basename "$bundle")"
+    cp -R "$bundle" "$bundle_dest"
+    normalize_resource_bundle "$bundle_dest"
   fi
 done
 
