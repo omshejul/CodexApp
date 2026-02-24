@@ -91,6 +91,7 @@ const EXPO_PUSH_RECEIPT_RETRY_DELAY_MS = 8_000;
 const EXPO_PUSH_RECEIPT_MAX_ATTEMPTS = 3;
 const EXPO_PUSH_TOKEN_PATTERN = /^ExponentPushToken\[[A-Za-z0-9+\-_=]+\]$/;
 const COMPLETION_FALLBACK_DUP_WINDOW_MS = 2_000;
+const TURN_INITIATOR_CACHE_SIZE = 5_000;
 const APP_PRESENCE_HEARTBEAT_INTERVAL_MS = 30_000;
 const APP_PRESENCE_ACTIVE_TTL_MS = 75_000;
 const APP_PRESENCE_CODEX_HEALTH_CHECK_INTERVAL_MS = 20_000;
@@ -853,10 +854,16 @@ async function checkExpoPushReceipts(threadId: string, receipts: PendingExpoPush
   }
 }
 
-async function sendCompletionPushNotification(threadId: string, turnId: string | null) {
-  const candidateRecipients = db.listPushTokensForActiveDevices().filter((entry) => isExpoPushToken(entry.token));
+async function sendCompletionPushNotification(threadId: string, turnId: string | null, targetDeviceId: string | null = null) {
+  const candidateRecipients = db
+    .listPushTokensForActiveDevices()
+    .filter((entry) => isExpoPushToken(entry.token))
+    .filter((entry) => (targetDeviceId ? entry.deviceId === targetDeviceId : true));
   if (candidateRecipients.length === 0) {
-    runtimeLogs.event("push.expo.skipped_no_recipients", { threadId });
+    runtimeLogs.event("push.expo.skipped_no_recipients", {
+      threadId,
+      targetDeviceId: targetDeviceId ?? undefined,
+    });
     return;
   }
 
@@ -872,6 +879,7 @@ async function sendCompletionPushNotification(threadId: string, turnId: string |
   if (recipients.length === 0) {
     runtimeLogs.event("push.expo.skipped_all_recipients_foreground", {
       threadId,
+      targetDeviceId: targetDeviceId ?? undefined,
       candidateRecipientCount: candidateRecipients.length,
       suppressedForegroundCount,
       activeTtlMs: APP_PRESENCE_ACTIVE_TTL_MS,
@@ -978,6 +986,7 @@ async function sendCompletionPushNotification(threadId: string, turnId: string |
 
   runtimeLogs.event("push.expo.dispatch_complete", {
     threadId,
+    targetDeviceId: targetDeviceId ?? undefined,
     candidateRecipientCount: candidateRecipients.length,
     suppressedForegroundCount,
     recipientCount: recipients.length,
@@ -1651,6 +1660,9 @@ const app = Fastify({
 async function bootstrap() {
   runtimeLogs.event("gateway.bootstrap.start", { host, port, codexWsUrl, eventsLogPath, errorsLogPath });
   const activeTurnIdByThread = new Map<string, string>();
+  const turnInitiatorDeviceByThread = new Map<string, string>();
+  const turnInitiatorDeviceByTurnKey = new Map<string, string>();
+  const turnInitiatorTurnKeyOrder: string[] = [];
   const notifiedCompletionTurnKeys: string[] = [];
   const notifiedCompletionTurnSet = new Set<string>();
   const recentCompletionFallbackByThread = new Map<string, { fingerprint: string; seenAt: number }>();
@@ -1681,6 +1693,35 @@ async function bootstrap() {
     createdAt: new Date(request.createdAt).toISOString(),
     expiresAt: new Date(request.expiresAt).toISOString(),
   });
+
+  const rememberTurnInitiatorDevice = (threadId: string, deviceId: string, turnId: string | null) => {
+    turnInitiatorDeviceByThread.set(threadId, deviceId);
+    if (!turnId) {
+      return;
+    }
+
+    const turnKey = `${threadId}:${turnId}`;
+    if (!turnInitiatorDeviceByTurnKey.has(turnKey)) {
+      turnInitiatorTurnKeyOrder.push(turnKey);
+      if (turnInitiatorTurnKeyOrder.length > TURN_INITIATOR_CACHE_SIZE) {
+        const removed = turnInitiatorTurnKeyOrder.shift();
+        if (removed) {
+          turnInitiatorDeviceByTurnKey.delete(removed);
+        }
+      }
+    }
+    turnInitiatorDeviceByTurnKey.set(turnKey, deviceId);
+  };
+
+  const resolveTurnInitiatorDevice = (threadId: string, turnId: string | null): string | null => {
+    if (turnId) {
+      const byTurn = turnInitiatorDeviceByTurnKey.get(`${threadId}:${turnId}`);
+      if (byTurn) {
+        return byTurn;
+      }
+    }
+    return turnInitiatorDeviceByThread.get(threadId) ?? null;
+  };
 
   const subscribeGatewayThread = (threadId: string, listener: ThreadStreamListener): (() => void) => {
     const listeners = gatewayThreadListeners.get(threadId) ?? new Set<ThreadStreamListener>();
@@ -1912,14 +1953,19 @@ async function bootstrap() {
     const lowerMethod = method.toLowerCase();
     const threadId = extractThreadIdFromParams(params);
     const turnId = extractTurnIdFromParams(params);
+    const resolvedTurnId = threadId ? turnId ?? activeTurnIdByThread.get(threadId) ?? null : null;
     if (threadId && turnId && lowerMethod === "turn/started") {
       activeTurnIdByThread.set(threadId, turnId);
+      const initiatingDeviceId = turnInitiatorDeviceByThread.get(threadId);
+      if (initiatingDeviceId) {
+        rememberTurnInitiatorDevice(threadId, initiatingDeviceId, turnId);
+      }
     }
     if (threadId) {
       try {
         db.insertThreadEvent(
           threadId,
-          turnId ?? activeTurnIdByThread.get(threadId) ?? null,
+          resolvedTurnId,
           method,
           JSON.stringify(params ?? null),
           Date.now()
@@ -1930,7 +1976,6 @@ async function bootstrap() {
     }
 
     if (threadId && lowerMethod === "turn/completed") {
-      const resolvedTurnId = turnId ?? activeTurnIdByThread.get(threadId) ?? null;
       let shouldNotify = false;
       if (resolvedTurnId) {
         const dedupeKey = `${threadId}:${resolvedTurnId}`;
@@ -1965,12 +2010,14 @@ async function bootstrap() {
       }
 
       if (shouldNotify) {
-        void sendCompletionPushNotification(threadId, resolvedTurnId);
+        const targetDeviceId = resolveTurnInitiatorDevice(threadId, resolvedTurnId);
+        void sendCompletionPushNotification(threadId, resolvedTurnId, targetDeviceId);
       }
     }
 
     if (threadId && (lowerMethod === "turn/completed" || lowerMethod === "turn/failed" || lowerMethod === "turn/cancelled")) {
       activeTurnIdByThread.delete(threadId);
+      turnInitiatorDeviceByThread.delete(threadId);
     }
 
     const update = parseThreadNameUpdate(method, params);
@@ -2696,6 +2743,10 @@ async function bootstrap() {
     if (!parsedBody.success) {
       return reply.code(400).send({ error: parsedBody.error.flatten() });
     }
+    if (!request.auth?.deviceId) {
+      return reply.code(401).send({ error: "Invalid access token" });
+    }
+    const requestDeviceId = request.auth.deviceId;
 
     const trimmedText = typeof parsedBody.data.text === "string" ? parsedBody.data.text.trim() : "";
     const imageInputs = (parsedBody.data.images ?? [])
@@ -2734,11 +2785,28 @@ async function bootstrap() {
       };
     }
 
-    const result = await codex.call("turn/start", turnStartParams);
+    const shouldTrackByThread = !activeTurnIdByThread.has(params.id);
+    if (shouldTrackByThread) {
+      rememberTurnInitiatorDevice(params.id, requestDeviceId, null);
+    }
+    let result: unknown;
+    try {
+      result = await codex.call("turn/start", turnStartParams);
+    } catch (error) {
+      if (
+        shouldTrackByThread &&
+        turnInitiatorDeviceByThread.get(params.id) === requestDeviceId &&
+        !activeTurnIdByThread.has(params.id)
+      ) {
+        turnInitiatorDeviceByThread.delete(params.id);
+      }
+      throw error;
+    }
 
     const turnId = extractTurnIdFromParams(result) ?? undefined;
     if (turnId) {
       activeTurnIdByThread.set(params.id, turnId);
+      rememberTurnInitiatorDevice(params.id, requestDeviceId, turnId);
     }
 
     const payload = ThreadMessageResponseSchema.parse({
