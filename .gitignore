@@ -25,3 +25,4 @@ app/ios
 app/android
 .artifacts
 docs/APP_SERVER_IMPLEMENTATION_PRIORITIES.md
+.vscode/settings.json

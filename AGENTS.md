@@ -58,6 +58,7 @@ NOTARYTOOL_PROFILE="codex-gateway"
 - Keep commits focused and small.
 - Include only files related to the requested change.
 - Run the narrowest verification that proves the change works.
+- When doing a release, ensure the release/tag points to the latest intended source commit (commit/push code updates before creating or updating the GitHub release).
 
 ## Expo App Versioning
 
@@ -67,6 +68,7 @@ NOTARYTOOL_PROFILE="codex-gateway"
   - Minor (`x.Y.z`) for new backward-compatible features.
   - Major (`X.y.z`) for breaking or compatibility-impacting changes.
 - Keep `app/package.json` `version` aligned with `app/app.json` `expo.version`.
+ - Only update the `expo.version` and `app/package.json` `version` fields when preparing a release; do not change them for routine development commits.
 
 ## Run/Restart Guidance
 
