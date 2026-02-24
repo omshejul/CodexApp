@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { Pressable, Text, View } from "react-native";
+import { useMemo, useRef, useState } from "react";
+import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { CameraView, BarcodeScanningResult, useCameraPermissions } from "expo-camera";
 import { router } from "expo-router";
 import { MotiView } from "moti";
@@ -13,14 +13,16 @@ export default function PairScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const scanInFlightRef = useRef(false);
 
   const canScan = useMemo(() => !!permission?.granted && !busy, [permission?.granted, busy]);
 
   const onScan = async (result: BarcodeScanningResult) => {
-    if (!canScan) {
+    if (!canScan || scanInFlightRef.current) {
       return;
     }
 
+    scanInFlightRef.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -40,10 +42,12 @@ export default function PairScreen() {
       const message = scanError instanceof Error ? scanError.message : "Unable to pair device.";
       setError(message);
       setBusy(false);
+      scanInFlightRef.current = false;
       return;
     }
 
     setBusy(false);
+    scanInFlightRef.current = false;
   };
 
   return (
@@ -60,14 +64,20 @@ export default function PairScreen() {
         </Text>
 
         {permission?.granted ? (
-          <View className="mt-5 overflow-hidden rounded-2xl border border-border/50 bg-card">
+          <View className="relative mt-5 overflow-hidden rounded-2xl border border-border/50 bg-card">
             <CameraView
               style={{ width: "100%", height: 420 }}
-              onBarcodeScanned={onScan}
+              onBarcodeScanned={busy ? undefined : onScan}
               barcodeScannerSettings={{
                 barcodeTypes: ["qr"],
               }}
             />
+            {busy ? (
+              <View className="absolute inset-0 items-center justify-center bg-background/60">
+                <ActivityIndicator size="large" />
+                <Text className="mt-3 text-sm font-medium text-foreground">Pairing device...</Text>
+              </View>
+            ) : null}
           </View>
         ) : (
           <View className="mt-5 rounded-2xl bg-muted p-4">
