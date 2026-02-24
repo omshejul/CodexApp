@@ -1628,6 +1628,10 @@ export default function ThreadScreen() {
   const [streamingPlan, setStreamingPlan] = useState("");
   const [streamingFileChanges, setStreamingFileChanges] = useState("");
   const [streamingToolProgress, setStreamingToolProgress] = useState("");
+  // Typewriter display state: trails behind streamingAssistant, advanced smoothly at ~60fps.
+  // The Markdown component reads this, so it re-parses at the display rate rather than at
+  // the token-arrival rate, giving continuous smooth text reveal.
+  const [displayedStreamingAssistant, setDisplayedStreamingAssistant] = useState("");
   const [isThinking, setIsThinking] = useState(false);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [selectedReasoning, setSelectedReasoning] = useState<ReasoningEffort | null>(null);
@@ -1665,6 +1669,18 @@ export default function ThreadScreen() {
   const streamSocketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptRef = useRef(0);
+
+  // Pending delta chunks that have not yet been flushed into state.
+  // Writing to a ref on every incoming token avoids a re-render per token;
+  // a 50 ms interval drains them in batches (~20 renders/sec instead of hundreds).
+  const streamingAssistantBufRef = useRef("");
+  // Latest full accumulated text - read by the 16ms typewriter interval without a dep.
+  const streamingAssistantSourceRef = useRef("");
+  const streamingTerminalOutputBufRef = useRef("");
+  const streamingReasoningBufRef = useRef("");
+  const streamingPlanBufRef = useRef("");
+  const streamingFileChangesBufRef = useRef("");
+  const streamingToolProgressBufRef = useRef("");
   const liveIndicatorHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const optionsRefreshPromiseRef = useRef<Promise<void> | null>(null);
   const selectedModelRef = useRef<string | null>(null);
@@ -1683,6 +1699,64 @@ export default function ThreadScreen() {
   const makeClientTurnId = useCallback((prefix: string): string => {
     clientTurnIdRef.current += 1;
     return `${prefix}-${Date.now()}-${clientTurnIdRef.current}`;
+  }, []);
+
+  // Drain the 6 delta-buffer refs into their matching state values every 50 ms.
+  // This batches hundreds of per-token setState calls down to ~20 renders/sec,
+  // which removes the micro-render jank without any visible latency increase.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (streamingAssistantBufRef.current) {
+        const chunk = streamingAssistantBufRef.current;
+        streamingAssistantBufRef.current = "";
+        setStreamingAssistant((prev) => {
+          const next = prev + chunk;
+          streamingAssistantSourceRef.current = next;
+          return next;
+        });
+      }
+      if (streamingTerminalOutputBufRef.current) {
+        const chunk = streamingTerminalOutputBufRef.current;
+        streamingTerminalOutputBufRef.current = "";
+        setStreamingTerminalOutput((prev) => prev + chunk);
+      }
+      if (streamingReasoningBufRef.current) {
+        const chunk = streamingReasoningBufRef.current;
+        streamingReasoningBufRef.current = "";
+        setStreamingReasoning((prev) => prev + chunk);
+      }
+      if (streamingPlanBufRef.current) {
+        const chunk = streamingPlanBufRef.current;
+        streamingPlanBufRef.current = "";
+        setStreamingPlan((prev) => prev + chunk);
+      }
+      if (streamingFileChangesBufRef.current) {
+        const chunk = streamingFileChangesBufRef.current;
+        streamingFileChangesBufRef.current = "";
+        setStreamingFileChanges((prev) => prev + chunk);
+      }
+      if (streamingToolProgressBufRef.current) {
+        const chunk = streamingToolProgressBufRef.current;
+        streamingToolProgressBufRef.current = "";
+        setStreamingToolProgress((prev) => prev + chunk);
+      }
+    }, 50);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Typewriter display interval: advances displayedStreamingAssistant ~4 chars per frame
+  // at 60fps. This smooths out bursty 50ms token batches into continuous character-by-
+  // character reveal so Markdown never re-parses a big chunk all at once.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const source = streamingAssistantSourceRef.current;
+      setDisplayedStreamingAssistant((displayed) => {
+        if (source === "") return "";
+        if (displayed.length >= source.length) return displayed;
+        return source.slice(0, displayed.length + 4);
+      });
+    }, 16);
+    return () => clearInterval(interval);
   }, []);
 
   const activeMention = useMemo(
@@ -1934,16 +2008,24 @@ export default function ThreadScreen() {
   }, [refreshGatewayOptionsIfNeeded]);
 
   const flushStreamingAssistant = useCallback(() => {
+    const buffered = streamingAssistantBufRef.current;
+    streamingAssistantBufRef.current = "";
+    streamingAssistantSourceRef.current = "";
     setStreamingAssistant((current) => {
-      if (!current.trim()) {
+      const full = current + buffered;
+      if (!full.trim()) {
+        setDisplayedStreamingAssistant("");
         return "";
       }
+      // Snap display to the complete text before the footer disappears so there is
+      // no flash between the live footer and the committed Markdown turn in the list.
+      setDisplayedStreamingAssistant(full);
       setTurns((existing) => [
         ...existing,
         {
           id: makeClientTurnId("assistant"),
           role: "assistant",
-          text: current,
+          text: full,
         },
       ]);
       return "";
@@ -1951,9 +2033,11 @@ export default function ThreadScreen() {
   }, [makeClientTurnId]);
 
   const flushStreamingTerminalOutput = useCallback(() => {
+    const buffered = streamingTerminalOutputBufRef.current;
+    streamingTerminalOutputBufRef.current = "";
     setStreamingTerminalOutput((current) => {
-      const normalized = current.trim();
-      if (!normalized) {
+      const full = current + buffered;
+      if (!full.trim()) {
         return "";
       }
       setTurns((existing) => [
@@ -1965,7 +2049,7 @@ export default function ThreadScreen() {
           kind: "activity",
           activity: {
             title: "Terminal output",
-            detail: current,
+            detail: full,
           },
         },
       ]);
@@ -1974,9 +2058,11 @@ export default function ThreadScreen() {
   }, [makeClientTurnId]);
 
   const flushStreamingReasoning = useCallback(() => {
+    const buffered = streamingReasoningBufRef.current;
+    streamingReasoningBufRef.current = "";
     setStreamingReasoning((current) => {
-      const normalized = current.trim();
-      if (!normalized) {
+      const full = current + buffered;
+      if (!full.trim()) {
         return "";
       }
       setTurns((existing) => [
@@ -1988,7 +2074,7 @@ export default function ThreadScreen() {
           kind: "activity",
           activity: {
             title: "Reasoning",
-            detail: current,
+            detail: full,
           },
         },
       ]);
@@ -1997,9 +2083,11 @@ export default function ThreadScreen() {
   }, [makeClientTurnId]);
 
   const flushStreamingPlan = useCallback(() => {
+    const buffered = streamingPlanBufRef.current;
+    streamingPlanBufRef.current = "";
     setStreamingPlan((current) => {
-      const normalized = current.trim();
-      if (!normalized) {
+      const full = current + buffered;
+      if (!full.trim()) {
         return "";
       }
       setTurns((existing) => [
@@ -2011,7 +2099,7 @@ export default function ThreadScreen() {
           kind: "activity",
           activity: {
             title: "Plan",
-            detail: current,
+            detail: full,
           },
         },
       ]);
@@ -2020,9 +2108,11 @@ export default function ThreadScreen() {
   }, [makeClientTurnId]);
 
   const flushStreamingFileChanges = useCallback(() => {
+    const buffered = streamingFileChangesBufRef.current;
+    streamingFileChangesBufRef.current = "";
     setStreamingFileChanges((current) => {
-      const normalized = current.trim();
-      if (!normalized) {
+      const full = current + buffered;
+      if (!full.trim()) {
         return "";
       }
       setTurns((existing) => [
@@ -2034,7 +2124,7 @@ export default function ThreadScreen() {
           kind: "activity",
           activity: {
             title: "File changes",
-            detail: current,
+            detail: full,
           },
         },
       ]);
@@ -2043,9 +2133,11 @@ export default function ThreadScreen() {
   }, [makeClientTurnId]);
 
   const flushStreamingToolProgress = useCallback(() => {
+    const buffered = streamingToolProgressBufRef.current;
+    streamingToolProgressBufRef.current = "";
     setStreamingToolProgress((current) => {
-      const normalized = current.trim();
-      if (!normalized) {
+      const full = current + buffered;
+      if (!full.trim()) {
         return "";
       }
       setTurns((existing) => [
@@ -2057,7 +2149,7 @@ export default function ThreadScreen() {
           kind: "activity",
           activity: {
             title: "Tool progress",
-            detail: current,
+            detail: full,
           },
         },
       ]);
@@ -2081,6 +2173,14 @@ export default function ThreadScreen() {
     setStreamingPlan("");
     setStreamingFileChanges("");
     setStreamingToolProgress("");
+    setDisplayedStreamingAssistant("");
+    streamingAssistantBufRef.current = "";
+    streamingTerminalOutputBufRef.current = "";
+    streamingReasoningBufRef.current = "";
+    streamingPlanBufRef.current = "";
+    streamingFileChangesBufRef.current = "";
+    streamingToolProgressBufRef.current = "";
+    streamingAssistantSourceRef.current = "";
     setIsThinking(false);
     setActiveTurnId(null);
     setHeaderTitle("Chat");
@@ -2225,7 +2325,7 @@ export default function ThreadScreen() {
           if (method.includes("commandexecution/outputdelta")) {
             const delta = extractDeltaText(payload.params);
             if (delta) {
-              setStreamingTerminalOutput((existing) => `${existing}${delta}`);
+              streamingTerminalOutputBufRef.current += delta;
             }
             return;
           }
@@ -2237,7 +2337,7 @@ export default function ThreadScreen() {
           ) {
             const chunk = extractReasoningText(payload.params);
             if (chunk) {
-              setStreamingReasoning((existing) => `${existing}${chunk}`);
+              streamingReasoningBufRef.current += chunk;
             }
             return;
           }
@@ -2248,7 +2348,7 @@ export default function ThreadScreen() {
               delta ||
               (payload.params && typeof payload.params === "object" ? JSON.stringify(payload.params, null, 2) : "");
             if (chunk) {
-              setStreamingPlan((existing) => `${existing}${chunk}`);
+              streamingPlanBufRef.current += chunk;
             }
             return;
           }
@@ -2259,7 +2359,7 @@ export default function ThreadScreen() {
               delta ||
               (payload.params && typeof payload.params === "object" ? JSON.stringify(payload.params, null, 2) : "");
             if (chunk) {
-              setStreamingFileChanges((existing) => `${existing}${chunk}`);
+              streamingFileChangesBufRef.current += chunk;
             }
             return;
           }
@@ -2299,7 +2399,7 @@ export default function ThreadScreen() {
               delta ||
               (payload.params && typeof payload.params === "object" ? JSON.stringify(payload.params, null, 2) : "");
             if (chunk) {
-              setStreamingToolProgress((existing) => `${existing}${chunk}`);
+              streamingToolProgressBufRef.current += chunk;
             }
             return;
           }
@@ -2307,7 +2407,7 @@ export default function ThreadScreen() {
           if (method.includes("agentmessage/delta")) {
             const delta = extractDeltaText(payload.params);
             if (delta) {
-              setStreamingAssistant((existing) => `${existing}${delta}`);
+              streamingAssistantBufRef.current += delta;
             }
             return;
           }
@@ -2535,7 +2635,7 @@ export default function ThreadScreen() {
       }
     }, 40);
     return () => clearTimeout(timer);
-  }, [turns, streamingAssistant, streamingTerminalOutput, streamingReasoning, streamingPlan, streamingFileChanges, streamingToolProgress]);
+  }, [turns]);
 
   const onListScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
@@ -3074,94 +3174,6 @@ export default function ThreadScreen() {
   const showMentionSuggestions = Boolean(activeMention);
   const mentionSuggestions = mentionFiles.slice(0, 12);
 
-  const allTurns = [
-    ...turns,
-    ...(streamingAssistant
-      ? [
-          {
-            id: "live-assistant",
-            role: "assistant" as const,
-            text: streamingAssistant,
-            streaming: true,
-          },
-        ]
-      : []),
-    ...(streamingReasoning
-      ? [
-          {
-            id: "live-reasoning",
-            role: "system" as const,
-            text: "",
-            kind: "activity" as const,
-            activity: {
-              title: "Reasoning",
-              detail: streamingReasoning,
-            },
-            streaming: true,
-          },
-        ]
-      : []),
-    ...(streamingPlan
-      ? [
-          {
-            id: "live-plan",
-            role: "system" as const,
-            text: "",
-            kind: "activity" as const,
-            activity: {
-              title: "Plan",
-              detail: streamingPlan,
-            },
-            streaming: true,
-          },
-        ]
-      : []),
-    ...(streamingFileChanges
-      ? [
-          {
-            id: "live-filechanges",
-            role: "system" as const,
-            text: "",
-            kind: "activity" as const,
-            activity: {
-              title: "File changes",
-              detail: streamingFileChanges,
-            },
-            streaming: true,
-          },
-        ]
-      : []),
-    ...(streamingToolProgress
-      ? [
-          {
-            id: "live-toolprogress",
-            role: "system" as const,
-            text: "",
-            kind: "activity" as const,
-            activity: {
-              title: "Tool progress",
-              detail: streamingToolProgress,
-            },
-            streaming: true,
-          },
-        ]
-      : []),
-    ...(streamingTerminalOutput
-      ? [
-          {
-            id: "live-terminal",
-            role: "system" as const,
-            text: "",
-            kind: "activity" as const,
-            activity: {
-              title: "Terminal output",
-              detail: streamingTerminalOutput,
-            },
-            streaming: true,
-          },
-        ]
-      : []),
-  ];
 
   const copyGroupKeyForTurn = useCallback((turn: RenderedTurn) => `${turn.role}:${turn.turnId ?? turn.id}`, []);
 
@@ -3169,7 +3181,7 @@ export default function ThreadScreen() {
     const lastIndexByKey = new Map<string, number>();
     const textPartsByKey = new Map<string, string[]>();
 
-    allTurns.forEach((turn, idx) => {
+    turns.forEach((turn, idx) => {
       if (turn.role !== "user" && turn.role !== "assistant") {
         return;
       }
@@ -3193,12 +3205,12 @@ export default function ThreadScreen() {
     });
 
     return { lastIndexByKey, textByKey };
-  }, [allTurns, copyGroupKeyForTurn]);
+  }, [turns, copyGroupKeyForTurn]);
 
   const resolveWebSearchFallback = useCallback(
     (turnIndex: number): string | null => {
       for (let index = turnIndex - 1; index >= 0; index -= 1) {
-        const candidate = allTurns[index];
+        const candidate = turns[index];
         if (candidate.role !== "user") {
           continue;
         }
@@ -3209,7 +3221,7 @@ export default function ThreadScreen() {
       }
       return null;
     },
-    [allTurns]
+    [turns]
   );
 
   const diffLineToneClassName = (line: string): string => {
@@ -3351,8 +3363,10 @@ export default function ThreadScreen() {
 
         <FlatList
           ref={listRef}
-          data={allTurns}
+          data={turns}
           keyExtractor={(item) => item.id}
+          removeClippedSubviews
+          windowSize={10}
           className="flex-1"
           style={{ marginHorizontal: -16 }}
           contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 16 }}
@@ -3748,9 +3762,108 @@ export default function ThreadScreen() {
             )
           }
           ListFooterComponent={
-            <AnimatePresence>
-              {smoothIsThinking ? <ThinkingShinyPill key="thinking" /> : null}
-            </AnimatePresence>
+            <>
+              {streamingReasoning ? (
+                <MotiView
+                  from={{ opacity: 0, translateY: 6 }}
+                  animate={{ opacity: 1, translateY: 0 }}
+                  transition={{ type: "timing", duration: 160 }}
+                  className="mb-2 w-full items-start"
+                >
+                  <View className="w-full rounded-xl border border-border/20 bg-black/35 px-3 py-2">
+                    <Text className="mb-1 text-xs font-semibold uppercase tracking-[0.8px] text-muted-foreground">
+                      Reasoning
+                    </Text>
+                    <Text className="text-[12px] leading-5 text-foreground">
+                      {formatReasoningDetail(streamingReasoning)}
+                    </Text>
+                  </View>
+                </MotiView>
+              ) : null}
+              {streamingPlan ? (
+                <MotiView
+                  from={{ opacity: 0, translateY: 6 }}
+                  animate={{ opacity: 1, translateY: 0 }}
+                  transition={{ type: "timing", duration: 160 }}
+                  className="mb-2 w-full items-start"
+                >
+                  <View className="w-full rounded-xl border border-border/20 bg-black/35 px-3 py-2">
+                    <Text className="mb-1 text-xs font-semibold uppercase tracking-[0.8px] text-muted-foreground">
+                      Plan
+                    </Text>
+                    <Text className="text-[12px] leading-5 text-foreground">{streamingPlan}</Text>
+                  </View>
+                </MotiView>
+              ) : null}
+              {streamingFileChanges ? (
+                <MotiView
+                  from={{ opacity: 0, translateY: 6 }}
+                  animate={{ opacity: 1, translateY: 0 }}
+                  transition={{ type: "timing", duration: 160 }}
+                  className="mb-2 w-full items-start"
+                >
+                  <View className="w-full rounded-xl border border-border/20 bg-black/35 px-3 py-2">
+                    <Text className="mb-1 text-xs font-semibold uppercase tracking-[0.8px] text-muted-foreground">
+                      File changes
+                    </Text>
+                    <Text className="font-mono text-[12px] leading-5 text-foreground">
+                      {streamingFileChanges}
+                    </Text>
+                  </View>
+                </MotiView>
+              ) : null}
+              {streamingToolProgress ? (
+                <MotiView
+                  from={{ opacity: 0, translateY: 6 }}
+                  animate={{ opacity: 1, translateY: 0 }}
+                  transition={{ type: "timing", duration: 160 }}
+                  className="mb-2 w-full items-start"
+                >
+                  <View className="w-full rounded-xl border border-border/20 bg-black/35 px-3 py-2">
+                    <Text className="mb-1 text-xs font-semibold uppercase tracking-[0.8px] text-muted-foreground">
+                      Tool progress
+                    </Text>
+                    <Text className="text-[12px] leading-5 text-foreground">{streamingToolProgress}</Text>
+                  </View>
+                </MotiView>
+              ) : null}
+              {streamingTerminalOutput ? (
+                <MotiView
+                  from={{ opacity: 0, translateY: 6 }}
+                  animate={{ opacity: 1, translateY: 0 }}
+                  transition={{ type: "timing", duration: 160 }}
+                  className="mb-2 w-full items-start"
+                >
+                  <View className="w-full rounded-xl border border-border/20 bg-black/35 px-3 py-2">
+                    <Text className="mb-1 text-xs font-semibold uppercase tracking-[0.8px] text-muted-foreground">
+                      Terminal output
+                    </Text>
+                    <Text className="font-mono text-[12px] leading-5 text-foreground">
+                      {streamingTerminalOutput}
+                    </Text>
+                  </View>
+                </MotiView>
+              ) : null}
+              {streamingAssistant ? (
+                <MotiView
+                  from={{ opacity: 0, translateY: 6 }}
+                  animate={{ opacity: 1, translateY: 0 }}
+                  transition={{ type: "timing", duration: 160 }}
+                  className="mb-2 w-full items-start"
+                >
+                  <View className="w-full px-1 py-1">
+                    {sanitizeAssistantDisplayText(displayedStreamingAssistant).length > 0 ? (
+                      <Markdown style={markdownStyles} rules={selectableMarkdownRules}>
+                        {sanitizeAssistantDisplayText(displayedStreamingAssistant)}
+                      </Markdown>
+                    ) : null}
+                  </View>
+                </MotiView>
+              ) : null}
+              <AnimatePresence>
+                {smoothIsThinking ? <ThinkingShinyPill key="thinking" /> : null}
+              </AnimatePresence>
+            </>
           }
         />
 
