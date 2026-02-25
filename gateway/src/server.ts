@@ -1067,6 +1067,58 @@ function getWsBearerToken(request: IncomingMessage, parsedUrl: URL): string | nu
   return null;
 }
 
+function getRequestBearerToken(request: FastifyRequest): string | null {
+  const authHeader = request.headers.authorization;
+  if (typeof authHeader === "string" && authHeader.startsWith("Bearer ")) {
+    const token = authHeader.slice("Bearer ".length).trim();
+    if (token.length > 0) {
+      return token;
+    }
+  }
+
+  if (request.query && typeof request.query === "object") {
+    const queryRecord = request.query as Record<string, unknown>;
+    const queryToken =
+      (typeof queryRecord.access_token === "string" ? queryRecord.access_token : null) ??
+      (typeof queryRecord.token === "string" ? queryRecord.token : null);
+    if (queryToken && queryToken.trim().length > 0) {
+      return queryToken.trim();
+    }
+  }
+
+  return null;
+}
+
+function isPathWithinRoot(candidatePath: string, rootPath: string): boolean {
+  const relative = path.relative(rootPath, candidatePath);
+  return relative.length === 0 || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function inferImageContentType(filePath: string): string {
+  const extension = path.extname(filePath).toLowerCase();
+  switch (extension) {
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".gif":
+      return "image/gif";
+    case ".webp":
+      return "image/webp";
+    case ".bmp":
+      return "image/bmp";
+    case ".heic":
+      return "image/heic";
+    case ".heif":
+      return "image/heif";
+    case ".svg":
+      return "image/svg+xml";
+    default:
+      return "application/octet-stream";
+  }
+}
+
 function parseThreadNameUpdate(
   method: string,
   params: unknown
@@ -2569,6 +2621,42 @@ async function bootstrap() {
 
     const payload = ThreadFilesResponseSchema.parse({ cwd: primaryCwd, files });
     return reply.send(payload);
+  });
+
+  app.get("/threads/:id/local-image", async (request, reply) => {
+    const params = request.params as { id: string };
+    const query = request.query as { path?: string };
+    const token = getRequestBearerToken(request);
+    const auth = token ? verifyAccessToken(token) : null;
+    if (!auth) {
+      return reply.code(401).send({ error: "Invalid access token" });
+    }
+
+    const rawPath = typeof query.path === "string" ? query.path.trim() : "";
+    if (!rawPath) {
+      return reply.code(400).send({ error: "Missing path query param" });
+    }
+
+    const threadCwd = await resolveThreadCwd(params.id);
+    const resolvedPath = path.resolve(path.isAbsolute(rawPath) ? rawPath : path.join(threadCwd, rawPath));
+    if (!isPathWithinRoot(resolvedPath, threadCwd)) {
+      return reply.code(403).send({ error: "Path is outside thread workspace" });
+    }
+
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(resolvedPath);
+    } catch {
+      return reply.code(404).send({ error: "File not found" });
+    }
+
+    if (!stat.isFile()) {
+      return reply.code(400).send({ error: "Requested path is not a file" });
+    }
+
+    reply.header("Cache-Control", "private, max-age=60");
+    reply.type(inferImageContentType(resolvedPath));
+    return reply.send(fs.createReadStream(resolvedPath));
   });
 
   app.post("/threads", { preHandler: [requireAuth] }, async (request, reply) => {

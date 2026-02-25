@@ -68,6 +68,11 @@ interface PendingImage {
   imageUrl: string;
 }
 
+interface ThreadImageProxyConfig {
+  baseUrl: string;
+  accessToken: string;
+}
+
 interface ComposerSelection {
   start: number;
   end: number;
@@ -115,6 +120,15 @@ const INTERACTIVE_REQUEST_USER_INPUT_METHOD = "item/tool/requestuserinput";
 const STREAM_METHOD_INTERACTIVE_REQUESTED = "gateway/interactive/requested";
 const STREAM_METHOD_INTERACTIVE_RESPONDED = "gateway/interactive/responded";
 const STREAM_METHOD_INTERACTIVE_EXPIRED = "gateway/interactive/expired";
+const TERMINAL_TURN_METHODS = new Set(["turn/completed", "turn/failed", "turn/cancelled"]);
+
+interface ThreadComposerPreferences {
+  model: string | null;
+  reasoning: ReasoningEffort | null;
+  collaborationMode: CollaborationMode;
+}
+
+const threadComposerPreferencesByThreadId = new Map<string, ThreadComposerPreferences>();
 
 type OpenDropdown = "model" | "reasoning" | null;
 type StreamStatusTone = "ok" | "warn" | "error";
@@ -300,6 +314,51 @@ const userMarkdownStyles = {
   link: { color: "#93ccff" },
 };
 
+function isSupportedMarkdownImageUri(uri: string): boolean {
+  const normalized = uri.trim().toLowerCase();
+  return (
+    normalized.startsWith("https://") ||
+    normalized.startsWith("http://") ||
+    normalized.startsWith("data:image/") ||
+    normalized.startsWith("file://")
+  );
+}
+
+function rewriteLocalMarkdownImagePaths(
+  text: string,
+  threadId: string | null,
+  imageProxyConfig: ThreadImageProxyConfig | null
+): string {
+  if (!threadId || !imageProxyConfig) {
+    return text;
+  }
+
+  const replacementBase = `${imageProxyConfig.baseUrl}/threads/${encodeURIComponent(threadId)}/local-image`;
+  return text.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (match, altText, sourceUrl) => {
+    if (typeof sourceUrl !== "string") {
+      return match;
+    }
+
+    const normalizedSource = sourceUrl.trim();
+    if (!normalizedSource.startsWith("/")) {
+      return match;
+    }
+    if (
+      !normalizedSource.startsWith("/Users/") &&
+      !normalizedSource.startsWith("/private/") &&
+      !normalizedSource.startsWith("/var/")
+    ) {
+      return match;
+    }
+
+    const replacementUrl = `${replacementBase}?path=${encodeURIComponent(normalizedSource)}&access_token=${encodeURIComponent(
+      imageProxyConfig.accessToken
+    )}`;
+    const safeAltText = typeof altText === "string" ? altText : "";
+    return `![${safeAltText}](${replacementUrl})`;
+  });
+}
+
 const selectableMarkdownRules: RenderRules = {
   text: (node, _children, _parent, styles, inheritedStyles = {}) => (
     <Text key={node.key} selectable style={[inheritedStyles, styles.text]}>
@@ -393,6 +452,38 @@ const selectableMarkdownRules: RenderRules = {
       {children}
     </Text>
   ),
+  image: (node, _children, _parent, styles) => {
+    const src = typeof node.attributes?.src === "string" ? node.attributes.src.trim() : "";
+    const alt = typeof node.attributes?.alt === "string" ? node.attributes.alt.trim() : "Image";
+
+    if (!src) {
+      return null;
+    }
+
+    if (!isSupportedMarkdownImageUri(src)) {
+      return (
+        <Text key={node.key} selectable style={styles.link}>
+          {alt}
+        </Text>
+      );
+    }
+
+    return (
+      <Image
+        key={node.key}
+        source={{ uri: src }}
+        resizeMode="contain"
+        style={{
+          width: "100%",
+          height: 220,
+          borderRadius: 12,
+          marginTop: 4,
+          marginBottom: 10,
+          backgroundColor: "rgba(0,0,0,0.25)",
+        }}
+      />
+    );
+  },
 };
 
 function parseSsePayload(raw: string): CodexSseEvent | null {
@@ -1731,6 +1822,8 @@ interface CopyGroups {
 interface ThreadTurnRowProps {
   item: RenderedTurn;
   index: number;
+  threadId: string | null;
+  imageProxyConfig: ThreadImageProxyConfig | null;
   isLiveStreamingActive: boolean;
   suppressRowAnimations: boolean;
   wrappedDiffIds: Set<string>;
@@ -1754,6 +1847,8 @@ function areThreadTurnRowPropsEqual(previous: ThreadTurnRowProps, next: ThreadTu
   return (
     previous.item === next.item &&
     previous.index === next.index &&
+    previous.threadId === next.threadId &&
+    previous.imageProxyConfig === next.imageProxyConfig &&
     previous.isLiveStreamingActive === next.isLiveStreamingActive &&
     previous.suppressRowAnimations === next.suppressRowAnimations &&
     previous.wrappedDiffIds === next.wrappedDiffIds &&
@@ -1777,6 +1872,8 @@ function areThreadTurnRowPropsEqual(previous: ThreadTurnRowProps, next: ThreadTu
 const ThreadTurnRow = memo(function ThreadTurnRow({
   item,
   index,
+  threadId,
+  imageProxyConfig,
   isLiveStreamingActive,
   suppressRowAnimations,
   wrappedDiffIds,
@@ -1796,8 +1893,8 @@ const ThreadTurnRow = memo(function ThreadTurnRow({
   copyGroupKeyForTurn,
 }: ThreadTurnRowProps) {
   const assistantDisplayText = useMemo(
-    () => sanitizeAssistantDisplayText(item.text ?? ""),
-    [item.text]
+    () => rewriteLocalMarkdownImagePaths(sanitizeAssistantDisplayText(item.text ?? ""), threadId, imageProxyConfig),
+    [imageProxyConfig, item.text, threadId]
   );
 
   const diffLinesByDiffId = useMemo(() => {
@@ -2200,6 +2297,7 @@ export default function ThreadScreen() {
   const [requestErrorsById, setRequestErrorsById] = useState<Record<string, string>>({});
   const [requestSubmittingIds, setRequestSubmittingIds] = useState<Set<string>>(new Set());
   const [suppressRowAnimations, setSuppressRowAnimations] = useState(false);
+  const [imageProxyConfig, setImageProxyConfig] = useState<ThreadImageProxyConfig | null>(null);
 
   const streamSocketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2209,6 +2307,8 @@ export default function ThreadScreen() {
   const liveIndicatorHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const optionsRefreshPromiseRef = useRef<Promise<void> | null>(null);
   const selectedModelRef = useRef<string | null>(null);
+  const preferencesInitThreadIdRef = useRef<string | null>(null);
+  const preferencesInitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const composerInputRef = useRef<TextInput>(null);
   const listRef = useRef<FlatList<RenderedTurn>>(null);
   const followBottomRef = useRef(true);
@@ -2380,6 +2480,9 @@ export default function ThreadScreen() {
     if (selectedReasoning === null) {
       return;
     }
+    if (currentReasoningOptions.length === 0) {
+      return;
+    }
     const allowed = currentReasoningOptions.some((option) => option.value === selectedReasoning);
     if (!allowed) {
       setSelectedReasoning(null);
@@ -2388,6 +2491,9 @@ export default function ThreadScreen() {
 
   useEffect(() => {
     if (selectedModel === null) {
+      return;
+    }
+    if (modelOptions.length === 0) {
       return;
     }
     const allowed = modelOptions.some((option) => option.value === selectedModel);
@@ -2399,6 +2505,51 @@ export default function ThreadScreen() {
   useEffect(() => {
     selectedModelRef.current = selectedModel;
   }, [selectedModel]);
+
+  useEffect(() => {
+    if (preferencesInitTimerRef.current) {
+      clearTimeout(preferencesInitTimerRef.current);
+      preferencesInitTimerRef.current = null;
+    }
+
+    preferencesInitThreadIdRef.current = null;
+
+    if (!threadId) {
+      return;
+    }
+
+    const saved = threadComposerPreferencesByThreadId.get(threadId);
+    setSelectedModel(saved?.model ?? null);
+    setSelectedReasoning(saved?.reasoning ?? null);
+    setSelectedCollaborationMode(saved?.collaborationMode ?? "default");
+
+    preferencesInitTimerRef.current = setTimeout(() => {
+      preferencesInitThreadIdRef.current = threadId;
+      preferencesInitTimerRef.current = null;
+    }, 0);
+
+    return () => {
+      if (preferencesInitTimerRef.current) {
+        clearTimeout(preferencesInitTimerRef.current);
+        preferencesInitTimerRef.current = null;
+      }
+    };
+  }, [threadId]);
+
+  useEffect(() => {
+    if (!threadId) {
+      return;
+    }
+    if (preferencesInitThreadIdRef.current !== threadId) {
+      return;
+    }
+
+    threadComposerPreferencesByThreadId.set(threadId, {
+      model: selectedModel,
+      reasoning: selectedReasoning,
+      collaborationMode: selectedCollaborationMode,
+    });
+  }, [selectedCollaborationMode, selectedModel, selectedReasoning, threadId]);
 
   useEffect(() => {
     if (liveIndicatorHideTimerRef.current) {
@@ -2692,6 +2843,7 @@ export default function ThreadScreen() {
     setHeaderTitle("Chat");
     setHeaderPath(null);
     setTurns([]);
+    setImageProxyConfig(null);
     setExpandedActivityIds(new Set());
     setExpandedTerminalIds(new Set());
     setPendingRequestUserInputs([]);
@@ -2733,6 +2885,25 @@ export default function ThreadScreen() {
         if (!active) {
           return;
         }
+        let latestObservedTurnId: string | null = null;
+
+        try {
+          const parsedStreamUrl = new URL(stream.wsUrl);
+          const baseProtocol = parsedStreamUrl.protocol === "wss:" ? "https:" : "http:";
+          const nextProxyConfig: ThreadImageProxyConfig = {
+            baseUrl: `${baseProtocol}//${parsedStreamUrl.host}`,
+            accessToken: stream.token,
+          };
+          setImageProxyConfig((existing) =>
+            existing &&
+            existing.baseUrl === nextProxyConfig.baseUrl &&
+            existing.accessToken === nextProxyConfig.accessToken
+              ? existing
+              : nextProxyConfig
+          );
+        } catch {
+          setImageProxyConfig(null);
+        }
 
         streamSocketRef.current?.close();
         const socket = new WebSocket(stream.wsUrl);
@@ -2758,8 +2929,10 @@ export default function ThreadScreen() {
           }
 
           const method = payload.method.toLowerCase();
+          const isTerminalTurnMethod = TERMINAL_TURN_METHODS.has(method);
           const observedTurnId = extractTurnIdFromUnknown(payload.params);
-          if (observedTurnId && method !== "turn/completed" && method !== "turn/failed" && method !== "turn/cancelled") {
+          if (observedTurnId && !isTerminalTurnMethod) {
+            latestObservedTurnId = observedTurnId;
             setActiveTurnId(observedTurnId);
           }
 
@@ -2796,6 +2969,7 @@ export default function ThreadScreen() {
                   ? ((eventParams.turn as Record<string, unknown>).id as string)
                   : null);
               if (turnId) {
+                latestObservedTurnId = turnId;
                 setActiveTurnId(turnId);
               }
             }
@@ -2812,13 +2986,15 @@ export default function ThreadScreen() {
 
           const summary = extractChangeSummaryFromEvent(method, payload.params);
           if (summary) {
-            const key = changeSummarySignature(summary);
+            const summaryTurnId = observedTurnId ?? latestObservedTurnId;
+            const key = changeSummarySignature(summary, summaryTurnId ?? "");
             if (!seenChangeHashesRef.current.has(key)) {
               seenChangeHashesRef.current.add(key);
               enqueueBufferedStreamTurn({
                 id: makeClientTurnId("change"),
                 role: "system",
                 text: "",
+                turnId: summaryTurnId ?? undefined,
                 kind: "changeSummary",
                 summary,
               });
@@ -2912,16 +3088,19 @@ export default function ThreadScreen() {
           }
 
           if (method.includes("aborted") || method.includes("interrupt")) {
+            latestObservedTurnId = null;
             setIsThinking(false);
             setActiveTurnId(null);
             finalizeLiveSnapshotToTurns();
             return;
           }
 
-          if (method.includes("complete") || method.includes("done") || method.includes("turn/end")) {
+          if (isTerminalTurnMethod) {
+            latestObservedTurnId = null;
             setIsThinking(false);
             setActiveTurnId(null);
             finalizeLiveSnapshotToTurns();
+            return;
           }
         };
 
@@ -3090,10 +3269,6 @@ export default function ThreadScreen() {
           return;
         }
         setOptionsLoaded(false);
-        setModelOptions([]);
-        setReasoningOptionsByModel({});
-        setSelectedModel(null);
-        setSelectedReasoning(null);
       }
     };
 
@@ -3879,6 +4054,8 @@ export default function ThreadScreen() {
       <ThreadTurnRow
         item={item}
         index={index}
+        threadId={threadId ?? null}
+        imageProxyConfig={imageProxyConfig}
         isLiveStreamingActive={isLiveStreamingActive}
         suppressRowAnimations={suppressRowAnimations}
         wrappedDiffIds={wrappedDiffIds}
@@ -3900,6 +4077,8 @@ export default function ThreadScreen() {
     ),
     [
       isLiveStreamingActive,
+      threadId,
+      imageProxyConfig,
       suppressRowAnimations,
       wrappedDiffIds,
       wrapToast,
@@ -4084,11 +4263,16 @@ export default function ThreadScreen() {
                   ) : item.role === "assistant" ? (
                     (() => {
                       const footerAssistantText = sanitizeAssistantDisplayText(item.text ?? "");
+                      const footerDisplayText = rewriteLocalMarkdownImagePaths(
+                        footerAssistantText,
+                        threadId ?? null,
+                        imageProxyConfig
+                      );
                       return (
                         <View className="w-full px-1 py-1">
-                          {footerAssistantText.length > 0 ? (
+                          {footerDisplayText.length > 0 ? (
                             <Markdown style={markdownStyles} rules={selectableMarkdownRules}>
-                              {footerAssistantText}
+                              {footerDisplayText}
                             </Markdown>
                           ) : null}
                         </View>

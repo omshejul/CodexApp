@@ -2,7 +2,7 @@
   "expo": {
     "name": "Codex",
     "slug": "codex-phone",
-    "version": "0.2.4",
+    "version": "0.2.5",
     "orientation": "portrait",
     "scheme": "codex-phone",
     "icon": "./assets/icon.png",
