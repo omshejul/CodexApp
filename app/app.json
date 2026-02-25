@@ -2,7 +2,7 @@
   "expo": {
     "name": "Codex",
     "slug": "codex-phone",
-    "version": "0.2.5",
+    "version": "0.2.6",
     "orientation": "portrait",
     "scheme": "codex-phone",
     "icon": "./assets/icon.png",
@@ -34,7 +34,7 @@
       "package": "com.codex.phone",
       "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/icon.png",
+        "foregroundImage": "./assets/icon-android-foreground.png",
         "backgroundColor": "#020202"
       }
     },
