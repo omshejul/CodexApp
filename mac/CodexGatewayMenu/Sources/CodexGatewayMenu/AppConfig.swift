@@ -5,6 +5,7 @@ struct AppConfig: Codable, Equatable {
   var environment: [String: String]
   var pairURL: String
   var codexBinaryPath: String?
+  var tailscaleBinaryPath: String?
   var autoStart: Bool
 
   static let `default` = AppConfig(
@@ -14,6 +15,7 @@ struct AppConfig: Codable, Equatable {
     ],
     pairURL: "http://127.0.0.1:8787/pair",
     codexBinaryPath: nil,
+    tailscaleBinaryPath: nil,
     autoStart: true
   )
 
@@ -22,6 +24,7 @@ struct AppConfig: Codable, Equatable {
     case environment
     case pairURL
     case codexBinaryPath
+    case tailscaleBinaryPath
     case autoStart
 
     // Legacy keys kept for migration-only decode.
@@ -35,6 +38,7 @@ struct AppConfig: Codable, Equatable {
     environment: [String: String],
     pairURL: String,
     codexBinaryPath: String?,
+    tailscaleBinaryPath: String?,
     autoStart: Bool
   ) {
     let sanitizedPort = port > 0 ? port : 8787
@@ -46,6 +50,9 @@ struct AppConfig: Codable, Equatable {
     self.codexBinaryPath = codexBinaryPath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true
       ? nil
       : codexBinaryPath?.trimmingCharacters(in: .whitespacesAndNewlines)
+    self.tailscaleBinaryPath = tailscaleBinaryPath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true
+      ? nil
+      : tailscaleBinaryPath?.trimmingCharacters(in: .whitespacesAndNewlines)
     self.autoStart = autoStart
   }
 
@@ -56,6 +63,7 @@ struct AppConfig: Codable, Equatable {
     let decodedPairURL = try container.decodeIfPresent(String.self, forKey: .pairURL)
     let decodedAutoStart = try container.decodeIfPresent(Bool.self, forKey: .autoStart) ?? true
     let decodedCodexPath = try container.decodeIfPresent(String.self, forKey: .codexBinaryPath)
+    let decodedTailscalePath = try container.decodeIfPresent(String.self, forKey: .tailscaleBinaryPath)
 
     let explicitPort = try container.decodeIfPresent(Int.self, forKey: .port)
     let envPort = Int(decodedEnvironment["PORT"] ?? "")
@@ -66,6 +74,7 @@ struct AppConfig: Codable, Equatable {
       environment: decodedEnvironment,
       pairURL: decodedPairURL ?? "http://127.0.0.1:\(migratedPort)/pair",
       codexBinaryPath: decodedCodexPath,
+      tailscaleBinaryPath: decodedTailscalePath,
       autoStart: decodedAutoStart
     )
   }
@@ -76,6 +85,7 @@ struct AppConfig: Codable, Equatable {
     try container.encode(environment, forKey: .environment)
     try container.encode(pairURL, forKey: .pairURL)
     try container.encodeIfPresent(codexBinaryPath, forKey: .codexBinaryPath)
+    try container.encodeIfPresent(tailscaleBinaryPath, forKey: .tailscaleBinaryPath)
     try container.encode(autoStart, forKey: .autoStart)
   }
 }

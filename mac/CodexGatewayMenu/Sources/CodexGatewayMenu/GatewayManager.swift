@@ -477,7 +477,7 @@ final class GatewayManager: ObservableObject {
   private func diagnoseSetup(includeNetworkChecks: Bool) -> SetupDiagnostics {
     let port = configuredPort()
     let env = config.environment
-    let tailscalePath = resolveExecutablePath(for: "tailscale", environment: env)
+    let tailscalePath = resolvedTailscaleBinaryPath(environment: env)
     let tailscaleAuthenticated = includeNetworkChecks && tailscalePath != nil ? isTailscaleAuthenticated(environment: env) : false
     let serveConfigured = includeNetworkChecks && tailscalePath != nil ? isServeRouteConfigured(port: port, environment: env) : false
 
@@ -495,7 +495,7 @@ final class GatewayManager: ObservableObject {
   private func diagnoseSetupForStart() async -> SetupDiagnostics {
     let port = configuredPort()
     let env = config.environment
-    let tailscalePath = resolveExecutablePath(for: "tailscale", environment: env)
+    let tailscalePath = resolvedTailscaleBinaryPath(environment: env)
     let tailscaleAuthenticated = tailscalePath != nil ? await isTailscaleAuthenticatedAsync(environment: env) : false
 
     return SetupDiagnostics(
@@ -519,6 +519,7 @@ final class GatewayManager: ObservableObject {
       environment: normalizedEnvironment,
       pairURL: pairURL,
       codexBinaryPath: config.codexBinaryPath,
+      tailscaleBinaryPath: config.tailscaleBinaryPath,
       autoStart: config.autoStart
     )
   }
@@ -602,10 +603,20 @@ final class GatewayManager: ObservableObject {
     if let configured = config.codexBinaryPath?.trimmingCharacters(in: .whitespacesAndNewlines), !configured.isEmpty {
       return resolveExecutablePath(for: configured, environment: environment) ?? (FileManager.default.isExecutableFile(atPath: configured) ? configured : nil)
     }
-    if let envPath = config.environment["CODEX_APP_SERVER_BIN"]?.trimmingCharacters(in: .whitespacesAndNewlines), !envPath.isEmpty {
+    if let envPath = environment["CODEX_APP_SERVER_BIN"]?.trimmingCharacters(in: .whitespacesAndNewlines), !envPath.isEmpty {
       return resolveExecutablePath(for: envPath, environment: environment) ?? (FileManager.default.isExecutableFile(atPath: envPath) ? envPath : nil)
     }
     return resolveExecutablePath(for: "codex", environment: environment)
+  }
+
+  private func resolvedTailscaleBinaryPath(environment: [String: String]) -> String? {
+    if let configured = config.tailscaleBinaryPath?.trimmingCharacters(in: .whitespacesAndNewlines), !configured.isEmpty {
+      return resolveExecutablePath(for: configured, environment: environment) ?? (FileManager.default.isExecutableFile(atPath: configured) ? configured : nil)
+    }
+    if let envPath = environment["TAILSCALE_BIN"]?.trimmingCharacters(in: .whitespacesAndNewlines), !envPath.isEmpty {
+      return resolveExecutablePath(for: envPath, environment: environment) ?? (FileManager.default.isExecutableFile(atPath: envPath) ? envPath : nil)
+    }
+    return resolveExecutablePath(for: "tailscale", environment: environment)
   }
 
   private func buildRuntimePATH(existing: String?) -> String {
@@ -667,6 +678,20 @@ final class GatewayManager: ObservableObject {
     env["HOST"] = "127.0.0.1"
     env["PORT"] = "\(port)"
     env["PATH"] = buildRuntimePATH(existing: env["PATH"])
+
+    if let tailscalePath = resolvedTailscaleBinaryPath(environment: env) {
+      env["TAILSCALE_BIN"] = tailscalePath
+      let tailscaleDir = URL(fileURLWithPath: tailscalePath).deletingLastPathComponent().path
+      if !tailscaleDir.isEmpty {
+        var pathEntries = (env["PATH"] ?? "")
+          .split(separator: ":")
+          .map(String.init)
+        if !pathEntries.contains(tailscaleDir) {
+          pathEntries.insert(tailscaleDir, at: 0)
+          env["PATH"] = pathEntries.joined(separator: ":")
+        }
+      }
+    }
 
     let appSupport = appSupportDirectory()
     let logsDir = appSupport.appendingPathComponent("logs", isDirectory: true)
@@ -1237,7 +1262,7 @@ final class GatewayManager: ObservableObject {
   }
 
   private func discoverTailscaleMagicBaseURL(environment: [String: String]) -> String? {
-    guard let tailscalePath = resolveExecutablePath(for: "tailscale", environment: environment) else {
+    guard let tailscalePath = resolvedTailscaleBinaryPath(environment: environment) else {
       return nil
     }
 
@@ -1263,7 +1288,7 @@ final class GatewayManager: ObservableObject {
   }
 
   private func isTailscaleAuthenticated(environment: [String: String]) -> Bool {
-    guard let tailscalePath = resolveExecutablePath(for: "tailscale", environment: environment) else {
+    guard let tailscalePath = resolvedTailscaleBinaryPath(environment: environment) else {
       return false
     }
     let result = runSync(
@@ -1280,7 +1305,7 @@ final class GatewayManager: ObservableObject {
   }
 
   private func isTailscaleAuthenticatedAsync(environment: [String: String]) async -> Bool {
-    guard let tailscalePath = resolveExecutablePath(for: "tailscale", environment: environment) else {
+    guard let tailscalePath = resolvedTailscaleBinaryPath(environment: environment) else {
       return false
     }
     let result = await runSyncAsync(
@@ -1297,7 +1322,7 @@ final class GatewayManager: ObservableObject {
   }
 
   private func isServeRouteConfigured(port: Int, environment: [String: String]) -> Bool {
-    guard let tailscalePath = resolveExecutablePath(for: "tailscale", environment: environment) else {
+    guard let tailscalePath = resolvedTailscaleBinaryPath(environment: environment) else {
       return false
     }
     let result = runSync(
@@ -1433,7 +1458,7 @@ final class GatewayManager: ObservableObject {
   @discardableResult
   private func ensureTailscaleServeRoutesToGateway(port: Int) -> Bool {
     let environment = config.environment
-    guard let tailscalePath = resolveExecutablePath(for: "tailscale", environment: environment) else {
+    guard let tailscalePath = resolvedTailscaleBinaryPath(environment: environment) else {
       appendOutput("Tailscale CLI not found; skipping route setup.")
       return false
     }
@@ -1487,7 +1512,7 @@ final class GatewayManager: ObservableObject {
   @discardableResult
   private func ensureTailscaleServeRoutesToGatewayAsync(port: Int) async -> Bool {
     let environment = config.environment
-    guard let tailscalePath = resolveExecutablePath(for: "tailscale", environment: environment) else {
+    guard let tailscalePath = resolvedTailscaleBinaryPath(environment: environment) else {
       appendOutput("Tailscale CLI not found; skipping route setup.")
       return false
     }
@@ -1543,7 +1568,7 @@ final class GatewayManager: ObservableObject {
     }
 
     let environment = config.environment
-    guard let tailscalePath = resolveExecutablePath(for: "tailscale", environment: environment) else { return }
+    guard let tailscalePath = resolvedTailscaleBinaryPath(environment: environment) else { return }
 
     if didConfigureServeRouteThisSession {
       let clearResult = runSync(

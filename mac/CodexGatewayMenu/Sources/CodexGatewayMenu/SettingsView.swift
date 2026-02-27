@@ -6,6 +6,7 @@ struct SettingsView: View {
   @State private var publicBaseURL = ""
   @State private var portText = ""
   @State private var codexBinaryPath = ""
+  @State private var tailscaleBinaryPath = ""
   @State private var autoStart = false
 
   var body: some View {
@@ -18,6 +19,7 @@ struct SettingsView: View {
         LabeledField(label: "Magic DNS URL", text: $publicBaseURL, placeholder: "https://your-machine.tailnet.ts.net")
         LabeledField(label: "Gateway Port", text: $portText, placeholder: "8787")
         LabeledField(label: "Codex CLI Path (optional)", text: $codexBinaryPath, placeholder: "/opt/homebrew/bin/codex")
+        LabeledField(label: "Tailscale CLI Path (optional)", text: $tailscaleBinaryPath, placeholder: "/opt/homebrew/bin/tailscale")
       }
 
       Toggle("Keep gateway running in background", isOn: $autoStart)
@@ -51,6 +53,7 @@ struct SettingsView: View {
     publicBaseURL = manager.config.environment["PUBLIC_BASE_URL"] ?? ""
     portText = "\(manager.config.port)"
     codexBinaryPath = manager.config.codexBinaryPath ?? ""
+    tailscaleBinaryPath = manager.config.tailscaleBinaryPath ?? ""
     autoStart = manager.config.autoStart
   }
 
@@ -71,6 +74,7 @@ struct SettingsView: View {
       environment: env,
       pairURL: "http://127.0.0.1:\(parsedPort)/pair",
       codexBinaryPath: codexBinaryPath.trimmingCharacters(in: .whitespacesAndNewlines),
+      tailscaleBinaryPath: tailscaleBinaryPath.trimmingCharacters(in: .whitespacesAndNewlines),
       autoStart: autoStart
     )
   }
