@@ -154,3 +154,15 @@ SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
 NOTARYTOOL_PROFILE="codex-gateway" \
 ./mac/CodexGatewayMenu/scripts/build_app.sh --release
 ```
+
+## Linux Headless TUI
+
+- Linux terminal manager guide: `./docs/LINUX_GATEWAY_TUI.md`
+- One-line install from GitHub:
+```bash
+curl -fsSL https://raw.githubusercontent.com/omshejul/CodexApp/main/scripts/install-linux-tui.sh | bash
+```
+- Run from repo root:
+```bash
+bun run tui:linux
+```

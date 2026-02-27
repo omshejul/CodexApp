@@ -24,9 +24,11 @@
     "typecheck:shared": "cd shared && bun run typecheck",
     "typecheck:gateway": "cd gateway && bun run typecheck",
     "typecheck:app": "cd app && bun run typecheck",
+    "test:linux-installer": "node --test scripts/install-linux-tui.test.mjs",
     "lint": "cd shared && bun run lint && cd ../gateway && bun run lint && cd ../app && bun run lint",
     "dev:gateway": "cd gateway && bun run dev",
-    "dev:app": "cd app && bun run start"
+    "dev:app": "cd app && bun run start",
+    "tui:linux": "cd gateway && bun run tui:linux"
   },
   "devDependencies": {
     "typescript": "^5.7.3"

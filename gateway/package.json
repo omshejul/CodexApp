@@ -10,6 +10,7 @@
     "pretypecheck": "cd ../shared && bun run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "bun run --watch src/server.ts",
+    "tui:linux": "bun run src/linux-tui.ts",
     "start": "node dist/server.js",
     "lint": "echo 'No lint configured for gateway'"
   },
