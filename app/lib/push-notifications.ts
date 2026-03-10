@@ -1,7 +1,7 @@
 import { Platform } from "react-native";
 import Constants from "expo-constants";
 import * as Device from "expo-device";
-import { ApiHttpError, hasStoredPairing, upsertPushToken } from "@/lib/api";
+import { ApiHttpError, hasStoredPairing, listGateways, upsertPushToken } from "@/lib/api";
 
 type NotificationsModule = typeof import("expo-notifications");
 export class PushNotificationsSetupError extends Error {
@@ -15,7 +15,7 @@ export class PushNotificationsSetupError extends Error {
 }
 
 let notificationHandlerConfigured = false;
-let lastRegisteredToken: string | null = null;
+const lastRegisteredTokenByGatewayId = new Map<string, string>();
 let notificationsModule: NotificationsModule | null | undefined;
 let missingNativeModuleWarned = false;
 
@@ -144,24 +144,59 @@ export async function registerPushTokenWithGatewayIfPossible() {
   }
 
   const expoPushToken = (await Notifications.getExpoPushTokenAsync({ projectId })).data;
-  if (!expoPushToken || expoPushToken === lastRegisteredToken) {
+  if (!expoPushToken) {
     return;
   }
 
-  try {
-    await upsertPushToken({
-      token: expoPushToken,
-      platform,
-      enabled: true,
-    });
-  } catch (error) {
-    if (isGatewayMissingPushTokenRouteError(error)) {
-      throw new PushNotificationsSetupError(
-        "gateway-route-missing",
-        "Your Mac gateway is outdated and missing push token support. Rebuild/restart CodexGateway on your Mac."
-      );
-    }
-    throw error;
+  const gateways = await listGateways();
+  if (gateways.length === 0) {
+    return;
   }
-  lastRegisteredToken = expoPushToken;
+
+  let successCount = 0;
+  let missingRouteCount = 0;
+  let firstUnhandledError: unknown = null;
+
+  for (const gateway of gateways) {
+    if (lastRegisteredTokenByGatewayId.get(gateway.id) === expoPushToken) {
+      continue;
+    }
+
+    try {
+      await upsertPushToken(
+        {
+          token: expoPushToken,
+          platform,
+          enabled: true,
+        },
+        gateway.id
+      );
+      lastRegisteredTokenByGatewayId.set(gateway.id, expoPushToken);
+      successCount += 1;
+    } catch (error) {
+      if (isGatewayMissingPushTokenRouteError(error)) {
+        missingRouteCount += 1;
+        continue;
+      }
+      if (!firstUnhandledError) {
+        firstUnhandledError = error;
+      }
+      console.warn(`Push token registration failed for gateway '${gateway.nickname}'`, error);
+    }
+  }
+
+  if (successCount > 0) {
+    return;
+  }
+
+  if (missingRouteCount > 0 && missingRouteCount === gateways.length) {
+    throw new PushNotificationsSetupError(
+      "gateway-route-missing",
+      "Your Mac gateway is outdated and missing push token support. Rebuild/restart CodexGateway on your Mac."
+    );
+  }
+
+  if (firstUnhandledError) {
+    throw firstUnhandledError;
+  }
 }

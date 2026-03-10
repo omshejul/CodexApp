@@ -2,6 +2,7 @@ import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
+import { JetBrainsMono_400Regular, useFonts as useJetBrainsMonoFonts } from "@expo-google-fonts/jetbrains-mono";
 import { Alert, Platform } from "react-native";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -13,6 +14,9 @@ import {
   registerPushTokenWithGatewayIfPossible,
 } from "@/lib/push-notifications";
 import { startAppPresenceSync } from "@/lib/app-presence";
+import { JETBRAINS_MONO_REGULAR } from "@/lib/fonts";
+
+void SplashScreen.preventAutoHideAsync().catch(() => undefined);
 
 const SYSTEM_FONT = Platform.select({
   ios: "System",
@@ -45,9 +49,18 @@ function reportPushSetupError(error: unknown) {
 }
 
 export default function RootLayout() {
+  const [monoFontsLoaded, monoFontsError] = useJetBrainsMonoFonts({
+    [JETBRAINS_MONO_REGULAR]: JetBrainsMono_400Regular,
+  });
+
+  useEffect(() => {
+    if (monoFontsLoaded || monoFontsError) {
+      SplashScreen.hideAsync().catch(() => undefined);
+    }
+  }, [monoFontsError, monoFontsLoaded]);
+
   useEffect(() => {
     const stopAppPresenceSync = startAppPresenceSync();
-    SplashScreen.hideAsync().catch(() => undefined);
     const shouldSkipPushSetup = __DEV__;
     if (!shouldSkipPushSetup) {
       try {
@@ -64,6 +77,10 @@ export default function RootLayout() {
       stopAppPresenceSync();
     };
   }, []);
+
+  if (!monoFontsLoaded && !monoFontsError) {
+    return null;
+  }
 
   return (
     <SafeAreaProvider>

@@ -8,6 +8,9 @@ module.exports = {
   ],
   theme: {
     extend: {
+      fontFamily: {
+        mono: ["JetBrainsMono_400Regular"],
+      },
       colors: {
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",

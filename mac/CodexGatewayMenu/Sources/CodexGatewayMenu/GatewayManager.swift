@@ -208,6 +208,7 @@ final class GatewayManager: ObservableObject {
     let port = configuredPort()
     if let listener = diagnostics.portListener {
       if listener.isManagedGateway {
+        _ = await ensureTailscaleServeRoutesToGatewayAsync(port: port)
         isRunning = true
         statusMessage = "Running"
         appendOutput("Gateway is already running on 127.0.0.1:\(port) (PID \(listener.pid)).")
@@ -346,11 +347,16 @@ final class GatewayManager: ObservableObject {
 
   func openPairPage() {
     guard enforceFullDiskAccessRequirement() else { return }
-    guard let url = URL(string: localhostPairURL(port: configuredPort())) else {
+    let port = configuredPort()
+    guard let url = URL(string: localhostPairURL(port: port)) else {
       statusMessage = "Invalid pair URL"
       return
     }
-    NSWorkspace.shared.open(url)
+
+    Task {
+      _ = await ensureTailscaleServeRoutesToGatewayAsync(port: port)
+      NSWorkspace.shared.open(url)
+    }
   }
 
   func refreshPairedDevices() async {
@@ -616,6 +622,19 @@ final class GatewayManager: ObservableObject {
     if let envPath = environment["TAILSCALE_BIN"]?.trimmingCharacters(in: .whitespacesAndNewlines), !envPath.isEmpty {
       return resolveExecutablePath(for: envPath, environment: environment) ?? (FileManager.default.isExecutableFile(atPath: envPath) ? envPath : nil)
     }
+
+    let explicitCandidates = [
+      "/usr/local/bin/tailscale",
+      "/opt/homebrew/bin/tailscale",
+      "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+      "/Applications/Tailscale.app/Contents/MacOS/tailscale",
+    ]
+    for candidate in explicitCandidates {
+      if FileManager.default.isExecutableFile(atPath: candidate) {
+        return candidate
+      }
+    }
+
     return resolveExecutablePath(for: "tailscale", environment: environment)
   }
 

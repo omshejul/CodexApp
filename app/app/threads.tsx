@@ -1,5 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, FlatList, Linking, Modal, Pressable, RefreshControl, ScrollView, SectionList, Text, useWindowDimensions, View } from "react-native";
+import {
+  ActivityIndicator,
+  Alert,
+  FlatList,
+  Linking,
+  Modal,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  SectionList,
+  Text,
+  TextInput,
+  useWindowDimensions,
+  View
+} from "react-native";
 import { router, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import Constants from "expo-constants";
@@ -7,14 +21,23 @@ import { MotiView } from "moti";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   ApiHttpError,
-  clearSession,
+  createDirectory,
   createThread,
+  GatewaySummary,
+  getActiveGatewayId,
+  getGatewayById,
   getCurrentServerBaseUrl,
   getDirectories,
   getGatewayOptions,
   getPairedDevices,
   getThreads,
+  hasStoredPairing,
+  listGateways,
+  logoutGateway,
+  removeGateway,
   ReauthRequiredError,
+  renameGateway,
+  setActiveGateway,
 } from "@/lib/api";
 import { getOrCreateDeviceIdentity } from "@/lib/device";
 import { formatPathForDisplay } from "@/lib/path";
@@ -92,6 +115,7 @@ const loadingStepLabels: Record<LoadingStep, { title: string; detail: string }> 
     detail: "Sorting and rendering your conversations.",
   },
 };
+const MAX_GATEWAY_NICKNAME_LENGTH = 40;
 
 function formatRelativeTime(updatedAt?: string): string {
   if (!updatedAt) {
@@ -130,6 +154,15 @@ export default function ThreadsScreen() {
   const { height: windowHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const appVersion = Constants.expoConfig?.version ?? "Unknown";
+  const [activeGatewayId, setActiveGatewayId] = useState<string | null>(null);
+  const [activeGatewayName, setActiveGatewayName] = useState<string | null>(null);
+  const [gateways, setGateways] = useState<GatewaySummary[]>([]);
+  const [showGatewayMenu, setShowGatewayMenu] = useState(false);
+  const [gatewayMenuError, setGatewayMenuError] = useState<string | null>(null);
+  const [gatewayActionLoadingId, setGatewayActionLoadingId] = useState<string | null>(null);
+  const [renamingGatewayId, setRenamingGatewayId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [renameSaving, setRenameSaving] = useState(false);
   const [threads, setThreads] = useState<ThreadItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -154,6 +187,9 @@ export default function ThreadsScreen() {
   const [currentDirectory, setCurrentDirectory] = useState<string | null>(null);
   const [parentDirectory, setParentDirectory] = useState<string | null>(null);
   const [folders, setFolders] = useState<Array<{ name: string; path: string }>>([]);
+  const [showCreateFolderInput, setShowCreateFolderInput] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [creatingFolder, setCreatingFolder] = useState(false);
   const [currentDeviceId, setCurrentDeviceId] = useState<string | null>(null);
   const [loadingStep, setLoadingStep] = useState<LoadingStep>("session");
   const [loadingSeconds, setLoadingSeconds] = useState(0);
@@ -185,43 +221,114 @@ export default function ThreadsScreen() {
     };
   }, [loading]);
 
-  const loadThreads = useCallback(async (showInitialLoader = false) => {
-    setError(null);
-    if (showInitialLoader) {
-      setLoading(true);
-    }
-    setLoadingStep("session");
-    try {
-      setLoadingStep("gateway");
-      const response = await getThreads();
-      setLoadingStep("threads");
-      setThreads(response.threads);
-      setLoadingStep("render");
-    } catch (loadError) {
-      if (loadError instanceof ReauthRequiredError) {
-        await clearSession();
-        router.replace("/pair");
-        return;
-      }
-      setError(loadError instanceof Error ? loadError.message : "Unable to load threads");
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
+  const refreshGatewayState = useCallback(async (): Promise<string | null> => {
+    const allGateways = await listGateways();
+    setGateways(allGateways);
+    const activeGateway = allGateways.find((gateway) => gateway.isActive) ?? null;
+    const nextActiveGatewayId = activeGateway?.id ?? null;
+    setActiveGatewayId(nextActiveGatewayId);
+    setActiveGatewayName(activeGateway?.nickname ?? null);
+    setPairedServer(activeGateway?.serverBaseUrl ?? null);
+    return nextActiveGatewayId;
   }, []);
+
+  const recoverFromReauth = useCallback(async (): Promise<string | null> => {
+    const stillPaired = await hasStoredPairing();
+    if (!stillPaired) {
+      router.replace("/pair");
+      return null;
+    }
+    return refreshGatewayState();
+  }, [refreshGatewayState]);
+
+  const loadThreads = useCallback(
+    async (showInitialLoader = false, explicitGatewayId?: string | null) => {
+      setError(null);
+      if (showInitialLoader) {
+        setLoading(true);
+      }
+      setLoadingStep("session");
+
+      const resolveGatewayId = async () => {
+        if (explicitGatewayId) {
+          return explicitGatewayId;
+        }
+        if (activeGatewayId) {
+          return activeGatewayId;
+        }
+        const storedActiveGatewayId = await getActiveGatewayId();
+        if (storedActiveGatewayId) {
+          setActiveGatewayId(storedActiveGatewayId);
+          return storedActiveGatewayId;
+        }
+        return refreshGatewayState();
+      };
+
+      try {
+        let targetGatewayId = await resolveGatewayId();
+        if (!targetGatewayId) {
+          router.replace("/pair");
+          return;
+        }
+
+        setLoadingStep("gateway");
+        let response;
+        try {
+          response = await getThreads(targetGatewayId);
+        } catch (loadError) {
+          if (!(loadError instanceof ReauthRequiredError)) {
+            throw loadError;
+          }
+          targetGatewayId = await recoverFromReauth();
+          if (!targetGatewayId) {
+            return;
+          }
+          response = await getThreads(targetGatewayId);
+        }
+
+        setLoadingStep("threads");
+        setThreads(response.threads);
+        setLoadingStep("render");
+        setActiveGatewayId(targetGatewayId);
+        const gateway = await getGatewayById(targetGatewayId);
+        setActiveGatewayName(gateway?.nickname ?? gateway?.host ?? null);
+        setPairedServer(gateway?.serverBaseUrl ?? null);
+      } catch (loadError) {
+        setError(loadError instanceof Error ? loadError.message : "Unable to load threads");
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    },
+    [activeGatewayId, recoverFromReauth, refreshGatewayState]
+  );
 
   useFocusEffect(
     useCallback(() => {
+      let mounted = true;
       const showInitialLoader = !hasLoadedThreadsOnceRef.current;
-      loadThreads(showInitialLoader).finally(() => {
+      (async () => {
+        const gatewayId = await refreshGatewayState();
+        if (!mounted) {
+          return;
+        }
+        await loadThreads(showInitialLoader, gatewayId);
         hasLoadedThreadsOnceRef.current = true;
+      })().catch((focusError) => {
+        if (!mounted) {
+          return;
+        }
+        setError(focusError instanceof Error ? focusError.message : "Unable to load threads");
       });
-    }, [loadThreads])
+      return () => {
+        mounted = false;
+      };
+    }, [loadThreads, refreshGatewayState])
   );
 
   const onRefresh = () => {
     setRefreshing(true);
-    loadThreads(false).catch(() => {
+    loadThreads(false, activeGatewayId).catch(() => {
       setRefreshing(false);
     });
   };
@@ -233,13 +340,22 @@ export default function ThreadsScreen() {
     setError(null);
     setCreating(true);
     try {
-      const created = await createThread({ cwd });
-      router.push(`/thread/${created.threadId}`);
+      const gatewayId = activeGatewayId ?? (await refreshGatewayState());
+      if (!gatewayId) {
+        router.replace("/pair");
+        return;
+      }
+      const created = await createThread({ cwd }, gatewayId);
+      router.push(`/thread/${created.threadId}?gatewayId=${encodeURIComponent(gatewayId)}`);
       setShowWorkspacePicker(false);
     } catch (createError) {
       if (createError instanceof ReauthRequiredError) {
-        await clearSession();
-        router.replace("/pair");
+        const fallbackGatewayId = await recoverFromReauth();
+        if (!fallbackGatewayId) {
+          return;
+        }
+        setError("Gateway session expired. Switched to another paired gateway.");
+        await loadThreads(false, fallbackGatewayId);
         return;
       }
       setError(createError instanceof Error ? createError.message : "Unable to create thread");
@@ -248,27 +364,94 @@ export default function ThreadsScreen() {
     }
   };
 
-  const loadDirectory = async (pathValue?: string) => {
+  const loadDirectory = async (pathValue?: string, explicitGatewayId?: string | null) => {
     if (loadingDirectories) {
+      return;
+    }
+
+    const gatewayId = explicitGatewayId ?? activeGatewayId ?? (await getActiveGatewayId());
+    if (!gatewayId) {
+      router.replace("/pair");
       return;
     }
 
     setLoadingDirectories(true);
     try {
-      const response = await getDirectories(pathValue);
+      const response = await getDirectories(pathValue, gatewayId);
       setCurrentDirectory(response.currentPath);
       setParentDirectory(response.parentPath);
       setFolders(response.folders);
       setPickerError(null);
     } catch (directoryError) {
       if (directoryError instanceof ReauthRequiredError) {
-        await clearSession();
-        router.replace("/pair");
+        const fallbackGatewayId = await recoverFromReauth();
+        if (!fallbackGatewayId) {
+          return;
+        }
+        await loadDirectory(pathValue, fallbackGatewayId);
         return;
       }
       setPickerError(directoryError instanceof Error ? directoryError.message : "Unable to load folders");
     } finally {
       setLoadingDirectories(false);
+    }
+  };
+
+  const onCreateFolder = async () => {
+    if (creatingFolder) {
+      return;
+    }
+
+    const parentPath = currentDirectory?.trim();
+    if (!parentPath) {
+      setPickerError("No directory selected.");
+      return;
+    }
+
+    const folderName = newFolderName.trim();
+    if (folderName.length === 0) {
+      setPickerError("Enter a folder name.");
+      return;
+    }
+
+    const createAndReload = async (gatewayId: string) => {
+      const response = await createDirectory(
+        {
+          parentPath,
+          name: folderName,
+        },
+        gatewayId
+      );
+      setNewFolderName("");
+      setShowCreateFolderInput(false);
+      await loadDirectory(response.createdPath, gatewayId);
+    };
+
+    setCreatingFolder(true);
+    setPickerError(null);
+    try {
+      const gatewayId = activeGatewayId ?? (await refreshGatewayState());
+      if (!gatewayId) {
+        router.replace("/pair");
+        return;
+      }
+      await createAndReload(gatewayId);
+    } catch (createFolderError) {
+      if (createFolderError instanceof ReauthRequiredError) {
+        const fallbackGatewayId = await recoverFromReauth();
+        if (!fallbackGatewayId) {
+          return;
+        }
+        try {
+          await createAndReload(fallbackGatewayId);
+        } catch (retryError) {
+          setPickerError(retryError instanceof Error ? retryError.message : "Unable to create folder");
+        }
+        return;
+      }
+      setPickerError(createFolderError instanceof Error ? createFolderError.message : "Unable to create folder");
+    } finally {
+      setCreatingFolder(false);
     }
   };
 
@@ -279,6 +462,8 @@ export default function ThreadsScreen() {
 
     setShowWorkspacePicker(true);
     setPickerError(null);
+    setShowCreateFolderInput(false);
+    setNewFolderName("");
     const lastCwd = allSections[0]?.data[0]?.cwd?.trim() || undefined;
     await loadDirectory(lastCwd);
   };
@@ -286,9 +471,11 @@ export default function ThreadsScreen() {
   const onCancelPicker = () => {
     setShowWorkspacePicker(false);
     setPickerError(null);
+    setShowCreateFolderInput(false);
+    setNewFolderName("");
   };
 
-  const openSettingsMenu = async () => {
+  const openSettingsMenu = async (explicitGatewayId?: string | null) => {
     setShowSettingsMenu(true);
     setSettingsInfoLoading(true);
     setSettingsInfoError(null);
@@ -298,9 +485,18 @@ export default function ThreadsScreen() {
     try {
       const identity = await getOrCreateDeviceIdentity();
       setCurrentDeviceId(identity.deviceId);
-      const serverBaseUrl = await getCurrentServerBaseUrl();
-      setPairedServer(serverBaseUrl);
-      const [optionsResult, devicesResult] = await Promise.allSettled([getGatewayOptions(), getPairedDevices()]);
+      const gatewayId = explicitGatewayId ?? activeGatewayId ?? (await getActiveGatewayId());
+      if (!gatewayId) {
+        router.replace("/pair");
+        return;
+      }
+
+      const gateway = await getGatewayById(gatewayId);
+      setPairedServer(gateway?.serverBaseUrl ?? (await getCurrentServerBaseUrl()));
+      const [optionsResult, devicesResult] = await Promise.allSettled([
+        getGatewayOptions(gatewayId),
+        getPairedDevices(gatewayId),
+      ]);
 
       if (optionsResult.status === "fulfilled") {
         setDefaultModel(optionsResult.value.defaultModel ?? null);
@@ -316,8 +512,11 @@ export default function ThreadsScreen() {
       }
     } catch (settingsError) {
       if (settingsError instanceof ReauthRequiredError) {
-        await clearSession();
-        router.replace("/pair");
+        const fallbackGatewayId = await recoverFromReauth();
+        if (!fallbackGatewayId) {
+          return;
+        }
+        await openSettingsMenu(fallbackGatewayId);
         return;
       }
       setSettingsInfoError(settingsError instanceof Error ? settingsError.message : "Unable to load settings info");
@@ -325,6 +524,126 @@ export default function ThreadsScreen() {
       setSettingsInfoLoading(false);
     }
   };
+
+  const openGatewayMenu = async () => {
+    setGatewayMenuError(null);
+    setShowGatewayMenu(true);
+    try {
+      await refreshGatewayState();
+    } catch (gatewayError) {
+      setGatewayMenuError(gatewayError instanceof Error ? gatewayError.message : "Unable to load gateways");
+    }
+  };
+
+  const finishGatewayRemoval = useCallback(
+    async (gatewayId: string) => {
+      const result = await removeGateway(gatewayId);
+      const nextActiveGatewayId = await refreshGatewayState();
+      if (result.remaining === 0 || !nextActiveGatewayId) {
+        setShowGatewayMenu(false);
+        setShowSettingsMenu(false);
+        router.replace("/pair");
+        return;
+      }
+      await loadThreads(true, nextActiveGatewayId);
+      if (showSettingsMenu) {
+        await openSettingsMenu(nextActiveGatewayId);
+      }
+    },
+    [loadThreads, openSettingsMenu, refreshGatewayState, showSettingsMenu]
+  );
+
+  const onSwitchGateway = useCallback(
+    async (gatewayId: string) => {
+      if (gatewayActionLoadingId || renameSaving) {
+        return;
+      }
+      setGatewayActionLoadingId(gatewayId);
+      setGatewayMenuError(null);
+      try {
+        await setActiveGateway(gatewayId);
+        const nextActiveGatewayId = await refreshGatewayState();
+        if (!nextActiveGatewayId) {
+          router.replace("/pair");
+          return;
+        }
+        await loadThreads(true, nextActiveGatewayId);
+        if (showSettingsMenu) {
+          await openSettingsMenu(nextActiveGatewayId);
+        }
+      } catch (gatewayError) {
+        setGatewayMenuError(gatewayError instanceof Error ? gatewayError.message : "Unable to switch gateway");
+      } finally {
+        setGatewayActionLoadingId(null);
+      }
+    },
+    [gatewayActionLoadingId, loadThreads, openSettingsMenu, refreshGatewayState, renameSaving, showSettingsMenu]
+  );
+
+  const onSaveGatewayRename = useCallback(
+    async (gatewayId: string) => {
+      if (renameSaving) {
+        return;
+      }
+
+      const trimmed = renameDraft.trim().slice(0, MAX_GATEWAY_NICKNAME_LENGTH);
+      if (!trimmed) {
+        setGatewayMenuError("Nickname is required");
+        return;
+      }
+
+      setRenameSaving(true);
+      setGatewayMenuError(null);
+      try {
+        await renameGateway(gatewayId, trimmed);
+        setRenamingGatewayId(null);
+        setRenameDraft("");
+        await refreshGatewayState();
+      } catch (renameError) {
+        setGatewayMenuError(renameError instanceof Error ? renameError.message : "Unable to rename gateway");
+      } finally {
+        setRenameSaving(false);
+      }
+    },
+    [refreshGatewayState, renameDraft, renameSaving]
+  );
+
+  const onRemoveGateway = useCallback(
+    async (gateway: GatewaySummary) => {
+      if (gatewayActionLoadingId || renameSaving) {
+        return;
+      }
+
+      setGatewayActionLoadingId(gateway.id);
+      setGatewayMenuError(null);
+      try {
+        await logoutGateway(gateway.id);
+        await finishGatewayRemoval(gateway.id);
+      } catch (removeError) {
+        const message = removeError instanceof Error ? removeError.message : "Unable to reach gateway";
+        Alert.alert(
+          "Gateway unavailable",
+          `${message}\n\nRemove this gateway from your phone anyway?`,
+          [
+            {
+              text: "Cancel",
+              style: "cancel",
+            },
+            {
+              text: "Remove locally",
+              style: "destructive",
+              onPress: () => {
+                finishGatewayRemoval(gateway.id).catch(() => undefined);
+              },
+            },
+          ]
+        );
+      } finally {
+        setGatewayActionLoadingId(null);
+      }
+    },
+    [finishGatewayRemoval, gatewayActionLoadingId, renameSaving]
+  );
 
   const openHelpEmail = async () => {
     const helpUrl = "mailto:contact@omshejul.com";
@@ -347,7 +666,10 @@ export default function ThreadsScreen() {
       }}
     >
       <Pressable
-        onPress={() => router.push(`/thread/${item.id}`)}
+        onPress={() => {
+          const gatewayQuery = activeGatewayId ? `?gatewayId=${encodeURIComponent(activeGatewayId)}` : "";
+          router.push(`/thread/${item.id}${gatewayQuery}`);
+        }}
         className="flex-row items-center gap-3 py-3 pl-6 active:opacity-70"
       >
         <Text className="min-w-0 flex-1 text-[15px] font-medium text-card-foreground" numberOfLines={2} ellipsizeMode="tail">
@@ -415,33 +737,58 @@ export default function ThreadsScreen() {
         animate={{ opacity: 1, translateY: 0 }}
         transition={{ type: "timing", duration: 280 }}
       >
-        <View className="mb-4 flex-row items-center justify-between px-4">
-          <Text className="text-3xl font-semibold text-foreground">Threads</Text>
-          <View className="flex-row gap-2">
-            <Pressable
-              className="h-10 w-10 items-center justify-center rounded-full border border-border/50 bg-primary"
-              onPress={openWorkspacePicker}
-              disabled={creating}
-              accessibilityRole="button"
-              accessibilityLabel={creating ? "Creating new chat" : "New chat"}
-            >
-              {creating ? (
-                <ActivityIndicator size="small" className="text-primary-foreground" />
-              ) : (
-                <Ionicons name="add" size={22} className="text-primary-foreground" />
-              )}
-            </Pressable>
-            <Pressable
-              className="h-10 w-10 items-center justify-center rounded-full border border-border/50 bg-muted"
-              onPress={() => {
-                openSettingsMenu().catch(() => undefined);
-              }}
-              accessibilityRole="button"
-              accessibilityLabel="Settings"
-            >
-              <Ionicons name="settings-outline" size={18} className="text-foreground" />
-            </Pressable>
+        <View className="mb-4 px-4">
+          <View className="flex-row items-center justify-between">
+            <Text className="text-3xl font-semibold text-foreground">Threads</Text>
+            <View className="flex-row gap-2">
+              <Pressable
+                className="h-10 w-10 items-center justify-center rounded-full border border-border/50 bg-primary"
+                onPress={openWorkspacePicker}
+                disabled={creating}
+                accessibilityRole="button"
+                accessibilityLabel={creating ? "Creating new chat" : "New chat"}
+              >
+                {creating ? (
+                  <ActivityIndicator size="small" className="text-primary-foreground" />
+                ) : (
+                  <Ionicons name="add" size={22} className="text-primary-foreground" />
+                )}
+              </Pressable>
+              <Pressable
+                className="h-10 w-10 items-center justify-center rounded-full border border-border/50 bg-muted"
+                onPress={() => {
+                  openSettingsMenu().catch(() => undefined);
+                }}
+                accessibilityRole="button"
+                accessibilityLabel="Settings"
+              >
+                <Ionicons name="settings-outline" size={18} className="text-foreground" />
+              </Pressable>
+            </View>
           </View>
+
+          <Pressable
+            className="mt-3 flex-row items-center self-start rounded-xl border border-border/50 bg-muted px-3 py-2 active:opacity-80"
+            onPress={() => {
+              openGatewayMenu().catch(() => undefined);
+            }}
+            accessibilityRole="button"
+            accessibilityLabel="Switch gateway"
+          >
+            <Ionicons name="laptop-outline" size={15} className="text-foreground" />
+            <Text className="mx-2 text-sm font-semibold text-foreground" numberOfLines={1}>
+              {activeGatewayName ?? "Select Gateway"}
+            </Text>
+            <Ionicons name="chevron-down" size={14} className="text-muted-foreground" />
+          </Pressable>
+          {pairedServer ? (
+            <Text className="mt-1 text-xs text-muted-foreground" numberOfLines={1} ellipsizeMode="middle">
+              {pairedServer}
+            </Text>
+          ) : null}
+          {gatewayMenuError ? (
+            <Text className="mt-1 text-xs text-destructive-foreground">{gatewayMenuError}</Text>
+          ) : null}
         </View>
       </MotiView>
 
@@ -545,6 +892,188 @@ export default function ThreadsScreen() {
         />
       )}
 
+      <Modal
+        transparent
+        visible={showGatewayMenu}
+        animationType="fade"
+        onRequestClose={() => {
+          setShowGatewayMenu(false);
+          setRenamingGatewayId(null);
+          setRenameDraft("");
+        }}
+      >
+        <MotiView
+          className="flex-1"
+          from={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ type: "timing", duration: 220 }}
+        >
+          <View className="flex-1 items-center justify-center px-4">
+            <Pressable
+              className="absolute inset-0 bg-background/80"
+              onPress={() => {
+                setShowGatewayMenu(false);
+                setRenamingGatewayId(null);
+                setRenameDraft("");
+              }}
+            />
+            <MotiView
+              className="w-full"
+              from={{ opacity: 0, scale: 0.96, translateY: 14 }}
+              animate={{ opacity: 1, scale: 1, translateY: 0 }}
+              transition={{ type: "timing", duration: 260 }}
+            >
+              <View className="w-full rounded-2xl border border-border/50 bg-card p-4" style={{ maxHeight: settingsPanelMaxHeight }}>
+                <View className="flex-row items-center justify-between">
+                  <View>
+                    <Text className="text-lg font-semibold text-card-foreground">Gateways</Text>
+                    <Text className="mt-1 text-xs text-muted-foreground">Switch, rename, or remove paired Macs.</Text>
+                  </View>
+                  <Pressable
+                    className="rounded-xl border border-border/50 bg-muted px-3 py-2"
+                    onPress={() => {
+                      setShowGatewayMenu(false);
+                      setRenamingGatewayId(null);
+                      setRenameDraft("");
+                      router.push("/pair");
+                    }}
+                  >
+                    <Text className="text-xs font-semibold text-foreground">Add Gateway</Text>
+                  </Pressable>
+                </View>
+
+                {gatewayMenuError ? (
+                  <View className="mt-3 rounded-xl border border-border/50 bg-destructive/15 p-3">
+                    <Text className="text-xs text-destructive-foreground">{gatewayMenuError}</Text>
+                  </View>
+                ) : null}
+
+                <ScrollView className="mt-3" contentContainerStyle={{ gap: 8, paddingBottom: 2 }} showsVerticalScrollIndicator>
+                  {gateways.length === 0 ? (
+                    <View className="rounded-xl bg-muted/50 px-3 py-4">
+                      <Text className="text-sm text-muted-foreground">No paired gateways yet.</Text>
+                    </View>
+                  ) : null}
+
+                  {gateways.map((gateway) => {
+                    const isLoading = gatewayActionLoadingId === gateway.id;
+                    const isRenaming = renamingGatewayId === gateway.id;
+                    return (
+                      <View key={gateway.id} className="rounded-xl border border-border/40 bg-muted/30 p-3">
+                        <View className="flex-row items-center justify-between gap-2">
+                          <View className="flex-1">
+                            <View className="flex-row items-center gap-2">
+                              <Text className="text-sm font-semibold text-foreground">{gateway.nickname}</Text>
+                              {gateway.isActive ? (
+                                <View className="rounded-full bg-primary/15 px-2 py-0.5">
+                                  <Text className="text-[10px] font-semibold text-primary">ACTIVE</Text>
+                                </View>
+                              ) : null}
+                            </View>
+                            <Text className="mt-1 text-xs text-muted-foreground" numberOfLines={1} ellipsizeMode="middle">
+                              {gateway.serverBaseUrl}
+                            </Text>
+                          </View>
+                          {isLoading ? <ActivityIndicator size="small" className="text-primary" /> : null}
+                        </View>
+
+                        {isRenaming ? (
+                          <View className="mt-3 rounded-xl border border-border/60 bg-card px-3 py-3">
+                            <View className="mb-2 flex-row items-center justify-between">
+                              <Text className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                                Rename Gateway
+                              </Text>
+                              <Text className="text-[11px] text-muted-foreground">
+                                {renameDraft.trim().length}/{MAX_GATEWAY_NICKNAME_LENGTH}
+                              </Text>
+                            </View>
+                            <TextInput
+                              value={renameDraft}
+                              onChangeText={setRenameDraft}
+                              maxLength={MAX_GATEWAY_NICKNAME_LENGTH}
+                              editable={!renameSaving}
+                              autoFocus
+                              returnKeyType="done"
+                              onSubmitEditing={() => {
+                                if (renameSaving || renameDraft.trim().length === 0 || renameDraft.trim() === gateway.nickname.trim()) {
+                                  return;
+                                }
+                                onSaveGatewayRename(gateway.id).catch(() => undefined);
+                              }}
+                              placeholder={gateway.host}
+                              placeholderTextColor="rgba(148, 163, 184, 0.8)"
+                              className="rounded-lg border border-border/60 bg-muted px-3 py-2.5 text-sm text-foreground"
+                            />
+                            <Text className="mt-2 text-[11px] text-muted-foreground" numberOfLines={1} ellipsizeMode="middle">
+                              Host: {gateway.host}
+                            </Text>
+                            <View className="mt-3 flex-row items-center justify-end gap-2">
+                              <Pressable
+                                className="rounded-lg border border-border/50 bg-muted px-3 py-2"
+                                onPress={() => {
+                                  setRenamingGatewayId(null);
+                                  setRenameDraft("");
+                                  setGatewayMenuError(null);
+                                }}
+                              >
+                                <Text className="text-xs font-semibold text-foreground">Cancel</Text>
+                              </Pressable>
+                              <Pressable
+                                className={`rounded-lg px-4 py-2 ${renameSaving || renameDraft.trim().length === 0 || renameDraft.trim() === gateway.nickname.trim() ? "bg-primary/60" : "bg-primary"}`}
+                                onPress={() => {
+                                  onSaveGatewayRename(gateway.id).catch(() => undefined);
+                                }}
+                                disabled={renameSaving || renameDraft.trim().length === 0 || renameDraft.trim() === gateway.nickname.trim()}
+                              >
+                                <Text className="text-xs font-semibold text-primary-foreground">Save</Text>
+                              </Pressable>
+                            </View>
+                          </View>
+                        ) : (
+                          <View className="mt-3 flex-row gap-2">
+                            <Pressable
+                              className={`flex-1 rounded-xl border border-border/50 px-2 py-2 ${gateway.isActive ? "bg-muted/60 opacity-60" : "bg-muted"}`}
+                              disabled={gateway.isActive || isLoading}
+                              onPress={() => {
+                                onSwitchGateway(gateway.id).catch(() => undefined);
+                              }}
+                            >
+                              <Text className="text-center text-xs font-semibold text-foreground">
+                                {gateway.isActive ? "Current" : "Switch"}
+                              </Text>
+                            </Pressable>
+                            <Pressable
+                              className="flex-1 rounded-xl border border-border/50 bg-muted px-2 py-2"
+                              disabled={isLoading}
+                              onPress={() => {
+                                setGatewayMenuError(null);
+                                setRenamingGatewayId(gateway.id);
+                                setRenameDraft(gateway.nickname);
+                              }}
+                            >
+                              <Text className="text-center text-xs font-semibold text-foreground">Rename</Text>
+                            </Pressable>
+                            <Pressable
+                              className="flex-1 rounded-xl border border-destructive/30 bg-destructive/10 px-2 py-2"
+                              disabled={isLoading}
+                              onPress={() => {
+                                onRemoveGateway(gateway).catch(() => undefined);
+                              }}
+                            >
+                              <Text className="text-center text-xs font-semibold text-destructive-foreground">Remove</Text>
+                            </Pressable>
+                          </View>
+                        )}
+                      </View>
+                    );
+                  })}
+                </ScrollView>
+              </View>
+            </MotiView>
+          </View>
+        </MotiView>
+      </Modal>
+
       <Modal transparent visible={showWorkspacePicker} animationType="fade" onRequestClose={onCancelPicker}>
         <MotiView
           className="flex-1"
@@ -591,24 +1120,111 @@ export default function ThreadsScreen() {
                       {breadcrumb}
                     </Text>
                   </View>
-                  <Pressable
-                    className={`flex-row items-center gap-1 rounded-lg px-2.5 py-1.5 ${parentDirectory ? "bg-card border border-border/50" : "opacity-40"}`}
-                    onPress={() => {
-                      if (parentDirectory) {
-                        loadDirectory(parentDirectory).catch(() => undefined);
-                      }
-                    }}
-                    disabled={!parentDirectory || loadingDirectories}
-                  >
-                    <Ionicons name="arrow-up-outline" size={13} className={parentDirectory ? "text-foreground" : "text-muted-foreground"} />
-                    <Text className={`text-xs font-medium ${parentDirectory ? "text-foreground" : "text-muted-foreground"}`}>Up</Text>
-                  </Pressable>
+                  <View className="flex-row items-center gap-2">
+                    <Pressable
+                      className={`flex-row items-center gap-1 rounded-lg border px-2.5 py-1.5 ${loadingDirectories || creatingFolder ? "border-border/30 bg-card/50 opacity-60" : "border-border/50 bg-card"}`}
+                      onPress={() => {
+                        setPickerError(null);
+                        if (showCreateFolderInput) {
+                          setShowCreateFolderInput(false);
+                          setNewFolderName("");
+                          return;
+                        }
+                        setShowCreateFolderInput(true);
+                      }}
+                      disabled={loadingDirectories || creatingFolder}
+                    >
+                      <Ionicons
+                        name={showCreateFolderInput ? "close-outline" : "add-outline"}
+                        size={13}
+                        className={loadingDirectories || creatingFolder ? "text-muted-foreground" : "text-foreground"}
+                      />
+                      <Text className={`text-xs font-medium ${loadingDirectories || creatingFolder ? "text-muted-foreground" : "text-foreground"}`}>
+                        {showCreateFolderInput ? "Close" : "New"}
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      className={`flex-row items-center gap-1 rounded-lg px-2.5 py-1.5 ${parentDirectory && !creatingFolder ? "bg-card border border-border/50" : "opacity-40"}`}
+                      onPress={() => {
+                        if (parentDirectory) {
+                          loadDirectory(parentDirectory).catch(() => undefined);
+                        }
+                      }}
+                      disabled={!parentDirectory || loadingDirectories || creatingFolder}
+                    >
+                      <Ionicons
+                        name="arrow-up-outline"
+                        size={13}
+                        className={parentDirectory && !creatingFolder ? "text-foreground" : "text-muted-foreground"}
+                      />
+                      <Text className={`text-xs font-medium ${parentDirectory && !creatingFolder ? "text-foreground" : "text-muted-foreground"}`}>
+                        Up
+                      </Text>
+                    </Pressable>
+                  </View>
                 </View>
 
                 {pickerError ? (
                   <View className="mt-2.5 flex-row items-center gap-2 rounded-xl bg-destructive/10 px-3 py-2.5">
                     <Ionicons name="alert-circle-outline" size={14} className="text-destructive" />
                     <Text className="flex-1 text-xs text-destructive-foreground">{pickerError}</Text>
+                  </View>
+                ) : null}
+
+                {showCreateFolderInput ? (
+                  <View className="mt-3 rounded-xl border border-border/40 bg-muted/40 px-3 py-3">
+                    <Text className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">New Folder</Text>
+                    <TextInput
+                      value={newFolderName}
+                      onChangeText={(value) => {
+                        setNewFolderName(value);
+                        if (pickerError) {
+                          setPickerError(null);
+                        }
+                      }}
+                      editable={!creatingFolder && !loadingDirectories}
+                      autoFocus
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      returnKeyType="done"
+                      onSubmitEditing={() => {
+                        if (!creatingFolder && !loadingDirectories && newFolderName.trim().length > 0) {
+                          onCreateFolder().catch(() => undefined);
+                        }
+                      }}
+                      placeholder="Folder name"
+                      placeholderTextColor="rgba(148, 163, 184, 0.8)"
+                      className="mt-2 rounded-lg border border-border/60 bg-card px-3 py-2.5 text-sm text-foreground"
+                    />
+                    <View className="mt-2.5 flex-row items-center justify-end gap-2">
+                      <Pressable
+                        className="rounded-lg border border-border/50 bg-muted px-3 py-2"
+                        onPress={() => {
+                          setShowCreateFolderInput(false);
+                          setNewFolderName("");
+                          setPickerError(null);
+                        }}
+                        disabled={creatingFolder}
+                      >
+                        <Text className="text-xs font-semibold text-foreground">Cancel</Text>
+                      </Pressable>
+                      <Pressable
+                        className={`flex-row items-center gap-1 rounded-lg px-3 py-2 ${creatingFolder || loadingDirectories || newFolderName.trim().length === 0 ? "bg-primary/60" : "bg-primary"}`}
+                        onPress={() => {
+                          onCreateFolder().catch(() => undefined);
+                        }}
+                        disabled={creatingFolder || loadingDirectories || newFolderName.trim().length === 0}
+                      >
+                        {creatingFolder ? (
+                          <ActivityIndicator size="small" className="text-primary-foreground" />
+                        ) : (
+                          <Ionicons name="add-outline" size={14} className="text-primary-foreground" />
+                        )}
+                        <Text className="text-xs font-semibold text-primary-foreground">
+                          {creatingFolder ? "Creating..." : "Create"}
+                        </Text>
+                      </Pressable>
+                    </View>
                   </View>
                 ) : null}
 
@@ -625,10 +1241,11 @@ export default function ThreadsScreen() {
                       keyboardShouldPersistTaps="handled"
                       renderItem={({ item }) => (
                         <Pressable
-                          className="mb-0.5 flex-row items-center justify-between rounded-lg bg-card/80 px-3 py-2.5 active:bg-card"
+                          className={`mb-0.5 flex-row items-center justify-between rounded-lg bg-card/80 px-3 py-2.5 ${creatingFolder ? "opacity-60" : "active:bg-card"}`}
                           onPress={() => {
                             loadDirectory(item.path).catch(() => undefined);
                           }}
+                          disabled={creatingFolder}
                         >
                           <View className="flex-1 flex-row items-center gap-2.5">
                             <Ionicons name="folder" size={15} className="text-primary" />
@@ -655,13 +1272,13 @@ export default function ThreadsScreen() {
                     <Text className="text-center text-sm font-semibold text-muted-foreground">Cancel</Text>
                   </Pressable>
                   <Pressable
-                    className={`flex-1 flex-row items-center justify-center gap-2 rounded-xl py-3 ${creating || !currentDirectory ? "bg-primary/50" : "bg-primary"}`}
+                    className={`flex-1 flex-row items-center justify-center gap-2 rounded-xl py-3 ${creating || creatingFolder || !currentDirectory ? "bg-primary/50" : "bg-primary"}`}
                     onPress={() => {
                       if (currentDirectory) {
                         onCreateThread(currentDirectory).catch(() => undefined);
                       }
                     }}
-                    disabled={creating || !currentDirectory}
+                    disabled={creating || creatingFolder || !currentDirectory}
                   >
                     {creating ? (
                       <ActivityIndicator size="small" className="text-primary-foreground" />
@@ -799,15 +1416,14 @@ export default function ThreadsScreen() {
 
                   <Pressable
                     className="mt-3 rounded-xl border border-border/50 bg-muted px-3 py-3"
-                    onPress={async () => {
+                    onPress={() => {
                       setShowSettingsMenu(false);
-                      await clearSession();
-                      router.replace("/pair");
+                      router.push("/pair");
                     }}
                   >
                     <View className="flex-row items-center justify-center gap-2">
                       <Ionicons name="link-outline" size={16} className="text-foreground" />
-                      <Text className="text-sm font-semibold text-foreground">Re-Pair Device</Text>
+                      <Text className="text-sm font-semibold text-foreground">Add Gateway</Text>
                     </View>
                   </Pressable>
 

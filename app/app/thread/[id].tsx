@@ -1,34 +1,26 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActivityIndicator,
   FlatList,
-  Image,
   Keyboard,
-  Modal,
   NativeScrollEvent,
   NativeSyntheticEvent,
   Platform,
-  Pressable,
-  ScrollView,
   Text,
   TextInput,
   View,
 } from "react-native";
-import { KeyboardAvoidingView, KeyboardStickyView } from "react-native-keyboard-controller";
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { useLocalSearchParams } from "expo-router";
 import { router } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import * as Clipboard from "expo-clipboard";
-import { AnimatePresence, MotiView } from "moti";
 import { Ionicons } from "@expo/vector-icons";
-import FontAwesome6 from "@expo/vector-icons/FontAwesome6";
-import Markdown, { RenderRules } from "react-native-markdown-display";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   ApiHttpError,
   ReauthRequiredError,
-  clearSession,
+  hasStoredPairing,
   getInteractiveRequests,
   getGatewayOptions,
   getStreamConfig,
@@ -37,2219 +29,107 @@ import {
   getThread,
   getThreadEvents,
   interruptThreadTurn,
+  getQueuedThreadMessages,
+  queueThreadMessage,
+  removeQueuedThreadMessage,
+  steerQueuedThreadMessage,
+  type QueuedThreadMessage,
   respondToInteractiveRequest,
   resumeThread,
   sendThreadMessage,
 } from "@/lib/api";
-import { formatPathForDisplay } from "@/lib/path";
+import {
+  type CopyGroups,
+  extractApiErrorMessage,
+  ThreadTurnRow,
+  type ThreadImageProxyConfig,
+  useSmoothedFlag,
+} from "@/components/thread/thread-renderers";
 import { extractDeltaText, RenderedTurn, toRenderedTurns } from "@/lib/turns";
+import { ThreadHeader } from "@/components/thread/screen/ThreadHeader";
+import { LiveFooter } from "@/components/thread/screen/LiveFooter";
+import { ThreadTimeline } from "@/components/thread/screen/ThreadTimeline";
+import { ThreadComposer } from "@/components/thread/screen/ThreadComposer";
+import { PlanModeToast } from "@/components/thread/screen/PlanModeToast";
+import { OptionPickerModal } from "@/components/thread/screen/OptionPickerModal";
+import { TerminalOutputModal } from "@/components/thread/screen/TerminalOutputModal";
+import { ImagePreviewModal } from "@/components/thread/screen/ImagePreviewModal";
+
+import {
+  threadComposerPreferencesByThreadId,
+} from "@/components/thread/screen/cache";
+import {
+  AUTO_FOLLOW_THROTTLE_MS,
+  DEFAULT_REASONING_OPTIONS,
+  LIVE_FLUSH_INTERVAL_MS,
+  STREAM_METHOD_INTERACTIVE_EXPIRED,
+  STREAM_METHOD_INTERACTIVE_REQUESTED,
+  STREAM_METHOD_INTERACTIVE_RESPONDED,
+  STREAM_METHOD_QUEUE_DISPATCHED,
+  STREAM_METHOD_QUEUE_DISPATCH_FAILED,
+  STREAM_METHOD_QUEUE_ENQUEUED,
+  STREAM_METHOD_QUEUE_REMOVED,
+  STREAM_TURN_APPEND_BATCH_MS,
+  TERMINAL_TURN_METHODS,
+  type CollaborationMode,
+  type ComposerSelection,
+  type LiveStreamBucket,
+  type LiveStreamState,
+  type ModelOption,
+  type OpenDropdown,
+  type PendingImage,
+  type PendingRequestUserInput,
+  type ReasoningEffort,
+  type ReasoningOption,
+  type StreamStatusTone,
+} from "@/components/thread/screen/types";
+import {
+  asRecord,
+  cacheTransientChangeSummaryTurn,
+  changeSummarySignature,
+  createEmptyLiveStreamState,
+  extractActivityFromEvent,
+  extractChangeSummaryFromEvent,
+  extractInteractiveLifecycleRequestId,
+  extractReasoningText,
+  extractTurnIdFromUnknown,
+  extractWebSearchQueries,
+  findActiveMentionToken,
+  firstNonEmptyString,
+  getThreadPreferenceKey,
+  hasLiveStreamContent,
+  isLikelyWebSearchToolName,
+  isMissingQueueRouteError,
+  mergeWithTransientChangeSummaryCache,
+  parseSsePayload,
+  queuedMessageSummary,
+  sameLiveStreamState,
+  sortQueuedMessages,
+  toPendingRequestUserInput,
+  toPendingRequestUserInputList,
+  toPersistedEventTurns,
+  toQueuedThreadMessage,
+  toQueuedThreadMessageRequest,
+  toWebSearchActivity,
+  turnContentSignature,
+  turnsSignature,
+  uniqueAnswerValues,
+  upsertPendingRequestUserInput,
+  upsertQueuedMessage,
+} from "@/components/thread/screen/helpers";
 
-interface CodexSseEvent {
-  method: string;
-  params: unknown;
-}
-
-type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
-type CollaborationMode = "default" | "plan";
-
-interface ModelOption {
-  label: string;
-  value: string;
-}
-
-interface ReasoningOption {
-  label: string;
-  value: ReasoningEffort;
-}
-
-interface PendingImage {
-  id: string;
-  uri: string;
-  imageUrl: string;
-}
-
-interface ThreadImageProxyConfig {
-  baseUrl: string;
-  accessToken: string;
-}
-
-interface ComposerSelection {
-  start: number;
-  end: number;
-}
-
-interface MentionToken {
-  start: number;
-  end: number;
-  query: string;
-}
-
-interface RequestUserInputOption {
-  label: string;
-  description: string;
-}
-
-interface RequestUserInputQuestion {
-  id: string;
-  header: string;
-  question: string;
-  isOther: boolean;
-  isSecret: boolean;
-  options: RequestUserInputOption[] | null;
-}
-
-interface PendingRequestUserInput {
-  id: string;
-  threadId: string | null;
-  turnId: string | null;
-  createdAtMs: number;
-  expiresAtMs: number;
-  questions: RequestUserInputQuestion[];
-}
-
-const DIRECTIVE_LINE_PATTERN = /^::[a-z][a-z0-9-]*\{.*\}\s*$/i;
-
-const DEFAULT_REASONING_OPTIONS: ReasoningOption[] = [
-  { label: "Minimal", value: "minimal" },
-  { label: "Low", value: "low" },
-  { label: "Medium", value: "medium" },
-  { label: "High", value: "high" },
-];
-
-const INTERACTIVE_REQUEST_USER_INPUT_METHOD = "item/tool/requestuserinput";
-const STREAM_METHOD_INTERACTIVE_REQUESTED = "gateway/interactive/requested";
-const STREAM_METHOD_INTERACTIVE_RESPONDED = "gateway/interactive/responded";
-const STREAM_METHOD_INTERACTIVE_EXPIRED = "gateway/interactive/expired";
-const TERMINAL_TURN_METHODS = new Set(["turn/completed", "turn/failed", "turn/cancelled"]);
-
-interface ThreadComposerPreferences {
-  model: string | null;
-  reasoning: ReasoningEffort | null;
-  collaborationMode: CollaborationMode;
-}
-
-const threadComposerPreferencesByThreadId = new Map<string, ThreadComposerPreferences>();
-
-type OpenDropdown = "model" | "reasoning" | null;
-type StreamStatusTone = "ok" | "warn" | "error";
-type LiveStreamBucket =
-  | "assistant"
-  | "terminalOutput"
-  | "reasoning"
-  | "plan"
-  | "fileChanges"
-  | "toolProgress";
-
-interface LiveStreamState {
-  assistant: string;
-  terminalOutput: string;
-  reasoning: string;
-  plan: string;
-  fileChanges: string;
-  toolProgress: string;
-}
-
-const LIVE_STREAM_UI_DEBOUNCE_SECONDS = 0.35;
-const LIVE_FLUSH_INTERVAL_MS = Math.round(LIVE_STREAM_UI_DEBOUNCE_SECONDS * 1000);
-const AUTO_FOLLOW_THROTTLE_MS = 90;
-const STREAM_TURN_APPEND_BATCH_MS = 90;
-
-const SYSTEM_FONT = Platform.select({
-  ios: "System",
-  android: "sans-serif",
-  default: "System",
-});
-
-const MONO_FONT = Platform.select({
-  ios: "Menlo",
-  android: "monospace",
-  default: "monospace",
-});
-
-const markdownStyles = {
-  body: {
-    color: "#d1dced",
-    fontSize: 15,
-    lineHeight: 23,
-    fontFamily: SYSTEM_FONT,
-  },
-  heading1: {
-    color: "#f0f6ff",
-    fontSize: 22,
-    fontWeight: "700" as const,
-    marginTop: 16,
-    marginBottom: 8,
-    fontFamily: SYSTEM_FONT,
-  },
-  heading2: {
-    color: "#ecf2fc",
-    fontSize: 19,
-    fontWeight: "600" as const,
-    marginTop: 14,
-    marginBottom: 6,
-    fontFamily: SYSTEM_FONT,
-  },
-  heading3: {
-    color: "#e4ecf8",
-    fontSize: 16,
-    fontWeight: "600" as const,
-    marginTop: 10,
-    marginBottom: 4,
-    fontFamily: SYSTEM_FONT,
-  },
-  paragraph: { marginTop: 0, marginBottom: 10 },
-  bullet_list: { marginTop: 0, marginBottom: 8 },
-  ordered_list: { marginTop: 0, marginBottom: 8 },
-  list_item: { marginBottom: 4 },
-  ordered_list_content: { flex: 1, flexShrink: 1 },
-  bullet_list_content: { flex: 1, flexShrink: 1 },
-  code_inline: {
-    backgroundColor: "rgba(240,246,255,0.08)",
-    color: "#a5d6ff",
-    borderRadius: 5,
-    paddingHorizontal: 6,
-    paddingVertical: 1.5,
-    fontFamily: MONO_FONT,
-    fontSize: 13.5,
-  },
-  code_block: {
-    backgroundColor: "#0d1117",
-    color: "#e6edf3",
-    borderRadius: 12,
-    padding: 14,
-    marginTop: 6,
-    marginBottom: 12,
-    fontFamily: MONO_FONT,
-    fontSize: 13,
-    lineHeight: 20,
-  },
-  fence: {
-    backgroundColor: "#0d1117",
-    color: "#e6edf3",
-    borderRadius: 12,
-    padding: 14,
-    marginTop: 6,
-    marginBottom: 12,
-    fontFamily: MONO_FONT,
-    fontSize: 13,
-    lineHeight: 20,
-  },
-  blockquote: {
-    backgroundColor: "rgba(56,139,253,0.06)",
-    borderLeftWidth: 3,
-    borderLeftColor: "#388bfd",
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    marginVertical: 8,
-  },
-  hr: { backgroundColor: "rgba(255,255,255,0.08)", marginVertical: 16 },
-  strong: { color: "#f0f6ff", fontWeight: "600" as const },
-  em: { color: "#c9d8ec" },
-  link: { color: "#58a6ff" },
-};
-
-const userMarkdownStyles = {
-  ...markdownStyles,
-  body: {
-    color: "#f4f8ff",
-    fontSize: 15,
-    lineHeight: 23,
-    fontFamily: SYSTEM_FONT,
-  },
-  heading1: {
-    color: "#ffffff",
-    fontSize: 22,
-    fontWeight: "700" as const,
-    marginTop: 16,
-    marginBottom: 8,
-    fontFamily: SYSTEM_FONT,
-  },
-  heading2: {
-    color: "#ffffff",
-    fontSize: 19,
-    fontWeight: "600" as const,
-    marginTop: 14,
-    marginBottom: 6,
-    fontFamily: SYSTEM_FONT,
-  },
-  heading3: {
-    color: "#f4f8ff",
-    fontSize: 16,
-    fontWeight: "600" as const,
-    marginTop: 10,
-    marginBottom: 4,
-    fontFamily: SYSTEM_FONT,
-  },
-  code_inline: {
-    backgroundColor: "rgba(255,255,255,0.12)",
-    color: "#d6ebff",
-    borderRadius: 5,
-    paddingHorizontal: 6,
-    paddingVertical: 1.5,
-    fontFamily: MONO_FONT,
-    fontSize: 13.5,
-  },
-  code_block: {
-    backgroundColor: "rgba(0,0,0,0.3)",
-    color: "#e6edf3",
-    borderRadius: 12,
-    padding: 14,
-    marginTop: 6,
-    marginBottom: 12,
-    fontFamily: MONO_FONT,
-    fontSize: 13,
-    lineHeight: 20,
-  },
-  fence: {
-    backgroundColor: "rgba(0,0,0,0.3)",
-    color: "#e6edf3",
-    borderRadius: 12,
-    padding: 14,
-    marginTop: 6,
-    marginBottom: 12,
-    fontFamily: MONO_FONT,
-    fontSize: 13,
-    lineHeight: 20,
-  },
-  link: { color: "#93ccff" },
-};
-
-function isSupportedMarkdownImageUri(uri: string): boolean {
-  const normalized = uri.trim().toLowerCase();
-  return (
-    normalized.startsWith("https://") ||
-    normalized.startsWith("http://") ||
-    normalized.startsWith("data:image/") ||
-    normalized.startsWith("file://")
-  );
-}
-
-function rewriteLocalMarkdownImagePaths(
-  text: string,
-  threadId: string | null,
-  imageProxyConfig: ThreadImageProxyConfig | null
-): string {
-  if (!threadId || !imageProxyConfig) {
-    return text;
-  }
-
-  const replacementBase = `${imageProxyConfig.baseUrl}/threads/${encodeURIComponent(threadId)}/local-image`;
-  return text.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (match, altText, sourceUrl) => {
-    if (typeof sourceUrl !== "string") {
-      return match;
-    }
-
-    const normalizedSource = sourceUrl.trim();
-    if (!normalizedSource.startsWith("/")) {
-      return match;
-    }
-    if (
-      !normalizedSource.startsWith("/Users/") &&
-      !normalizedSource.startsWith("/private/") &&
-      !normalizedSource.startsWith("/var/")
-    ) {
-      return match;
-    }
-
-    const replacementUrl = `${replacementBase}?path=${encodeURIComponent(normalizedSource)}&access_token=${encodeURIComponent(
-      imageProxyConfig.accessToken
-    )}`;
-    const safeAltText = typeof altText === "string" ? altText : "";
-    return `![${safeAltText}](${replacementUrl})`;
-  });
-}
-
-const selectableMarkdownRules: RenderRules = {
-  text: (node, _children, _parent, styles, inheritedStyles = {}) => (
-    <Text key={node.key} selectable style={[inheritedStyles, styles.text]}>
-      {node.content}
-    </Text>
-  ),
-  textgroup: (node, children, _parent, styles) => (
-    <Text key={node.key} selectable style={styles.textgroup}>
-      {children}
-    </Text>
-  ),
-  strong: (node, children, _parent, styles) => (
-    <Text key={node.key} selectable style={styles.strong}>
-      {children}
-    </Text>
-  ),
-  em: (node, children, _parent, styles) => (
-    <Text key={node.key} selectable style={styles.em}>
-      {children}
-    </Text>
-  ),
-  s: (node, children, _parent, styles) => (
-    <Text key={node.key} selectable style={styles.s}>
-      {children}
-    </Text>
-  ),
-  code_inline: (node, _children, _parent, styles, inheritedStyles = {}) => (
-    <Text key={node.key} selectable style={[inheritedStyles, styles.code_inline]}>
-      {node.content}
-    </Text>
-  ),
-  code_block: (node, _children, _parent, styles, inheritedStyles = {}) => {
-    let { content } = node;
-    if (typeof node.content === "string" && node.content.charAt(node.content.length - 1) === "\n") {
-      content = node.content.substring(0, node.content.length - 1);
-    }
-
-    const { backgroundColor, borderRadius, padding, marginTop, marginBottom, ...textStyle } = styles.code_block;
-    return (
-      <ScrollView
-        key={node.key}
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        style={{ backgroundColor, borderRadius, marginTop, marginBottom }}
-        contentContainerStyle={{ padding }}
-      >
-        <Text style={[inheritedStyles, textStyle]}>
-          {content}
-        </Text>
-      </ScrollView>
-    );
-  },
-  fence: (node, _children, _parent, styles, inheritedStyles = {}) => {
-    let { content } = node;
-    if (typeof node.content === "string" && node.content.charAt(node.content.length - 1) === "\n") {
-      content = node.content.substring(0, node.content.length - 1);
-    }
-
-    const { backgroundColor, borderRadius, padding, marginTop, marginBottom, ...textStyle } = styles.fence;
-    return (
-      <ScrollView
-        key={node.key}
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        style={{ backgroundColor, borderRadius, marginTop, marginBottom }}
-        contentContainerStyle={{ padding }}
-      >
-        <Text style={[inheritedStyles, textStyle]}>
-          {content}
-        </Text>
-      </ScrollView>
-    );
-  },
-  hardbreak: (node, _children, _parent, styles) => (
-    <Text key={node.key} selectable style={styles.hardbreak}>
-      {"\n"}
-    </Text>
-  ),
-  softbreak: (node, _children, _parent, styles) => (
-    <Text key={node.key} selectable style={styles.softbreak}>
-      {"\n"}
-    </Text>
-  ),
-  inline: (node, children, _parent, styles) => (
-    <Text key={node.key} selectable style={styles.inline}>
-      {children}
-    </Text>
-  ),
-  span: (node, children, _parent, styles) => (
-    <Text key={node.key} selectable style={styles.span}>
-      {children}
-    </Text>
-  ),
-  image: (node, _children, _parent, styles) => {
-    const src = typeof node.attributes?.src === "string" ? node.attributes.src.trim() : "";
-    const alt = typeof node.attributes?.alt === "string" ? node.attributes.alt.trim() : "Image";
-
-    if (!src) {
-      return null;
-    }
-
-    if (!isSupportedMarkdownImageUri(src)) {
-      return (
-        <Text key={node.key} selectable style={styles.link}>
-          {alt}
-        </Text>
-      );
-    }
-
-    return (
-      <Image
-        key={node.key}
-        source={{ uri: src }}
-        resizeMode="contain"
-        style={{
-          width: "100%",
-          height: 220,
-          borderRadius: 12,
-          marginTop: 4,
-          marginBottom: 10,
-          backgroundColor: "rgba(0,0,0,0.25)",
-        }}
-      />
-    );
-  },
-};
-
-function parseSsePayload(raw: string): CodexSseEvent | null {
-  try {
-    const parsed = JSON.parse(raw) as CodexSseEvent;
-    if (!parsed || typeof parsed !== "object" || typeof parsed.method !== "string") {
-      return null;
-    }
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function extractReasoningText(params: unknown): string {
-  const getString = (value: unknown): string => (typeof value === "string" && value.length > 0 ? value : "");
-
-  const scan = (value: unknown): string => {
-    if (!value || typeof value !== "object") {
-      return "";
-    }
-
-    const record = value as Record<string, unknown>;
-
-    const direct =
-      getString(record.delta) ||
-      getString(record.text) ||
-      getString(record.summaryText) ||
-      getString(record.summary_text);
-    if (direct) {
-      return direct;
-    }
-
-    const summaryPart = record.summaryPart;
-    if (summaryPart && typeof summaryPart === "object") {
-      const part = summaryPart as Record<string, unknown>;
-      const partText = getString(part.delta) || getString(part.text);
-      if (partText) {
-        return partText;
-      }
-    }
-
-    const summary = record.summary;
-    if (Array.isArray(summary)) {
-      const summaryText = summary
-        .map((part) => {
-          if (!part || typeof part !== "object") {
-            return "";
-          }
-          const summaryRecord = part as Record<string, unknown>;
-          return getString(summaryRecord.delta) || getString(summaryRecord.text);
-        })
-        .filter((part) => part.length > 0)
-        .join("");
-      if (summaryText) {
-        return summaryText;
-      }
-    }
-
-    if (record.item && typeof record.item === "object") {
-      const nested = scan(record.item);
-      if (nested) {
-        return nested;
-      }
-    }
-
-    if (record.message && typeof record.message === "object") {
-      const nested = scan(record.message);
-      if (nested) {
-        return nested;
-      }
-    }
-
-    return "";
-  };
-
-  return scan(params);
-}
-
-function formatReasoningDetail(detail: string): string {
-  const trimmed = detail.trim();
-  if (!trimmed) {
-    return "";
-  }
-
-  const lines = trimmed
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-
-  let normalized = trimmed;
-  const singleTokenLines = lines.filter((line) => !line.includes(" ")).length;
-  if (lines.length >= 3 && singleTokenLines / lines.length >= 0.6) {
-    normalized = lines.join(" ");
-  }
-
-  normalized = normalized.replace(/\*\*(.+?)\*\*/g, "$1");
-  normalized = normalized.replace(/[ \t]{2,}/g, " ");
-  return normalized.trim();
-}
-
-function turnsSignature(items: RenderedTurn[]): string {
-  return items
-    .map((item) => `${item.id}:${item.role}:${item.kind ?? "message"}:${item.text.length}:${item.images?.length ?? 0}`)
-    .join("|");
-}
-
-function createEmptyLiveStreamState(): LiveStreamState {
-  return {
-    assistant: "",
-    terminalOutput: "",
-    reasoning: "",
-    plan: "",
-    fileChanges: "",
-    toolProgress: "",
-  };
-}
-
-function hasLiveStreamContent(stream: LiveStreamState): boolean {
-  return (
-    stream.assistant.trim().length > 0 ||
-    stream.terminalOutput.trim().length > 0 ||
-    stream.reasoning.trim().length > 0 ||
-    stream.plan.trim().length > 0 ||
-    stream.fileChanges.trim().length > 0 ||
-    stream.toolProgress.trim().length > 0
-  );
-}
-
-function sameLiveStreamState(left: LiveStreamState, right: LiveStreamState): boolean {
-  return (
-    left.assistant === right.assistant &&
-    left.terminalOutput === right.terminalOutput &&
-    left.reasoning === right.reasoning &&
-    left.plan === right.plan &&
-    left.fileChanges === right.fileChanges &&
-    left.toolProgress === right.toolProgress
-  );
-}
-
-function parseTimestampMs(value: unknown): number | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function firstNonEmptyString(...values: unknown[]): string | null {
-  for (const value of values) {
-    if (typeof value === "string") {
-      const normalized = value.trim();
-      if (normalized.length > 0) {
-        return normalized;
-      }
-    }
-  }
-  return null;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-  return value as Record<string, unknown>;
-}
-
-function toBooleanFlag(value: unknown): boolean {
-  if (typeof value === "boolean") {
-    return value;
-  }
-  if (typeof value === "string") {
-    const normalized = value.trim().toLowerCase();
-    return normalized === "true" || normalized === "1" || normalized === "yes";
-  }
-  if (typeof value === "number") {
-    return value !== 0;
-  }
-  return false;
-}
-
-function normalizeRequestUserInputQuestions(value: unknown): RequestUserInputQuestion[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  const questions: RequestUserInputQuestion[] = [];
-
-  for (const [index, entry] of value.entries()) {
-    const record = asRecord(entry);
-    if (!record) {
-      continue;
-    }
-
-    const id = firstNonEmptyString(record.id) ?? `question-${index + 1}`;
-    const header = firstNonEmptyString(record.header, record.title) ?? `Question ${index + 1}`;
-    const question = firstNonEmptyString(record.question, record.prompt, record.message);
-    if (!question) {
-      continue;
-    }
-
-    const optionsValue = Array.isArray(record.options) ? record.options : null;
-    const options: RequestUserInputOption[] =
-      optionsValue?.flatMap((option) => {
-        const optionRecord = asRecord(option);
-        if (!optionRecord) {
-          return [];
-        }
-        const label = firstNonEmptyString(optionRecord.label, optionRecord.value);
-        if (!label) {
-          return [];
-        }
-        const description = firstNonEmptyString(optionRecord.description) ?? "";
-        return [{ label, description }];
-      }) ?? [];
-
-    questions.push({
-      id,
-      header,
-      question,
-      isOther: toBooleanFlag(record.isOther ?? record.is_other),
-      isSecret: toBooleanFlag(record.isSecret ?? record.is_secret),
-      options: options.length > 0 ? options : null,
-    });
-  }
-
-  return questions;
-}
-
-function toPendingRequestUserInput(value: unknown): PendingRequestUserInput | null {
-  const record = asRecord(value);
-  if (!record) {
-    return null;
-  }
-
-  const id = firstNonEmptyString(record.id);
-  if (!id) {
-    return null;
-  }
-
-  const method = firstNonEmptyString(record.method)?.toLowerCase() ?? "";
-  if (method !== INTERACTIVE_REQUEST_USER_INPUT_METHOD) {
-    return null;
-  }
-
-  const params = asRecord(record.params) ?? {};
-  const questions = normalizeRequestUserInputQuestions(params.questions);
-  if (questions.length === 0) {
-    return null;
-  }
-
-  const createdAtMs = parseTimestampMs(record.createdAt) ?? Date.now();
-  const expiresAtMs = parseTimestampMs(record.expiresAt) ?? createdAtMs + 5 * 60 * 1000;
-
-  return {
-    id,
-    threadId: firstNonEmptyString(record.threadId, params.threadId, params.thread_id),
-    turnId: firstNonEmptyString(record.turnId, params.turnId, params.turn_id),
-    createdAtMs,
-    expiresAtMs,
-    questions,
-  };
-}
-
-function toPendingRequestUserInputList(value: unknown[]): PendingRequestUserInput[] {
-  const byId = new Map<string, PendingRequestUserInput>();
-
-  for (const entry of value) {
-    const parsed = toPendingRequestUserInput(entry);
-    if (!parsed) {
-      continue;
-    }
-    byId.set(parsed.id, parsed);
-  }
-
-  return Array.from(byId.values()).sort((left, right) => {
-    if (left.createdAtMs !== right.createdAtMs) {
-      return left.createdAtMs - right.createdAtMs;
-    }
-    return left.id.localeCompare(right.id);
-  });
-}
-
-function upsertPendingRequestUserInput(
-  existing: PendingRequestUserInput[],
-  candidate: PendingRequestUserInput
-): PendingRequestUserInput[] {
-  const next = existing.filter((request) => request.id !== candidate.id);
-  next.push(candidate);
-  next.sort((left, right) => {
-    if (left.createdAtMs !== right.createdAtMs) {
-      return left.createdAtMs - right.createdAtMs;
-    }
-    return left.id.localeCompare(right.id);
-  });
-  return next;
-}
-
-function extractInteractiveLifecycleRequestId(params: unknown): string | null {
-  const record = asRecord(params);
-  if (!record) {
-    return null;
-  }
-  const nestedRequest = asRecord(record.request);
-  return firstNonEmptyString(record.id, nestedRequest?.id);
-}
-
-function extractTurnIdFromUnknown(value: unknown): string | null {
-  if (!value || typeof value !== "object") {
-    return null;
-  }
-  if (Array.isArray(value)) {
-    for (const entry of value) {
-      const found = extractTurnIdFromUnknown(entry);
-      if (found) {
-        return found;
-      }
-    }
-    return null;
-  }
-  const record = value as Record<string, unknown>;
-  const direct = firstNonEmptyString(record.turnId, record.turn_id, record.turnID);
-  if (direct) {
-    return direct;
-  }
-  const nestedTurn = asRecord(record.turn);
-  const nestedId = firstNonEmptyString(nestedTurn?.id);
-  if (nestedId) {
-    return nestedId;
-  }
-  for (const nested of Object.values(record)) {
-    const found = extractTurnIdFromUnknown(nested);
-    if (found) {
-      return found;
-    }
-  }
-  return null;
-}
-
-function uniqueAnswerValues(values: string[]): string[] {
-  return Array.from(new Set(values.map((value) => value.trim()).filter((value) => value.length > 0)));
-}
-
-function isLikelyWebSearchToolName(value: string): boolean {
-  const lower = value.trim().toLowerCase();
-  if (!lower) {
-    return false;
-  }
-  if (
-    lower.includes("fuzzyfilesearch") ||
-    lower.includes("fuzzy_file_search") ||
-    lower.includes("file_search") ||
-    lower.includes("filesearch")
-  ) {
-    return false;
-  }
-  return (
-    lower.includes("web_search") ||
-    lower.includes("websearch") ||
-    lower.includes("search_query") ||
-    lower.includes("internet_search")
-  );
-}
-
-function extractWebSearchQueries(value: unknown): string[] {
-  const collected: string[] = [];
-  const seenObjects = new Set<object>();
-  const QUERY_KEY_PATTERN = /(query|search|term|keyword|prompt|input)/i;
-
-  const push = (candidate: unknown) => {
-    if (typeof candidate !== "string") {
-      return;
-    }
-    const normalized = candidate.replace(/[ \t]+/g, " ").trim().replace(/^["'`]|["'`]$/g, "");
-    if (normalized.length < 2) {
-      return;
-    }
-    if (normalized.length > 240) {
-      return;
-    }
-    if (normalized.startsWith("{") || normalized.startsWith("[") || normalized.startsWith("http://") || normalized.startsWith("https://")) {
-      return;
-    }
-    collected.push(normalized);
-  };
-
-  const parseFromUrl = (candidate: unknown) => {
-    if (typeof candidate !== "string") {
-      return;
-    }
-    if (!(candidate.startsWith("http://") || candidate.startsWith("https://"))) {
-      return;
-    }
-    try {
-      const url = new URL(candidate);
-      push(url.searchParams.get("q"));
-      push(url.searchParams.get("query"));
-      push(url.searchParams.get("search_query"));
-    } catch {
-      // Ignore invalid URLs.
-    }
-  };
-
-  const visit = (node: unknown, depth = 0) => {
-    if (!node || depth > 7) {
-      return;
-    }
-
-    if (Array.isArray(node)) {
-      for (const entry of node) {
-        visit(entry, depth + 1);
-      }
-      return;
-    }
-
-    if (typeof node !== "object") {
-      return;
-    }
-
-    if (seenObjects.has(node)) {
-      return;
-    }
-    seenObjects.add(node);
-
-    const record = node as Record<string, unknown>;
-
-    push(record.query);
-    push(record.q);
-    push(record.searchQuery);
-    push(record.search_query);
-    push(record.searchTerm);
-    push(record.search_term);
-    push(record.keyword);
-    push(record.keywords);
-    push(record.prompt);
-    push(record.input);
-    parseFromUrl(record.url);
-    parseFromUrl(record.uri);
-    parseFromUrl(record.link);
-
-    for (const [key, entry] of Object.entries(record)) {
-      if (typeof entry === "string" && QUERY_KEY_PATTERN.test(key)) {
-        push(entry);
-      }
-    }
-
-    const queries = record.queries;
-    if (Array.isArray(queries)) {
-      for (const entry of queries) {
-        if (typeof entry === "string") {
-          push(entry);
-          continue;
-        }
-        if (entry && typeof entry === "object") {
-          const queryEntry = entry as Record<string, unknown>;
-          push(queryEntry.query);
-          push(queryEntry.q);
-          push(queryEntry.searchQuery);
-          push(queryEntry.search_query);
-          push(queryEntry.searchTerm);
-          push(queryEntry.search_term);
-          push(queryEntry.keyword);
-          push(queryEntry.keywords);
-          push(queryEntry.prompt);
-          push(queryEntry.input);
-          push(queryEntry.text);
-          parseFromUrl(queryEntry.url);
-          parseFromUrl(queryEntry.uri);
-          parseFromUrl(queryEntry.link);
-        }
-      }
-    }
-
-    const parseNestedJson = (raw: unknown) => {
-      if (typeof raw !== "string") {
-        return;
-      }
-      try {
-        const parsedArgs = JSON.parse(raw) as unknown;
-        visit(parsedArgs, depth + 1);
-      } catch {
-        // Ignore non-JSON argument payloads.
-      }
-    };
-
-    parseNestedJson(record.arguments);
-    parseNestedJson(record.args);
-    parseNestedJson(record.input);
-    parseNestedJson(record.payload);
-    parseNestedJson(record.data);
-
-    for (const entry of Object.values(record)) {
-      parseFromUrl(entry);
-    }
-
-    for (const nested of Object.values(record)) {
-      if (nested && typeof nested === "object") {
-        visit(nested, depth + 1);
-      }
-    }
-  };
-
-  visit(value);
-  return Array.from(new Set(collected));
-}
-
-function toWebSearchActivity(queries: string[]): { title: string; detail?: string } {
-  if (!queries.length) {
-    return { title: "Web search" };
-  }
-
-  if (queries.length === 1) {
-    return {
-      title: "Web search",
-      detail: queries[0],
-    };
-  }
-
-  return {
-    title: `Web search (${queries.length})`,
-    detail: queries.map((query) => `- ${query}`).join("\n"),
-  };
-}
-
-function normalizePathForChangeKey(rawPath: string): string {
-  const normalizedSlashes = rawPath.replace(/\\/g, "/").trim().replace(/^[ab]\//, "");
-  if (!normalizedSlashes.startsWith("/")) {
-    return normalizedSlashes;
-  }
-
-  const markers = ["/app/", "/gateway/", "/shared/", "/mac/", "/docs/"];
-  for (const marker of markers) {
-    const markerIndex = normalizedSlashes.indexOf(marker);
-    if (markerIndex >= 0) {
-      return normalizedSlashes.slice(markerIndex + 1);
-    }
-  }
-
-  return normalizedSlashes
-    .split("/")
-    .filter((part) => part.length > 0)
-    .slice(-6)
-    .join("/");
-}
-
-function changeSummarySignature(summary: NonNullable<RenderedTurn["summary"]>, turnAnchor = ""): string {
-  const files = summary.files
-    .map((file) => `${normalizePathForChangeKey(file.path)}:${file.additions}:${file.deletions}`)
-    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
-    .join(";");
-  return `change:${turnAnchor}:${files}`;
-}
-
-function turnContentSignature(item: RenderedTurn): string {
-  const turnAnchor = item.turnId ?? "";
-  if (item.kind === "changeSummary" && item.summary) {
-    return changeSummarySignature(item.summary, turnAnchor);
-  }
-  if (item.kind === "activity" && item.activity) {
-    return `activity:${turnAnchor}:${item.activity.title}:${item.activity.detail ?? ""}`;
-  }
-  return `msg:${turnAnchor}:${item.role}:${item.text}:${(item.images ?? []).join(",")}`;
-}
-
-function parseFilesFromUnifiedDiff(diffText: string): Array<{
-  path: string;
-  additions: number;
-  deletions: number;
-  snippets: string[];
-  diff: string;
-}> {
-  const lines = diffText.split("\n");
-  const perFile = new Map<
-    string,
-    {
-      additions: number;
-      deletions: number;
-      snippets: string[];
-      lines: string[];
-    }
-  >();
-  let currentPath: string | null = null;
-
-  for (const line of lines) {
-    const header = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
-    if (header) {
-      currentPath = (header[2] || header[1]).trim();
-      if (!perFile.has(currentPath)) {
-        perFile.set(currentPath, { additions: 0, deletions: 0, snippets: [], lines: [] });
-      }
-    }
-
-    if (!currentPath) {
-      const plusHeader = line.match(/^\+\+\+\s+(.+)$/);
-      if (plusHeader && plusHeader[1] && plusHeader[1] !== "/dev/null") {
-        const rawPath = plusHeader[1].trim();
-        const normalizedPath = rawPath.replace(/^[ab]\//, "");
-        if (normalizedPath.length > 0) {
-          currentPath = normalizedPath;
-          if (!perFile.has(currentPath)) {
-            perFile.set(currentPath, { additions: 0, deletions: 0, snippets: [], lines: [] });
-          }
-        }
-      }
-    }
-
-    if (currentPath) {
-      const stat = perFile.get(currentPath);
-      if (stat) {
-        stat.lines.push(line);
-        if (!line.startsWith("+++ ") && !line.startsWith("--- ")) {
-          if (line.startsWith("+")) {
-            stat.additions += 1;
-            if (stat.snippets.length < 10) {
-              stat.snippets.push(line);
-            }
-          } else if (line.startsWith("-")) {
-            stat.deletions += 1;
-            if (stat.snippets.length < 10) {
-              stat.snippets.push(line);
-            }
-          }
-        }
-      }
-    }
-  }
-
-  return Array.from(perFile.entries()).map(([path, stat]) => ({
-    path,
-    additions: stat.additions,
-    deletions: stat.deletions,
-    snippets: stat.snippets,
-    diff: stat.lines.join("\n"),
-  }));
-}
-
-function isLikelyUnifiedDiff(value: string): boolean {
-  const text = value.trim();
-  if (text.length === 0) {
-    return false;
-  }
-  if (text.includes("diff --git")) {
-    return true;
-  }
-  return text.includes("@@") && text.includes("--- ") && text.includes("+++ ");
-}
-
-function extractChangeSummaryFromEvent(method: string, params: unknown): RenderedTurn["summary"] | null {
-  const lower = method.toLowerCase();
-  const isFileChangeEvent =
-    lower.includes("item/filechange") ||
-    lower.includes("filechange") ||
-    lower.includes("file_change") ||
-    lower.includes("turn/diff") ||
-    lower.includes("diff/updated");
-
-  const files: Array<{ path: string; additions: number; deletions: number; snippets?: string[]; diff?: string }> = [];
-  const seen = new Set<string>();
-
-  const walk = (value: unknown) => {
-    if (!value) {
-      return;
-    }
-    if (Array.isArray(value)) {
-      for (const entry of value) {
-        walk(entry);
-      }
-      return;
-    }
-    if (typeof value !== "object") {
-      return;
-    }
-
-    const record = value as Record<string, unknown>;
-    const pathValue = record.path ?? record.filePath ?? record.file ?? record.filename;
-    const diffValue =
-      typeof record.diff === "string"
-        ? record.diff
-        : typeof record.patch === "string"
-        ? record.patch
-        : typeof record.unifiedDiff === "string"
-        ? record.unifiedDiff
-        : typeof record.unified_diff === "string"
-        ? record.unified_diff
-        : null;
-
-    if (typeof pathValue === "string" && pathValue.trim().length > 0 && typeof diffValue === "string" && diffValue.trim().length > 0) {
-      const additions = diffValue
-        .split("\n")
-        .filter((line) => line.startsWith("+") && !line.startsWith("+++ "))
-        .length;
-      const deletions = diffValue
-        .split("\n")
-        .filter((line) => line.startsWith("-") && !line.startsWith("--- "))
-        .length;
-      const key = `${pathValue}:${additions}:${deletions}:${diffValue.length}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        files.push({
-          path: pathValue.trim(),
-          additions,
-          deletions,
-          diff: diffValue,
-        });
-      }
-    }
-
-    const additionsValue = record.additions ?? record.added ?? record.linesAdded;
-    const deletionsValue = record.deletions ?? record.removed ?? record.linesRemoved;
-    const additions =
-      typeof additionsValue === "number"
-        ? additionsValue
-        : typeof additionsValue === "string"
-        ? Number.parseInt(additionsValue, 10)
-        : NaN;
-    const deletions =
-      typeof deletionsValue === "number"
-        ? deletionsValue
-        : typeof deletionsValue === "string"
-        ? Number.parseInt(deletionsValue, 10)
-        : NaN;
-
-    if (
-      typeof pathValue === "string" &&
-      Number.isFinite(additions) &&
-      Number.isFinite(deletions)
-    ) {
-      const key = `${pathValue}:${additions}:${deletions}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        files.push({
-          path: pathValue,
-          additions,
-          deletions,
-        });
-      }
-    }
-
-    for (const valueEntry of Object.values(record)) {
-      if (typeof valueEntry === "string" && isLikelyUnifiedDiff(valueEntry)) {
-        const parsedFiles = parseFilesFromUnifiedDiff(valueEntry);
-        if (!parsedFiles.length && typeof pathValue === "string" && pathValue.trim().length > 0) {
-          const additions = valueEntry
-            .split("\n")
-            .filter((line) => line.startsWith("+") && !line.startsWith("+++ "))
-            .length;
-          const deletions = valueEntry
-            .split("\n")
-            .filter((line) => line.startsWith("-") && !line.startsWith("--- "))
-            .length;
-          const key = `${pathValue}:${additions}:${deletions}:${valueEntry.length}`;
-          if (!seen.has(key)) {
-            seen.add(key);
-            files.push({
-              path: pathValue.trim(),
-              additions,
-              deletions,
-              diff: valueEntry,
-            });
-          }
-          continue;
-        }
-        for (const parsed of parsedFiles) {
-          const key = `${parsed.path}:${parsed.additions}:${parsed.deletions}:${parsed.diff.length}`;
-          if (!seen.has(key)) {
-            seen.add(key);
-            files.push(parsed);
-          }
-        }
-      }
-    }
-
-    for (const nested of Object.values(record)) {
-      walk(nested);
-    }
-  };
-
-  walk(params);
-
-  if (!files.length && (lower.includes("diff") || lower.includes("filechange") || lower.includes("file_change"))) {
-    return null;
-  }
-
-  if (!files.length) {
-    return null;
-  }
-
-  return {
-    displayKind: isFileChangeEvent ? "change" : "preview",
-    filesChanged: files.length,
-    files,
-  };
-}
-
-function extractActivityFromEvent(method: string, params: unknown): RenderedTurn | null {
-  const lower = method.toLowerCase();
-  const nonce = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-
-  if (lower === "thread/compacted") {
-    return {
-      id: `activity-compact-${nonce}`,
-      role: "system",
-      text: "",
-      kind: "activity",
-      activity: {
-        title: "Context automatically compacted",
-      },
-    };
-  }
-
-  if (lower === "fuzzyfilesearch/sessionupdated") {
-    const record = params && typeof params === "object" ? (params as Record<string, unknown>) : null;
-    const files = record && Array.isArray(record.files) ? record.files : [];
-    return {
-      id: `activity-search-${nonce}`,
-      role: "system",
-      text: "",
-      kind: "activity",
-      activity: {
-        title: `Explored ${files.length} file${files.length === 1 ? "" : "s"}`,
-      },
-    };
-  }
-
-  if (lower === "rawresponseitem/completed") {
-    if (!params || typeof params !== "object") {
-      return null;
-    }
-    const record = params as Record<string, unknown>;
-    const item = record.item;
-    if (!item || typeof item !== "object") {
-      return null;
-    }
-    const responseItem = item as Record<string, unknown>;
-    const type = typeof responseItem.type === "string" ? responseItem.type : "";
-    const typeLower = type.toLowerCase();
-    const responseToolName = firstNonEmptyString(
-      responseItem.name,
-      responseItem.toolName,
-      responseItem.tool_name,
-      responseItem.serverToolName,
-      responseItem.server_tool_name,
-      responseItem.callName,
-      responseItem.call_name
-    );
-    const responseId = `raw-${nonce}`;
-
-    if (
-      typeLower === "web_search_call" ||
-      isLikelyWebSearchToolName(typeLower) ||
-      isLikelyWebSearchToolName(responseToolName ?? "")
-    ) {
-      const queries = extractWebSearchQueries(responseItem.action ?? responseItem);
-      return {
-        id: responseId,
-        role: "system",
-        text: "",
-        kind: "activity",
-        activity: toWebSearchActivity(queries),
-      };
-    }
-
-    if (typeLower === "local_shell_call") {
-      const action = responseItem.action && typeof responseItem.action === "object" ? (responseItem.action as Record<string, unknown>) : null;
-      const command = action && Array.isArray(action.command) ? action.command.filter((part) => typeof part === "string").join(" ") : "";
-      return {
-        id: responseId,
-        role: "system",
-        text: "",
-        kind: "activity",
-        activity: {
-          title: "Ran command",
-          detail: command || undefined,
-        },
-      };
-    }
-
-    if (typeLower === "compaction") {
-      return {
-        id: responseId,
-        role: "system",
-        text: "",
-        kind: "activity",
-        activity: {
-          title: "Context automatically compacted",
-        },
-      };
-    }
-  }
-
-  if (
-    lower !== "item/completed" &&
-    lower !== "item/started" &&
-    lower !== "codex/event/item_started" &&
-    lower !== "codex/event/item_completed"
-  ) {
-    return null;
-  }
-
-  if (!params || typeof params !== "object") {
-    return null;
-  }
-
-  const record = params as Record<string, unknown>;
-  const nestedMsg = record.msg && typeof record.msg === "object" ? (record.msg as Record<string, unknown>) : null;
-  const item = record.item ?? nestedMsg?.item;
-  if (!item || typeof item !== "object") {
-    return null;
-  }
-
-  const threadItem = item as Record<string, unknown>;
-  const itemType = typeof threadItem.type === "string" ? threadItem.type : "";
-  const itemTypeLower = itemType.toLowerCase();
-  const itemId = typeof threadItem.id === "string" ? threadItem.id : `generated-${nonce}`;
-
-  if (itemTypeLower === "contextcompaction") {
-    return {
-      id: `activity-${itemId}`,
-      role: "system",
-      text: "",
-      kind: "activity",
-      activity: {
-        title: "Context automatically compacted",
-      },
-    };
-  }
-
-  if (itemTypeLower === "commandexecution") {
-    const actions = Array.isArray(threadItem.commandActions) ? (threadItem.commandActions as Array<Record<string, unknown>>) : [];
-    const readAction = actions.find((action) => action?.type === "read" && typeof action.path === "string");
-    if (readAction && typeof readAction.path === "string") {
-      return {
-        id: `activity-${itemId}`,
-        role: "system",
-        text: "",
-        kind: "activity",
-        activity: {
-          title: `Read ${readAction.path}`,
-        },
-      };
-    }
-
-    const listAction = actions.find((action) => action?.type === "listFiles");
-    if (listAction) {
-      const path = typeof listAction.path === "string" ? listAction.path : "";
-      return {
-        id: `activity-${itemId}`,
-        role: "system",
-        text: "",
-        kind: "activity",
-        activity: {
-          title: path ? `Explored files in ${path}` : "Explored files",
-        },
-      };
-    }
-
-    const command = typeof threadItem.command === "string" ? threadItem.command.trim() : "";
-    return {
-      id: `activity-${itemId}`,
-      role: "system",
-      text: "",
-      kind: "activity",
-      activity: {
-        title: "Ran command",
-        detail: command || undefined,
-      },
-    };
-  }
-
-  if (itemTypeLower === "websearch") {
-    const queries = extractWebSearchQueries(threadItem);
-    return {
-      id: `activity-${itemId}`,
-      role: "system",
-      text: "",
-      kind: "activity",
-      activity: toWebSearchActivity(queries),
-    };
-  }
-
-  if (itemTypeLower === "mcptoolcall" || itemTypeLower === "toolcall") {
-    const toolName = firstNonEmptyString(
-      threadItem.name,
-      threadItem.toolName,
-      threadItem.tool_name,
-      threadItem.serverToolName,
-      threadItem.server_tool_name,
-      threadItem.callName,
-      threadItem.call_name
-    );
-    const queries = extractWebSearchQueries(threadItem);
-    if (isLikelyWebSearchToolName(toolName ?? "") || queries.length > 0) {
-      return {
-        id: `activity-${itemId}`,
-        role: "system",
-        text: "",
-        kind: "activity",
-        activity: toWebSearchActivity(queries),
-      };
-    }
-  }
-
-  return null;
-}
-
-function toPersistedEventTurns(
-  events: Array<{ id: number; method: string; params?: unknown; createdAt?: string; turnId?: string }>,
-  existing: RenderedTurn[]
-): RenderedTurn[] {
-  const merged = [...existing];
-  const seen = new Set(merged.map((item) => turnContentSignature(item)));
-  const insertCandidate = (candidate: RenderedTurn) => {
-    if (candidate.turnId) {
-      let firstAssistantInTurn = -1;
-      for (let index = 0; index < merged.length; index += 1) {
-        const item = merged[index];
-        if (item.turnId === candidate.turnId && item.role === "assistant") {
-          firstAssistantInTurn = index;
-          break;
-        }
-      }
-      if (firstAssistantInTurn >= 0) {
-        merged.splice(firstAssistantInTurn, 0, candidate);
-        return;
-      }
-
-      let lastInTurn = -1;
-      for (let index = merged.length - 1; index >= 0; index -= 1) {
-        if (merged[index].turnId === candidate.turnId) {
-          lastInTurn = index;
-          break;
-        }
-      }
-      if (lastInTurn >= 0) {
-        merged.splice(lastInTurn + 1, 0, candidate);
-        return;
-      }
-    }
-
-    const candidateMs = typeof candidate.createdAtMs === "number" && Number.isFinite(candidate.createdAtMs) ? candidate.createdAtMs : null;
-    if (candidateMs !== null) {
-      const firstLaterIndex = merged.findIndex((item) => {
-        const itemMs = typeof item.createdAtMs === "number" && Number.isFinite(item.createdAtMs) ? item.createdAtMs : null;
-        return itemMs !== null && itemMs > candidateMs;
-      });
-      if (firstLaterIndex >= 0) {
-        merged.splice(firstLaterIndex, 0, candidate);
-        return;
-      }
-
-      let lastTimestampedIndex = -1;
-      for (let index = merged.length - 1; index >= 0; index -= 1) {
-        const itemMs = typeof merged[index].createdAtMs === "number" && Number.isFinite(merged[index].createdAtMs)
-          ? merged[index].createdAtMs
-          : null;
-        if (itemMs !== null) {
-          lastTimestampedIndex = index;
-          break;
-        }
-      }
-      if (lastTimestampedIndex >= 0) {
-        merged.splice(lastTimestampedIndex + 1, 0, candidate);
-        return;
-      }
-    }
-
-    merged.push(candidate);
-  };
-
-  for (const event of events) {
-    const createdAtMs = parseTimestampMs(event.createdAt);
-    const summary = extractChangeSummaryFromEvent(event.method, event.params ?? null);
-    if (summary) {
-      const candidate: RenderedTurn = {
-        id: `persisted-change-${event.id}`,
-        role: "system",
-        text: "",
-        createdAtMs: createdAtMs ?? undefined,
-        turnId: event.turnId,
-        kind: "changeSummary",
-        summary,
-      };
-      const signature = turnContentSignature(candidate);
-      if (!seen.has(signature)) {
-        seen.add(signature);
-        insertCandidate(candidate);
-      }
-      continue;
-    }
-
-    const activity = extractActivityFromEvent(event.method, event.params ?? null);
-    if (activity) {
-      const candidate: RenderedTurn = {
-        ...activity,
-        id: `persisted-activity-${event.id}`,
-        createdAtMs: createdAtMs ?? undefined,
-        turnId: event.turnId,
-      };
-      const signature = turnContentSignature(candidate);
-      if (!seen.has(signature)) {
-        seen.add(signature);
-        insertCandidate(candidate);
-      }
-    }
-  }
-
-  return merged;
-}
-
-function useSmoothedFlag(value: boolean, exitDelayMs = 180): boolean {
-  const [smoothed, setSmoothed] = useState(value);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    if (timerRef.current) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-
-    if (value) {
-      setSmoothed(true);
-      return;
-    }
-
-    if (!smoothed) {
-      return;
-    }
-
-    timerRef.current = setTimeout(() => {
-      timerRef.current = null;
-      setSmoothed(false);
-    }, exitDelayMs);
-
-    return () => {
-      if (timerRef.current) {
-        clearTimeout(timerRef.current);
-        timerRef.current = null;
-      }
-    };
-  }, [exitDelayMs, smoothed, value]);
-
-  return smoothed;
-}
-
-function ThinkingShinyPill() {
-  return (
-    <MotiView
-      from={{ opacity: 0, translateY: 8 }}
-      animate={{ opacity: 1, translateY: 0 }}
-      exit={{ opacity: 0, translateY: -4 }}
-      transition={{ type: "timing", duration: 300 }}
-      className="pb-4 pt-2"
-    >
-      <MotiView
-        from={{ translateY: 0 }}
-        animate={{ translateY: -3 }}
-        transition={{ type: "timing", duration: 1400, loop: true, repeatReverse: true }}
-      >
-        <View className="relative self-start overflow-hidden rounded-full border border-white/20 bg-white/5 px-4 py-2">
-          <MotiView
-            from={{ translateX: -160, opacity: 0 }}
-            animate={{ translateX: 240, opacity: 0.6 }}
-            transition={{ type: "timing", duration: 1400, loop: true, repeatReverse: false }}
-            className="absolute -bottom-8 -top-8 w-20 bg-white/30"
-            style={{
-              transform: [{ rotate: "18deg" }],
-            }}
-          />
-          <MotiView
-            from={{ translateX: -100, opacity: 0 }}
-            animate={{ translateX: 240, opacity: 0.3 }}
-            transition={{ type: "timing", duration: 1800, loop: true, repeatReverse: false, delay: 400 }}
-            className="absolute -bottom-8 -top-8 w-10 bg-white/20"
-            style={{
-              transform: [{ rotate: "18deg" }],
-            }}
-          />
-          <View className="relative flex-row items-center gap-2">
-            <MotiView
-              from={{ opacity: 0.4 }}
-              animate={{ opacity: 1 }}
-              transition={{ type: "timing", duration: 800, loop: true, repeatReverse: true }}
-            >
-              <Ionicons name="sparkles-outline" size={14} color="#ffffff" />
-            </MotiView>
-            <Text className="text-sm font-semibold text-white">Thinking</Text>
-            <View className="flex-row items-center gap-1">
-              <MotiView
-                from={{ opacity: 0.2, scale: 0.7 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ type: "timing", duration: 500, loop: true, repeatReverse: true, delay: 0 }}
-                className="h-1.5 w-1.5 rounded-full bg-white"
-              />
-              <MotiView
-                from={{ opacity: 0.2, scale: 0.7 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ type: "timing", duration: 500, loop: true, repeatReverse: true, delay: 150 }}
-                className="h-1.5 w-1.5 rounded-full bg-white"
-              />
-              <MotiView
-                from={{ opacity: 0.2, scale: 0.7 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ type: "timing", duration: 500, loop: true, repeatReverse: true, delay: 300 }}
-                className="h-1.5 w-1.5 rounded-full bg-white"
-              />
-            </View>
-          </View>
-        </View>
-      </MotiView>
-    </MotiView>
-  );
-}
-
-function findActiveMentionToken(text: string, cursor: number): MentionToken | null {
-  const safeCursor = Math.max(0, Math.min(cursor, text.length));
-  const prefix = text.slice(0, safeCursor);
-  const atIndex = prefix.lastIndexOf("@");
-  if (atIndex < 0) {
-    return null;
-  }
-
-  const charBefore = atIndex > 0 ? prefix[atIndex - 1] : "";
-  if (charBefore && !/\s/.test(charBefore)) {
-    return null;
-  }
-
-  const mentionBody = prefix.slice(atIndex + 1);
-  if (/\s/.test(mentionBody)) {
-    return null;
-  }
-
-  return {
-    start: atIndex,
-    end: safeCursor,
-    query: mentionBody,
-  };
-}
-
-function sanitizeAssistantDisplayText(text: string): string {
-  const cleaned = text
-    .split(/\r?\n/)
-    .filter((line) => !DIRECTIVE_LINE_PATTERN.test(line.trim()))
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n");
-  return cleaned.trim();
-}
-
-function diffLineToneClassName(line: string): string {
-  if (line.startsWith("@@")) {
-    return "text-slate-400";
-  }
-  if (line.startsWith("+")) {
-    return "text-emerald-400";
-  }
-  if (line.startsWith("-")) {
-    return "text-red-400";
-  }
-  return "text-muted-foreground";
-}
-
-function buildDisplayDiffLines(
-  diffText: string
-): Array<{ lineNumber: number | null; line: string; tone: string }> {
-  const rawLines = diffText.split("\n");
-  const filtered = rawLines.filter(
-    (line) =>
-      !line.startsWith("diff --git") &&
-      !line.startsWith("index ") &&
-      !line.startsWith("--- ") &&
-      !line.startsWith("+++ ")
-  );
-
-  let oldLineCursor: number | null = null;
-  let newLineCursor: number | null = null;
-
-  return filtered.map((line) => {
-    const hunkMatch = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-    if (hunkMatch) {
-      oldLineCursor = Number.parseInt(hunkMatch[1] ?? "0", 10);
-      newLineCursor = Number.parseInt(hunkMatch[2] ?? "0", 10);
-      return {
-        lineNumber: null,
-        line,
-        tone: diffLineToneClassName(line),
-      };
-    }
-
-    if (line.startsWith("+")) {
-      const lineNumber = newLineCursor;
-      newLineCursor = (newLineCursor ?? 0) + 1;
-      return {
-        lineNumber,
-        line,
-        tone: diffLineToneClassName(line),
-      };
-    }
-
-    if (line.startsWith("-")) {
-      const lineNumber = oldLineCursor;
-      oldLineCursor = (oldLineCursor ?? 0) + 1;
-      return {
-        lineNumber,
-        line,
-        tone: diffLineToneClassName(line),
-      };
-    }
-
-    if (line.startsWith(" ")) {
-      const lineNumber = newLineCursor ?? oldLineCursor;
-      if (newLineCursor !== null) {
-        newLineCursor += 1;
-      }
-      if (oldLineCursor !== null) {
-        oldLineCursor += 1;
-      }
-      return {
-        lineNumber,
-        line,
-        tone: diffLineToneClassName(line),
-      };
-    }
-
-    return {
-      lineNumber: null,
-      line,
-      tone: diffLineToneClassName(line),
-    };
-  });
-}
-
-interface CopyGroups {
-  lastIndexByKey: Map<string, number>;
-  textByKey: Map<string, string>;
-}
-
-interface ThreadTurnRowProps {
-  item: RenderedTurn;
-  index: number;
-  threadId: string | null;
-  imageProxyConfig: ThreadImageProxyConfig | null;
-  isLiveStreamingActive: boolean;
-  suppressRowAnimations: boolean;
-  wrappedDiffIds: Set<string>;
-  wrapToast: { diffId: string; wrapped: boolean } | null;
-  lastCopiedDiffId: string | null;
-  expandedTerminalIds: Set<string>;
-  expandedActivityIds: Set<string>;
-  lastCopiedTurnId: string | null;
-  copyGroups: CopyGroups;
-  webSearchFallback: string | null;
-  onToggleDiffWrap: (diffId: string) => void;
-  onCopyDiffText: (diffId: string, diffText?: string) => void;
-  onToggleTerminal: (turnId: string) => void;
-  onToggleActivity: (turnId: string) => void;
-  onPreviewImage: (uri: string) => void;
-  onCopyTurnText: (turnId: string, text?: string) => void;
-  copyGroupKeyForTurn: (turn: RenderedTurn) => string;
-}
-
-function areThreadTurnRowPropsEqual(previous: ThreadTurnRowProps, next: ThreadTurnRowProps): boolean {
-  return (
-    previous.item === next.item &&
-    previous.index === next.index &&
-    previous.threadId === next.threadId &&
-    previous.imageProxyConfig === next.imageProxyConfig &&
-    previous.isLiveStreamingActive === next.isLiveStreamingActive &&
-    previous.suppressRowAnimations === next.suppressRowAnimations &&
-    previous.wrappedDiffIds === next.wrappedDiffIds &&
-    previous.wrapToast === next.wrapToast &&
-    previous.lastCopiedDiffId === next.lastCopiedDiffId &&
-    previous.expandedTerminalIds === next.expandedTerminalIds &&
-    previous.expandedActivityIds === next.expandedActivityIds &&
-    previous.lastCopiedTurnId === next.lastCopiedTurnId &&
-    previous.copyGroups === next.copyGroups &&
-    previous.webSearchFallback === next.webSearchFallback &&
-    previous.onToggleDiffWrap === next.onToggleDiffWrap &&
-    previous.onCopyDiffText === next.onCopyDiffText &&
-    previous.onToggleTerminal === next.onToggleTerminal &&
-    previous.onToggleActivity === next.onToggleActivity &&
-    previous.onPreviewImage === next.onPreviewImage &&
-    previous.onCopyTurnText === next.onCopyTurnText &&
-    previous.copyGroupKeyForTurn === next.copyGroupKeyForTurn
-  );
-}
-
-const ThreadTurnRow = memo(function ThreadTurnRow({
-  item,
-  index,
-  threadId,
-  imageProxyConfig,
-  isLiveStreamingActive,
-  suppressRowAnimations,
-  wrappedDiffIds,
-  wrapToast,
-  lastCopiedDiffId,
-  expandedTerminalIds,
-  expandedActivityIds,
-  lastCopiedTurnId,
-  copyGroups,
-  webSearchFallback,
-  onToggleDiffWrap,
-  onCopyDiffText,
-  onToggleTerminal,
-  onToggleActivity,
-  onPreviewImage,
-  onCopyTurnText,
-  copyGroupKeyForTurn,
-}: ThreadTurnRowProps) {
-  const assistantDisplayText = useMemo(
-    () => rewriteLocalMarkdownImagePaths(sanitizeAssistantDisplayText(item.text ?? ""), threadId, imageProxyConfig),
-    [imageProxyConfig, item.text, threadId]
-  );
-
-  const diffLinesByDiffId = useMemo(() => {
-    const next = new Map<string, Array<{ lineNumber: number | null; line: string; tone: string }>>();
-    if (item.kind !== "changeSummary" || !item.summary) {
-      return next;
-    }
-
-    for (const file of item.summary.files) {
-      if (typeof file.diff === "string" && file.diff.length > 0) {
-        const diffId = `${item.id}:${file.path}`;
-        next.set(diffId, buildDisplayDiffLines(file.diff));
-      }
-    }
-    return next;
-  }, [item]);
-
-  return (
-    <MotiView
-      from={isLiveStreamingActive || suppressRowAnimations ? { opacity: 1, translateY: 0 } : { opacity: 0, translateY: 6 }}
-      animate={{ opacity: 1, translateY: 0 }}
-      transition={
-        isLiveStreamingActive || suppressRowAnimations
-          ? { type: "timing", duration: 0 }
-          : { type: "timing", delay: Math.min(index, 8) * 18, duration: 160 }
-      }
-      className={`mb-2 w-full ${item.role === "user" ? "items-end" : "items-start"}`}
-    >
-      {item.kind === "changeSummary" && item.summary ? (
-        <View className="w-full rounded-2xl border border-border/10 bg-card px-4 py-4">
-          <Text className="text-lg font-bold text-card-foreground">
-            {item.summary.displayKind === "preview"
-              ? "Diff preview"
-              : `${item.summary.filesChanged} file${item.summary.filesChanged === 1 ? "" : "s"} changed`}
-          </Text>
-          {item.summary.files.map((file) => {
-            const diffId = `${item.id}:${file.path}`;
-            const isWrapped = wrappedDiffIds.has(diffId);
-            const diffLines = diffLinesByDiffId.get(diffId) ?? [];
-            return (
-              <View key={`${item.id}-${file.path}`} className="">
-                <View className="flex-row items-center justify-between">
-                  <Text className="max-w-[70%] flex-shrink text-xs leading-5 text-foreground">{file.path}</Text>
-                  <Text className="text-lg font-semibold">
-                    <Text className="text-emerald-400">+{file.additions}</Text>
-                    <Text className="text-red-400"> -{file.deletions}</Text>
-                  </Text>
-                </View>
-                {typeof file.diff === "string" && file.diff.length > 0 ? (
-                  <View className="mt-2 rounded-lg border border-border/40 bg-muted/60 px-2.5 py-2">
-                    <View className="mb-1 flex-row justify-end">
-                      <View className="relative mr-1">
-                        <AnimatePresence>
-                          {wrapToast?.diffId === diffId ? (
-                            <MotiView
-                              key={`wrap-toast-${diffId}`}
-                              from={{ opacity: 0, translateY: 4, scale: 0.97 }}
-                              animate={{ opacity: 1, translateY: 0, scale: 1 }}
-                              exit={{ opacity: 0, translateY: -4, scale: 0.97 }}
-                              transition={{ type: "timing", duration: 170 }}
-                              className="absolute -top-0 right-full z-20 mr-0.5 w-[100px] items-center rounded-full bg-black/20 px-2.5 py-2"
-                            >
-                              <Text className="text-sm text-primary-foreground">
-                                Word wrap {wrapToast.wrapped ? "ON" : "OFF"}
-                              </Text>
-                            </MotiView>
-                          ) : null}
-                        </AnimatePresence>
-                        <Pressable
-                          onPress={() => onToggleDiffWrap(diffId)}
-                          className="flex-row items-center justify-center rounded-full bg-black/20 px-2.5 py-2.5"
-                        >
-                          <Ionicons
-                            name={isWrapped ? "arrow-forward-outline" : "return-down-back-outline"}
-                            size={12}
-                            className="text-primary-foreground"
-                          />
-                        </Pressable>
-                      </View>
-                      <Pressable
-                        onPress={() => onCopyDiffText(diffId, file.diff)}
-                        className="flex-row items-center justify-center rounded-full bg-black/20 px-2.5 py-2.5"
-                      >
-                        <Ionicons
-                          name={lastCopiedDiffId === diffId ? "checkmark" : "copy-outline"}
-                          size={12}
-                          className="text-primary-foreground"
-                        />
-                      </Pressable>
-                    </View>
-                    {isWrapped ? (
-                      <View className="pr-2">
-                        {diffLines.map(({ lineNumber, line, tone }, lineIndex) => (
-                          <View key={`${item.id}-${file.path}-line-row-${lineIndex}`} className="flex-row items-start">
-                            <Text className="w-9 pr-2 text-right text-[10px] leading-5 text-slate-500">
-                              {lineNumber ?? ""}
-                            </Text>
-                            <Text
-                              className={`flex-1 text-[12px] leading-5 ${tone}`}
-                              style={{ fontFamily: MONO_FONT, fontWeight: "600" }}
-                            >
-                              {line.length > 0 ? line : " "}
-                            </Text>
-                          </View>
-                        ))}
-                      </View>
-                    ) : (
-                      <ScrollView horizontal showsHorizontalScrollIndicator>
-                        <View className="pr-2">
-                          {diffLines.map(({ lineNumber, line, tone }, lineIndex) => (
-                            <View key={`${item.id}-${file.path}-line-row-${lineIndex}`} className="flex-row items-start">
-                              <Text className="w-9 pr-2 text-right text-[10px] leading-5 text-slate-500">
-                                {lineNumber ?? ""}
-                              </Text>
-                              <Text
-                                className={`text-[12px] leading-5 ${tone}`}
-                                style={{ fontFamily: MONO_FONT, fontWeight: "600" }}
-                              >
-                                {line.length > 0 ? line : " "}
-                              </Text>
-                            </View>
-                          ))}
-                        </View>
-                      </ScrollView>
-                    )}
-                  </View>
-                ) : null}
-              </View>
-            );
-          })}
-        </View>
-      ) : item.kind === "activity" && item.activity ? (
-        (() => {
-          if (item.activity.title === "Terminal output" && item.activity.detail) {
-            const collapsedPreview =
-              (item.activity.detail.split("\n").find((line) => line.trim().length > 0) ?? "Tap to expand").trim();
-            return (
-              <Pressable
-                className="w-full rounded-xl border border-border/20 bg-black/35 px-3 py-2"
-                onPress={() => onToggleTerminal(item.id)}
-              >
-                <View className="flex-row items-center justify-between">
-                  <Text className="text-xs font-semibold uppercase tracking-[0.8px] text-muted-foreground">
-                    Terminal Output
-                  </Text>
-                  <Ionicons
-                    name={expandedTerminalIds.has(item.id) ? "chevron-up" : "chevron-down"}
-                    size={14}
-                    color="#94a3b8"
-                  />
-                </View>
-                {expandedTerminalIds.has(item.id) ? (
-                  <Text className="mt-1 font-mono text-[12px] leading-5 text-foreground">{item.activity.detail}</Text>
-                ) : (
-                  <Text className="mt-1 text-[12px] text-muted-foreground" numberOfLines={1}>
-                    {collapsedPreview}
-                  </Text>
-                )}
-              </Pressable>
-            );
-          }
-
-          if (
-            item.activity.title === "Reasoning" ||
-            item.activity.title === "Plan" ||
-            item.activity.title === "File changes" ||
-            item.activity.title === "Tool progress" ||
-            item.activity.title.startsWith("Web search")
-          ) {
-            const shouldUseWebSearchFallback = item.activity.title.startsWith("Web search") && !item.activity.detail;
-            const activityDetail =
-              item.activity.title === "Reasoning"
-                ? formatReasoningDetail(item.activity.detail ?? "")
-                : item.activity.detail ??
-                  (shouldUseWebSearchFallback && webSearchFallback ? `From prompt: ${webSearchFallback}` : "");
-            if (!activityDetail) {
-              return (
-                <View className="w-full py-1">
-                  <Text className="text-center text-base font-medium text-muted-foreground">{item.activity.title}</Text>
-                </View>
-              );
-            }
-            return (
-              <View className="w-full rounded-xl border border-border/20 bg-black/35 px-3 py-2">
-                <Text className="mb-1 text-xs font-semibold uppercase tracking-[0.8px] text-muted-foreground">
-                  {item.activity.title}
-                </Text>
-                <Text
-                  className={`text-[12px] leading-5 text-foreground ${
-                    item.activity.title === "File changes" ? "font-mono" : ""
-                  }`}
-                >
-                  {activityDetail}
-                </Text>
-              </View>
-            );
-          }
-
-          if (item.activity.title === "Ran command" && item.activity.detail) {
-            return (
-              <Pressable className="w-full py-1" onPress={() => onToggleActivity(item.id)}>
-                <Text className="text-center text-base font-medium text-muted-foreground">{item.activity.title}</Text>
-                {expandedActivityIds.has(item.id) ? (
-                  <View className="mt-1 rounded-lg border border-border/20 bg-black/35 px-3 py-2">
-                    <Text className="font-mono text-[12px] leading-5 text-foreground">{item.activity.detail}</Text>
-                  </View>
-                ) : (
-                  <Text className="mt-0.5 text-center text-sm text-muted-foreground" numberOfLines={1}>
-                    {item.activity.detail}
-                  </Text>
-                )}
-              </Pressable>
-            );
-          }
-
-          const isReadFileActivity = item.activity.title.startsWith("Read ");
-          return (
-            <View className="w-full py-1">
-              <Text className={`${isReadFileActivity ? "text-left" : "text-center"} text-base font-medium text-muted-foreground`}>
-                {item.activity.title}
-              </Text>
-              {item.activity.detail ? (
-                <Text
-                  className={`mt-0.5 ${isReadFileActivity ? "text-left" : "text-center"} text-sm text-muted-foreground`}
-                  numberOfLines={1}
-                >
-                  {item.activity.detail}
-                </Text>
-              ) : null}
-            </View>
-          );
-        })()
-      ) : item.role === "user" ? (
-        <View className="mt-3 max-w-[86%]">
-          <View className="rounded-3xl border border-border/10 bg-neutral-500/40 px-4 py-2">
-            {item.text ? (
-              <Text selectable className="text-base leading-6 text-white">
-                {item.text}
-              </Text>
-            ) : null}
-            {item.images?.length ? (
-              <View className={item.text ? "mt-2" : ""}>
-                {item.images.map((uri, imageIndex) => (
-                  <Pressable key={`${item.id}-user-image-${imageIndex}`} onPress={() => onPreviewImage(uri)}>
-                    <Image source={{ uri }} resizeMode="contain" className="mb-2 h-48 w-64 rounded-xl bg-black/25" />
-                  </Pressable>
-                ))}
-              </View>
-            ) : null}
-          </View>
-          {(() => {
-            const copyKey = copyGroupKeyForTurn(item);
-            const isLastSection = copyGroups.lastIndexByKey.get(copyKey) === index;
-            const copyText = copyGroups.textByKey.get(copyKey);
-            if (!isLastSection) {
-              return null;
-            }
-
-            return (
-              <View className="mt-1 flex-row justify-end">
-                <Pressable
-                  onPress={() => onCopyTurnText(copyKey, copyText)}
-                  disabled={!copyText}
-                  className={`flex-row items-center gap-1 rounded-full px-2.5 py-1 ${
-                    copyText ? "bg-black/20" : "bg-black/10"
-                  }`}
-                >
-                  <Ionicons
-                    name={lastCopiedTurnId === copyKey ? "checkmark" : "copy-outline"}
-                    size={12}
-                    color={copyText ? "#dbeafe" : "#6b7280"}
-                  />
-                  <Text className={`text-xs ${copyText ? "text-blue-100" : "text-gray-500"}`}>
-                    {lastCopiedTurnId === copyKey ? "Copied" : "Copy"}
-                  </Text>
-                </Pressable>
-              </View>
-            );
-          })()}
-        </View>
-      ) : (
-        <View className="w-full px-1 py-1">
-          {assistantDisplayText.length > 0 ? (
-            <Markdown style={markdownStyles} rules={selectableMarkdownRules}>
-              {assistantDisplayText}
-            </Markdown>
-          ) : null}
-          {item.images?.length ? (
-            <View className={assistantDisplayText.length > 0 ? "mt-1" : ""}>
-              {item.images.map((uri, imageIndex) => (
-                <Pressable key={`${item.id}-assistant-image-${imageIndex}`} onPress={() => onPreviewImage(uri)}>
-                  <Image source={{ uri }} resizeMode="contain" className="mb-2 h-52 w-full rounded-xl bg-black/25" />
-                </Pressable>
-              ))}
-            </View>
-          ) : null}
-          {(() => {
-            const copyKey = copyGroupKeyForTurn(item);
-            const isLastSection = copyGroups.lastIndexByKey.get(copyKey) === index;
-            const copyText = copyGroups.textByKey.get(copyKey);
-            if (!isLastSection) {
-              return null;
-            }
-
-            return (
-              <View className="mt-1 flex-row">
-                <Pressable
-                  onPress={() => onCopyTurnText(copyKey, copyText)}
-                  disabled={!copyText}
-                  className={`flex-row items-center gap-1 rounded-full px-2.5 py-1 ${
-                    copyText ? "bg-black/20" : "bg-black/10"
-                  }`}
-                >
-                  <Ionicons
-                    name={lastCopiedTurnId === copyKey ? "checkmark" : "copy-outline"}
-                    size={12}
-                    color={copyText ? "#cbd5e1" : "#6b7280"}
-                  />
-                  <Text className={`text-xs ${copyText ? "text-slate-300" : "text-gray-500"}`}>
-                    {lastCopiedTurnId === copyKey ? "Copied" : "Copy"}
-                  </Text>
-                </Pressable>
-              </View>
-            );
-          })()}
-        </View>
-      )}
-    </MotiView>
-  );
-}, areThreadTurnRowPropsEqual);
-
-function extractApiErrorMessage(body: string): string | null {
-  const trimmed = body.trim();
-  if (!trimmed) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-    const message =
-      (typeof parsed.error === "string" && parsed.error) ||
-      (typeof parsed.message === "string" && parsed.message) ||
-      null;
-    const detail = typeof parsed.detail === "string" && parsed.detail ? parsed.detail : null;
-    if (message && detail) {
-      return `${message} (${detail})`;
-    }
-    return message || detail || trimmed;
-  } catch {
-    return trimmed;
-  }
-}
 
 export default function ThreadScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, gatewayId: gatewayIdParam } = useLocalSearchParams<{ id: string; gatewayId?: string }>();
   const threadId = useMemo(() => (Array.isArray(id) ? id[0] : id), [id]);
+  const gatewayId = useMemo(
+    () => (Array.isArray(gatewayIdParam) ? gatewayIdParam[0] : gatewayIdParam),
+    [gatewayIdParam]
+  );
+  const threadPreferenceKey = useMemo(
+    () => (threadId ? getThreadPreferenceKey(threadId, gatewayId) : null),
+    [gatewayId, threadId]
+  );
   const insets = useSafeAreaInsets();
 
   const [turns, setTurns] = useState<RenderedTurn[]>([]);
@@ -2268,10 +148,8 @@ export default function ThreadScreen() {
   const [selectedReasoning, setSelectedReasoning] = useState<ReasoningEffort | null>(null);
   const [selectedCollaborationMode, setSelectedCollaborationMode] = useState<CollaborationMode>("default");
   const [planModeToast, setPlanModeToast] = useState<string | null>(null);
-  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const [expandedActivityIds, setExpandedActivityIds] = useState<Set<string>>(new Set());
-  const [expandedTerminalIds, setExpandedTerminalIds] = useState<Set<string>>(new Set());
   const [streamStatus, setStreamStatus] = useState<{ tone: StreamStatusTone; text: string }>({
     tone: "warn",
     text: "Connecting",
@@ -2282,7 +160,12 @@ export default function ThreadScreen() {
   const [optionsLoaded, setOptionsLoaded] = useState(false);
   const [openDropdown, setOpenDropdown] = useState<OpenDropdown>(null);
   const [previewImageUri, setPreviewImageUri] = useState<string | null>(null);
+  const [activeTerminalOutput, setActiveTerminalOutput] = useState<string | null>(null);
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
+  const [queuedMessages, setQueuedMessages] = useState<QueuedThreadMessage[]>([]);
+  const [queueActionPendingIds, setQueueActionPendingIds] = useState<Set<string>>(new Set());
+  const [queueErrorsById, setQueueErrorsById] = useState<Record<string, string>>({});
+  const [queueUnsupported, setQueueUnsupported] = useState(false);
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
   const [headerTitle, setHeaderTitle] = useState("Chat");
   const [headerPath, setHeaderPath] = useState<string | null>(null);
@@ -2339,7 +222,7 @@ export default function ThreadScreen() {
       bufferedStreamTurnsTimerRef.current = null;
     }
     bufferedStreamTurnsRef.current = [];
-  }, []);
+  }, [gatewayId]);
 
   const flushBufferedStreamTurns = useCallback(() => {
     if (bufferedStreamTurnsTimerRef.current) {
@@ -2409,13 +292,41 @@ export default function ThreadScreen() {
     });
   }, []);
 
+  const clearQueueError = useCallback((messageId: string) => {
+    setQueueErrorsById((existing) => {
+      if (!(messageId in existing)) {
+        return existing;
+      }
+      const { [messageId]: _removed, ...rest } = existing;
+      return rest;
+    });
+  }, []);
+
+  const refreshQueuedMessages = useCallback(async () => {
+    if (!threadId) {
+      return;
+    }
+    try {
+      const messages = await getQueuedThreadMessages(threadId, gatewayId);
+      setQueuedMessages(sortQueuedMessages(messages));
+      setQueueUnsupported(false);
+    } catch (error) {
+      if (isMissingQueueRouteError(error)) {
+        setQueueUnsupported(true);
+        setQueuedMessages([]);
+        return;
+      }
+      throw error;
+    }
+  }, [gatewayId, threadId]);
+
   const refreshInteractiveRequests = useCallback(async () => {
     if (!threadId) {
       return;
     }
-    const payload = await getInteractiveRequests(threadId);
+    const payload = await getInteractiveRequests(threadId, gatewayId);
     setPendingRequestUserInputs(toPendingRequestUserInputList(payload.requests));
-  }, [threadId]);
+  }, [gatewayId, threadId]);
 
   const upsertInteractiveRequest = useCallback((candidate: PendingRequestUserInput) => {
     setPendingRequestUserInputs((existing) => upsertPendingRequestUserInput(existing, candidate));
@@ -2458,6 +369,36 @@ export default function ThreadScreen() {
       return changed ? next : existing;
     });
   }, [pendingRequestUserInputs]);
+
+  useEffect(() => {
+    const activeQueuedIds = new Set(queuedMessages.map((message) => message.id));
+
+    setQueueErrorsById((existing) => {
+      const next: Record<string, string> = {};
+      let changed = false;
+      for (const [id, value] of Object.entries(existing)) {
+        if (activeQueuedIds.has(id)) {
+          next[id] = value;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : existing;
+    });
+
+    setQueueActionPendingIds((existing) => {
+      const next = new Set<string>();
+      let changed = false;
+      for (const id of existing) {
+        if (activeQueuedIds.has(id)) {
+          next.add(id);
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : existing;
+    });
+  }, [queuedMessages]);
 
   useEffect(() => {
     const showEvent = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
@@ -2514,17 +455,17 @@ export default function ThreadScreen() {
 
     preferencesInitThreadIdRef.current = null;
 
-    if (!threadId) {
+    if (!threadPreferenceKey) {
       return;
     }
 
-    const saved = threadComposerPreferencesByThreadId.get(threadId);
+    const saved = threadComposerPreferencesByThreadId.get(threadPreferenceKey);
     setSelectedModel(saved?.model ?? null);
     setSelectedReasoning(saved?.reasoning ?? null);
     setSelectedCollaborationMode(saved?.collaborationMode ?? "default");
 
     preferencesInitTimerRef.current = setTimeout(() => {
-      preferencesInitThreadIdRef.current = threadId;
+      preferencesInitThreadIdRef.current = threadPreferenceKey;
       preferencesInitTimerRef.current = null;
     }, 0);
 
@@ -2534,22 +475,22 @@ export default function ThreadScreen() {
         preferencesInitTimerRef.current = null;
       }
     };
-  }, [threadId]);
+  }, [threadPreferenceKey]);
 
   useEffect(() => {
-    if (!threadId) {
+    if (!threadPreferenceKey) {
       return;
     }
-    if (preferencesInitThreadIdRef.current !== threadId) {
+    if (preferencesInitThreadIdRef.current !== threadPreferenceKey) {
       return;
     }
 
-    threadComposerPreferencesByThreadId.set(threadId, {
+    threadComposerPreferencesByThreadId.set(threadPreferenceKey, {
       model: selectedModel,
       reasoning: selectedReasoning,
       collaborationMode: selectedCollaborationMode,
     });
-  }, [selectedCollaborationMode, selectedModel, selectedReasoning, threadId]);
+  }, [selectedCollaborationMode, selectedModel, selectedReasoning, threadPreferenceKey]);
 
   useEffect(() => {
     if (liveIndicatorHideTimerRef.current) {
@@ -2580,7 +521,7 @@ export default function ThreadScreen() {
   }, [streamStatus.tone, streamStatus.text]);
 
   const loadGatewayOptions = useCallback(async () => {
-    const payload = await getGatewayOptions();
+    const payload = await getGatewayOptions(gatewayId);
 
     const nextModelOptions: ModelOption[] = [];
     const nextReasoningByModel: Record<string, ReasoningOption[]> = {};
@@ -2830,7 +771,6 @@ export default function ThreadScreen() {
     initialSnapDoneRef.current = false;
     followBottomRef.current = true;
     draggingRef.current = false;
-    setShowScrollToBottom(false);
     autoFollowLastRunAtRef.current = 0;
     if (autoFollowTimerRef.current) {
       clearTimeout(autoFollowTimerRef.current);
@@ -2845,12 +785,16 @@ export default function ThreadScreen() {
     setTurns([]);
     setImageProxyConfig(null);
     setExpandedActivityIds(new Set());
-    setExpandedTerminalIds(new Set());
+    setActiveTerminalOutput(null);
     setPendingRequestUserInputs([]);
     setRequestSelectionsByRequest({});
     setRequestTextByRequest({});
     setRequestErrorsById({});
     setRequestSubmittingIds(new Set());
+    setQueuedMessages([]);
+    setQueueActionPendingIds(new Set());
+    setQueueErrorsById({});
+    setQueueUnsupported(false);
     turnsSignatureRef.current = "";
     seenTurnSignaturesRef.current = new Set();
     setStreamStatus({ tone: "warn", text: "Connecting" });
@@ -2881,7 +825,7 @@ export default function ThreadScreen() {
       };
 
       const connectStream = async () => {
-        const stream = await getStreamConfig(threadId);
+        const stream = await getStreamConfig(threadId, gatewayId);
         if (!active) {
           return;
         }
@@ -2915,6 +859,9 @@ export default function ThreadScreen() {
           refreshInteractiveRequests().catch(() => {
             // Keep the current interactive queue if the endpoint is temporarily unavailable.
           });
+          refreshQueuedMessages().catch(() => {
+            // Keep stale queued messages visible until a successful refresh.
+          });
         };
 
         socket.onmessage = (event) => {
@@ -2937,6 +884,99 @@ export default function ThreadScreen() {
           }
 
           if (method === "stream/keepalive" || method === "stream/ready") {
+            return;
+          }
+
+          if (method === STREAM_METHOD_QUEUE_ENQUEUED) {
+            const paramsRecord = asRecord(payload.params);
+            const queuedMessage = toQueuedThreadMessage(paramsRecord?.message);
+            if (queuedMessage) {
+              setQueuedMessages((existing) => upsertQueuedMessage(existing, queuedMessage));
+              clearQueueError(queuedMessage.id);
+            }
+            return;
+          }
+
+          if (method === STREAM_METHOD_QUEUE_REMOVED) {
+            const paramsRecord = asRecord(payload.params);
+            const removedId = firstNonEmptyString(paramsRecord?.id);
+            if (removedId) {
+              setQueuedMessages((existing) => existing.filter((message) => message.id !== removedId));
+              clearQueueError(removedId);
+              setQueueActionPendingIds((existing) => {
+                if (!existing.has(removedId)) {
+                  return existing;
+                }
+                const next = new Set(existing);
+                next.delete(removedId);
+                return next;
+              });
+            }
+            return;
+          }
+
+          if (method === STREAM_METHOD_QUEUE_DISPATCHED) {
+            const paramsRecord = asRecord(payload.params);
+            const dispatchedId = firstNonEmptyString(paramsRecord?.id);
+            const dispatchedTurnId = firstNonEmptyString(paramsRecord?.turnId);
+            const dispatchedRequest = toQueuedThreadMessageRequest(paramsRecord?.request);
+
+            if (dispatchedId) {
+              setQueuedMessages((existing) => existing.filter((message) => message.id !== dispatchedId));
+              clearQueueError(dispatchedId);
+              setQueueActionPendingIds((existing) => {
+                if (!existing.has(dispatchedId)) {
+                  return existing;
+                }
+                const next = new Set(existing);
+                next.delete(dispatchedId);
+                return next;
+              });
+            }
+            if (dispatchedTurnId) {
+              latestObservedTurnId = dispatchedTurnId;
+              setActiveTurnId(dispatchedTurnId);
+            }
+            if (dispatchedRequest) {
+              const summary = queuedMessageSummary(dispatchedRequest);
+              if (summary.text || summary.imageCount > 0) {
+                const candidate: RenderedTurn = {
+                  id: makeClientTurnId("queued-user"),
+                  role: "user",
+                  text: summary.text,
+                  images: dispatchedRequest.images?.map((image) => image.imageUrl) ?? [],
+                  turnId: dispatchedTurnId ?? undefined,
+                };
+                const candidateSignature = turnContentSignature(candidate);
+                if (!seenTurnSignaturesRef.current.has(candidateSignature)) {
+                  seenTurnSignaturesRef.current.add(candidateSignature);
+                  setTurns((existing) => [...existing, candidate]);
+                  followBottomRef.current = true;
+                }
+              }
+            }
+            return;
+          }
+
+          if (method === STREAM_METHOD_QUEUE_DISPATCH_FAILED) {
+            const paramsRecord = asRecord(payload.params);
+            const failedId = firstNonEmptyString(paramsRecord?.id);
+            const failedError =
+              firstNonEmptyString(paramsRecord?.error) ?? "Unable to dispatch queued message.";
+            if (failedId) {
+              setQueueErrorsById((existing) => ({
+                ...existing,
+                [failedId]: failedError,
+              }));
+              setQueueActionPendingIds((existing) => {
+                if (!existing.has(failedId)) {
+                  return existing;
+                }
+                const next = new Set(existing);
+                next.delete(failedId);
+                return next;
+              });
+            }
             return;
           }
 
@@ -2990,14 +1030,18 @@ export default function ThreadScreen() {
             const key = changeSummarySignature(summary, summaryTurnId ?? "");
             if (!seenChangeHashesRef.current.has(key)) {
               seenChangeHashesRef.current.add(key);
-              enqueueBufferedStreamTurn({
+              const candidate: RenderedTurn = {
                 id: makeClientTurnId("change"),
                 role: "system",
                 text: "",
                 turnId: summaryTurnId ?? undefined,
                 kind: "changeSummary",
                 summary,
-              });
+              };
+              enqueueBufferedStreamTurn(candidate);
+              if (threadPreferenceKey) {
+                cacheTransientChangeSummaryTurn(threadPreferenceKey, candidate);
+              }
             }
             return;
           }
@@ -3121,12 +1165,13 @@ export default function ThreadScreen() {
       };
 
       try {
-        await resumeThread(threadId);
-        const [thread, eventsResponse, threadsResponse, interactiveResponse] = await Promise.all([
-          getThread(threadId),
-          getThreadEvents(threadId),
-          getThreads(),
-          getInteractiveRequests(threadId).catch(() => null),
+        await resumeThread(threadId, gatewayId);
+        const [thread, eventsResponse, threadsResponse, interactiveResponse, queuedResponse] = await Promise.all([
+          getThread(threadId, gatewayId),
+          getThreadEvents(threadId, gatewayId),
+          getThreads(gatewayId),
+          getInteractiveRequests(threadId, gatewayId).catch(() => null),
+          getQueuedThreadMessages(threadId, gatewayId).catch(() => [] as QueuedThreadMessage[]),
         ]);
         if (!active) {
           return;
@@ -3139,22 +1184,24 @@ export default function ThreadScreen() {
 
         const initialTurns = toRenderedTurns(thread.turns);
         const withPersistedEvents = toPersistedEventTurns(eventsResponse.events, initialTurns);
+        const withPersistedAndTransient = mergeWithTransientChangeSummaryCache(withPersistedEvents, threadPreferenceKey);
         clearBufferedStreamTurns();
-        setTurns(withPersistedEvents);
+        setTurns(withPersistedAndTransient);
         setError(null);
-        turnsSignatureRef.current = turnsSignature(withPersistedEvents);
-        seenTurnSignaturesRef.current = new Set(withPersistedEvents.map((item) => turnContentSignature(item)));
+        turnsSignatureRef.current = turnsSignature(withPersistedAndTransient);
+        seenTurnSignaturesRef.current = new Set(withPersistedAndTransient.map((item) => turnContentSignature(item)));
         seenChangeHashesRef.current = new Set(
-          withPersistedEvents
+          withPersistedAndTransient
             .filter((item) => item.kind === "changeSummary" && item.summary)
             .map((item) => turnContentSignature(item))
         );
         setPendingRequestUserInputs(interactiveResponse ? toPendingRequestUserInputList(interactiveResponse.requests) : []);
+        setQueuedMessages(sortQueuedMessages(queuedResponse));
         await connectStream();
       } catch (setupError) {
         if (setupError instanceof ReauthRequiredError) {
-          await clearSession();
-          router.replace("/pair");
+          const stillPaired = await hasStoredPairing();
+          router.replace(stillPaired ? "/threads" : "/pair");
           return;
         }
         setStreamStatus({ tone: "error", text: "Disconnected" });
@@ -3189,10 +1236,14 @@ export default function ThreadScreen() {
     };
   }, [
     threadId,
+    gatewayId,
+    threadPreferenceKey,
     markConnectionRecovered,
     refreshInteractiveRequests,
+    refreshQueuedMessages,
     upsertInteractiveRequest,
     removeInteractiveRequestById,
+    clearQueueError,
     makeClientTurnId,
     appendLiveChunk,
     finalizeLiveSnapshotToTurns,
@@ -3217,31 +1268,36 @@ export default function ThreadScreen() {
     let active = true;
     const timer = setInterval(async () => {
       try {
-        const [thread, eventsResponse, interactiveResponse] = await Promise.all([
-          getThread(threadId),
-          getThreadEvents(threadId),
-          getInteractiveRequests(threadId).catch(() => null),
+        const [thread, eventsResponse, interactiveResponse, queuedResponse] = await Promise.all([
+          getThread(threadId, gatewayId),
+          getThreadEvents(threadId, gatewayId),
+          getInteractiveRequests(threadId, gatewayId).catch(() => null),
+          getQueuedThreadMessages(threadId, gatewayId).catch(() => null),
         ]);
         if (!active) {
           return;
         }
         const rendered = toRenderedTurns(thread.turns);
         const withPersistedEvents = toPersistedEventTurns(eventsResponse.events, rendered);
-        const nextSignature = turnsSignature(withPersistedEvents);
+        const withPersistedAndTransient = mergeWithTransientChangeSummaryCache(withPersistedEvents, threadPreferenceKey);
+        const nextSignature = turnsSignature(withPersistedAndTransient);
         if (nextSignature !== turnsSignatureRef.current) {
           turnsSignatureRef.current = nextSignature;
           clearLiveBuffers();
           clearBufferedStreamTurns();
-          setTurns(withPersistedEvents);
-          seenTurnSignaturesRef.current = new Set(withPersistedEvents.map((item) => turnContentSignature(item)));
+          setTurns(withPersistedAndTransient);
+          seenTurnSignaturesRef.current = new Set(withPersistedAndTransient.map((item) => turnContentSignature(item)));
           seenChangeHashesRef.current = new Set(
-            withPersistedEvents
+            withPersistedAndTransient
               .filter((item) => item.kind === "changeSummary" && item.summary)
               .map((item) => turnContentSignature(item))
           );
         }
         if (interactiveResponse) {
           setPendingRequestUserInputs(toPendingRequestUserInputList(interactiveResponse.requests));
+        }
+        if (queuedResponse) {
+          setQueuedMessages(sortQueuedMessages(queuedResponse));
         }
         markConnectionRecovered();
       } catch {
@@ -3253,7 +1309,7 @@ export default function ThreadScreen() {
       active = false;
       clearInterval(timer);
     };
-  }, [threadId, loading, streamStatus.tone, markConnectionRecovered, clearLiveBuffers, clearBufferedStreamTurns]);
+  }, [threadId, gatewayId, threadPreferenceKey, loading, streamStatus.tone, markConnectionRecovered, clearLiveBuffers, clearBufferedStreamTurns]);
 
   useEffect(() => {
     let active = true;
@@ -3351,27 +1407,22 @@ export default function ThreadScreen() {
   );
 
   const onListScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-    if (!draggingRef.current) {
-      return;
-    }
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
     const distanceFromBottom = contentSize.height - (contentOffset.y + layoutMeasurement.height);
     const isNearBottom = distanceFromBottom < 120;
     // If the user scrolls away from bottom, stop auto-following streamed tokens.
     followBottomRef.current = isNearBottom;
-    setShowScrollToBottom(!isNearBottom);
   };
 
-  const scrollToBottom = () => {
-    followBottomRef.current = true;
+  const onListScrollToTop = useCallback(() => {
+    // iOS status-bar tap jumps to top without a drag gesture.
+    followBottomRef.current = false;
     draggingRef.current = false;
-    setShowScrollToBottom(false);
     if (autoFollowTimerRef.current) {
       clearTimeout(autoFollowTimerRef.current);
       autoFollowTimerRef.current = null;
     }
-    keepToBottom(true);
-  };
+  }, []);
 
   const copyTurnText = useCallback(async (turnId: string, text?: string) => {
     if (!text) {
@@ -3452,10 +1503,14 @@ export default function ThreadScreen() {
 
     const timer = setTimeout(async () => {
       try {
-        const payload = await getThreadFiles(threadId, {
-          query: activeMention.query,
-          limit: 200,
-        });
+        const payload = await getThreadFiles(
+          threadId,
+          {
+            query: activeMention.query,
+            limit: 200,
+          },
+          gatewayId
+        );
 
         if (!active || mentionRequestRef.current !== requestId) {
           return;
@@ -3487,7 +1542,7 @@ export default function ThreadScreen() {
       active = false;
       clearTimeout(timer);
     };
-  }, [activeMention, threadId]);
+  }, [activeMention, gatewayId, threadId]);
 
   const applyMentionSelection = useCallback(
     (filePath: string) => {
@@ -3592,9 +1647,13 @@ export default function ThreadScreen() {
       clearRequestError(request.id);
 
       try {
-        await respondToInteractiveRequest(request.id, {
-          answers: answersByQuestion,
-        });
+        await respondToInteractiveRequest(
+          request.id,
+          {
+            answers: answersByQuestion,
+          },
+          gatewayId
+        );
         removeInteractiveRequestById(request.id);
         setRequestSelectionsByRequest((existing) => {
           if (!(request.id in existing)) {
@@ -3647,6 +1706,101 @@ export default function ThreadScreen() {
     ]
   );
 
+  const onRemoveQueuedMessage = useCallback(
+    async (messageId: string) => {
+      if (!threadId || queueActionPendingIds.has(messageId)) {
+        return;
+      }
+
+      setQueueActionPendingIds((existing) => {
+        const next = new Set(existing);
+        next.add(messageId);
+        return next;
+      });
+      clearQueueError(messageId);
+
+      try {
+        await removeQueuedThreadMessage(threadId, messageId, gatewayId);
+        setQueuedMessages((existing) => existing.filter((message) => message.id !== messageId));
+      } catch (removeError) {
+        if (isMissingQueueRouteError(removeError)) {
+          setQueueUnsupported(true);
+          setQueuedMessages([]);
+          setError("Queued messages are not supported by this gateway. Update your Mac gateway.");
+          return;
+        }
+        if (removeError instanceof ReauthRequiredError) {
+          const stillPaired = await hasStoredPairing();
+          router.replace(stillPaired ? "/threads" : "/pair");
+          return;
+        }
+        setQueueErrorsById((existing) => ({
+          ...existing,
+          [messageId]: removeError instanceof Error ? removeError.message : "Unable to remove queued message.",
+        }));
+      } finally {
+        setQueueActionPendingIds((existing) => {
+          if (!existing.has(messageId)) {
+            return existing;
+          }
+          const next = new Set(existing);
+          next.delete(messageId);
+          return next;
+        });
+      }
+    },
+    [clearQueueError, gatewayId, queueActionPendingIds, threadId]
+  );
+
+  const onSteerQueuedMessage = useCallback(
+    async (messageId: string) => {
+      if (!threadId || queueActionPendingIds.has(messageId)) {
+        return;
+      }
+
+      setQueueActionPendingIds((existing) => {
+        const next = new Set(existing);
+        next.add(messageId);
+        return next;
+      });
+      clearQueueError(messageId);
+
+      try {
+        const response = await steerQueuedThreadMessage(threadId, messageId, gatewayId);
+        if (response.turnId) {
+          setActiveTurnId(response.turnId);
+        }
+        setQueuedMessages((existing) => existing.filter((message) => message.id !== messageId));
+      } catch (steerError) {
+        if (isMissingQueueRouteError(steerError)) {
+          setQueueUnsupported(true);
+          setQueuedMessages([]);
+          setError("Queued messages are not supported by this gateway. Update your Mac gateway.");
+          return;
+        }
+        if (steerError instanceof ReauthRequiredError) {
+          const stillPaired = await hasStoredPairing();
+          router.replace(stillPaired ? "/threads" : "/pair");
+          return;
+        }
+        setQueueErrorsById((existing) => ({
+          ...existing,
+          [messageId]: steerError instanceof Error ? steerError.message : "Unable to steer queued message.",
+        }));
+      } finally {
+        setQueueActionPendingIds((existing) => {
+          if (!existing.has(messageId)) {
+            return existing;
+          }
+          const next = new Set(existing);
+          next.delete(messageId);
+          return next;
+        });
+      }
+    },
+    [clearQueueError, gatewayId, queueActionPendingIds, threadId]
+  );
+
   const onSend = async () => {
     if (!threadId || sending) {
       return;
@@ -3656,19 +1810,64 @@ export default function ThreadScreen() {
       return;
     }
 
-    Keyboard.dismiss();
     const queuedImages = pendingImages;
+    const requestPayload = {
+      text: text || undefined,
+      images: queuedImages.map((image) => ({ imageUrl: image.imageUrl })),
+      model: resolvedSelectedModel ?? undefined,
+      reasoningEffort: resolvedSelectedReasoning ?? undefined,
+      collaborationMode: resolvedSelectedModel ? selectedCollaborationMode : undefined,
+    };
+
+    Keyboard.dismiss();
+    setError(null);
+
+    if (isResponding) {
+      if (queueUnsupported) {
+        setError("This gateway version does not support queued messages. Stop the current response or update your Mac gateway.");
+        return;
+      }
+      setSending(true);
+      try {
+        const queueResponse = await queueThreadMessage(threadId, requestPayload, gatewayId);
+        setQueuedMessages((existing) => upsertQueuedMessage(existing, queueResponse.message));
+        clearQueueError(queueResponse.message.id);
+        setQueueUnsupported(false);
+        setComposerText("");
+        setComposerSelection({ start: 0, end: 0 });
+        setMentionFiles([]);
+        setMentionError(null);
+        setPendingImages([]);
+      } catch (queueError) {
+        if (isMissingQueueRouteError(queueError)) {
+          setQueueUnsupported(true);
+          setQueuedMessages([]);
+          setError("Queued messages are not supported by this gateway. Update your Mac gateway.");
+          return;
+        }
+        if (queueError instanceof ReauthRequiredError) {
+          const stillPaired = await hasStoredPairing();
+          router.replace(stillPaired ? "/threads" : "/pair");
+          return;
+        }
+        setError(queueError instanceof Error ? queueError.message : "Unable to queue message");
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
+
     setComposerText("");
     setComposerSelection({ start: 0, end: 0 });
     setMentionFiles([]);
     setMentionError(null);
     setPendingImages([]);
     setSending(true);
-    setError(null);
 
+    const optimisticTurnId = makeClientTurnId("local-user");
     setTurns((existing) => {
       const localUserTurn: RenderedTurn = {
-        id: makeClientTurnId("local-user"),
+        id: optimisticTurnId,
         role: "user",
         text,
         images: queuedImages.map((image) => image.uri),
@@ -3679,20 +1878,40 @@ export default function ThreadScreen() {
     followBottomRef.current = true;
 
     try {
-      const response = await sendThreadMessage(threadId, {
-        text: text || undefined,
-        images: queuedImages.map((image) => ({ imageUrl: image.imageUrl })),
-        model: resolvedSelectedModel ?? undefined,
-        reasoningEffort: resolvedSelectedReasoning ?? undefined,
-        collaborationMode: resolvedSelectedModel ? selectedCollaborationMode : undefined,
-      });
+      const response = await sendThreadMessage(threadId, requestPayload, gatewayId);
       if (response.turnId) {
         setActiveTurnId(response.turnId);
       }
     } catch (sendError) {
+      if (sendError instanceof ApiHttpError && sendError.status === 409) {
+        try {
+          const queueResponse = await queueThreadMessage(threadId, requestPayload, gatewayId);
+          setQueuedMessages((existing) => upsertQueuedMessage(existing, queueResponse.message));
+          clearQueueError(queueResponse.message.id);
+          setQueueUnsupported(false);
+          // Remove optimistic local turn when request is queued instead of sent.
+          setTurns((existing) => existing.filter((turn) => turn.id !== optimisticTurnId));
+          return;
+        } catch (queueError) {
+          if (isMissingQueueRouteError(queueError)) {
+            setQueueUnsupported(true);
+            setQueuedMessages([]);
+            setTurns((existing) => existing.filter((turn) => turn.id !== optimisticTurnId));
+            setError("Queued messages are not supported by this gateway. Update your Mac gateway.");
+            return;
+          }
+          if (queueError instanceof ReauthRequiredError) {
+            const stillPaired = await hasStoredPairing();
+            router.replace(stillPaired ? "/threads" : "/pair");
+            return;
+          }
+          setError(queueError instanceof Error ? queueError.message : "Unable to queue message");
+          return;
+        }
+      }
       if (sendError instanceof ReauthRequiredError) {
-        await clearSession();
-        router.replace("/pair");
+        const stillPaired = await hasStoredPairing();
+        router.replace(stillPaired ? "/threads" : "/pair");
         return;
       }
       setError(sendError instanceof Error ? sendError.message : "Unable to send message");
@@ -3725,7 +1944,8 @@ export default function ThreadScreen() {
           ? {
               turnId: resolvedTurnId,
             }
-          : {}
+          : {},
+        gatewayId
       );
       setIsThinking(false);
       setActiveTurnId(null);
@@ -3739,6 +1959,7 @@ export default function ThreadScreen() {
   }, [
     activeTurnId,
     finalizeLiveSnapshotToTurns,
+    gatewayId,
     latestKnownTurnId,
     stopping,
     threadId,
@@ -3869,7 +2090,11 @@ export default function ThreadScreen() {
   const isResponding = sending || isThinking || isLiveStreamingActive;
   const smoothIsThinking = useSmoothedFlag(isThinking, 240);
   const composerHasDraft = composerText.trim().length > 0 || pendingImages.length > 0;
-  const composerActionIconName = isResponding
+  const shouldShowStopAction = isResponding && !composerHasDraft;
+  const composerActionDisabled = shouldShowStopAction
+    ? stopping
+    : sending || !composerHasDraft || Boolean(activeRequestUserInput);
+  const composerActionIconName = shouldShowStopAction
     ? stopping
       ? "time-outline"
       : "stop-circle-outline"
@@ -4021,16 +2246,12 @@ export default function ThreadScreen() {
 
   const latestUserPromptFallback = webSearchFallbackByIndex.get(turns.length) ?? null;
 
-  const onToggleTerminal = useCallback((turnId: string) => {
-    setExpandedTerminalIds((existing) => {
-      const next = new Set(existing);
-      if (next.has(turnId)) {
-        next.delete(turnId);
-      } else {
-        next.add(turnId);
-      }
-      return next;
-    });
+  const onOpenTerminalOutput = useCallback((detail: string) => {
+    const normalized = detail.trim();
+    if (!normalized) {
+      return;
+    }
+    setActiveTerminalOutput(detail);
   }, []);
 
   const onToggleActivity = useCallback((turnId: string) => {
@@ -4061,14 +2282,13 @@ export default function ThreadScreen() {
         wrappedDiffIds={wrappedDiffIds}
         wrapToast={wrapToast}
         lastCopiedDiffId={lastCopiedDiffId}
-        expandedTerminalIds={expandedTerminalIds}
         expandedActivityIds={expandedActivityIds}
         lastCopiedTurnId={lastCopiedTurnId}
         copyGroups={copyGroups}
         webSearchFallback={webSearchFallbackByIndex.get(index) ?? null}
         onToggleDiffWrap={toggleDiffWrap}
         onCopyDiffText={copyDiffText}
-        onToggleTerminal={onToggleTerminal}
+        onOpenTerminalOutput={onOpenTerminalOutput}
         onToggleActivity={onToggleActivity}
         onPreviewImage={onPreviewTurnImage}
         onCopyTurnText={copyTurnText}
@@ -4083,14 +2303,13 @@ export default function ThreadScreen() {
       wrappedDiffIds,
       wrapToast,
       lastCopiedDiffId,
-      expandedTerminalIds,
       expandedActivityIds,
       lastCopiedTurnId,
       copyGroups,
       webSearchFallbackByIndex,
       toggleDiffWrap,
       copyDiffText,
-      onToggleTerminal,
+      onOpenTerminalOutput,
       onToggleActivity,
       onPreviewTurnImage,
       copyTurnText,
@@ -4102,47 +2321,14 @@ export default function ThreadScreen() {
     <SafeAreaView className="flex-1 bg-background" edges={["top", "left", "right"]}>
       <KeyboardAvoidingView className="flex-1" behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={0}>
         <View className="flex-1 bg-background px-4 pt-1">
-      <View className="-mx-4 mb-3 border-b border-border/50 pb-2 px-4">
-      <View className="relative h-12 justify-center">
-          <View className="absolute bottom-0 left-0 top-0 z-10 justify-center">
-            <Pressable
-              onPress={() => router.back()}
-              className="self-start h-10 w-10 items-center justify-center"
-            >
-              <Ionicons name="chevron-back" size={24} color="#ffffff" />
-            </Pressable>
-          </View>
-
-          <View className="px-12">
-            <View className="items-center">
-              <Text className="text-2xl font-semibold text-foreground" numberOfLines={1}>
-                {headerTitle}
-              </Text>
-              <MotiView
-                animate={{ opacity: headerPath ? 1 : 0, translateY: headerPath ? 0 : -4, height: headerPath ? 16 : 0 }}
-                transition={{ type: "timing", duration: 220 }}
-                style={{ overflow: "hidden", width: "100%", alignItems: "center" }}
-              >
-                <Text className="text-[11px] leading-[14px] text-muted-foreground" numberOfLines={1}>
-                  {headerPath ? formatPathForDisplay(headerPath) : ""}
-                </Text>
-              </MotiView>
-            </View>
-          </View>
-
-          <View className="absolute bottom-0 right-0 top-0 z-10 items-end justify-center">
-            <MotiView
-              animate={{ opacity: indicatorVisible ? 1 : 0, scale: indicatorVisible ? 1 : 0.97 }}
-              transition={{ type: "timing", duration: 1000 }}
-            >
-              <View className="flex-row items-center rounded-full border border-border/10 bg-card px-2.5 py-1.5">
-                <View className="mr-1.5 h-2 w-2 rounded-full" style={{ backgroundColor: streamDotColor }} />
-                <Text className="text-xs font-semibold text-foreground">{streamStatus.text}</Text>
-              </View>
-            </MotiView>
-          </View>
-        </View>
-        </View>
+          <ThreadHeader
+            headerTitle={headerTitle}
+            headerPath={headerPath}
+            indicatorVisible={indicatorVisible}
+            streamDotColor={streamDotColor}
+            streamStatusText={streamStatus.text}
+            onBackPress={() => router.back()}
+          />
         {/* <Text className="mb-2 text-[11px] font-semibold uppercase tracking-[1.2px] text-muted-foreground">ID</Text>
         <Text className="mb-3 rounded-xl border border-border/10 bg-muted px-3 py-2 text-xs text-muted-foreground">{threadId}</Text> */}
 
@@ -4152,591 +2338,140 @@ export default function ThreadScreen() {
           </View>
         ) : null}
 
-        <FlatList
-          ref={listRef}
-          data={turns}
-          keyExtractor={(item) => item.id}
-          className="flex-1"
-          style={{ marginHorizontal: -16 }}
-          contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 16 }}
-          indicatorStyle="white"
-          scrollIndicatorInsets={{ right: 1 }}
-          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
-          keyboardShouldPersistTaps="handled"
-          onScroll={onListScroll}
-          onScrollBeginDrag={() => {
-            draggingRef.current = true;
-          }}
-          onScrollEndDrag={() => {
-            draggingRef.current = false;
-          }}
-          onMomentumScrollEnd={() => {
-            draggingRef.current = false;
-          }}
-          onContentSizeChange={() => {
-            scheduleAutoFollow(false);
-          }}
-          scrollEventThrottle={16}
-          renderItem={renderTurnItem}
-          ListEmptyComponent={
-            loading ? (
-              <View className="items-center justify-center rounded-2xl border border-border/10 bg-muted p-5">
-                <ActivityIndicator color="#8f8f8f" />
-                <Text className="mt-2 text-sm text-muted-foreground">Loading thread…</Text>
-              </View>
-            ) : (
-              <View className="rounded-2xl border border-dashed border-border/50 bg-card p-4">
-                <Text className="text-center text-sm text-muted-foreground">No turns available for this thread yet.</Text>
-              </View>
-            )
-          }
-          ListFooterComponent={
-            <View>
-              {liveFooterTurns.map((item, index) => (
-                <View key={`footer-${item.id}-${index}`} className="mb-2 w-full items-start">
-                  {item.kind === "activity" && item.activity ? (
-                    (() => {
-                      if (item.activity.title === "Terminal output" && item.activity.detail) {
-                        return (
-                          <View className="w-full rounded-xl border border-border/20 bg-black/35 px-3 py-2">
-                            <Text className="text-xs font-semibold uppercase tracking-[0.8px] text-muted-foreground">
-                              Terminal Output
-                            </Text>
-                            <Text className="mt-1 font-mono text-[12px] leading-5 text-foreground">
-                              {item.activity.detail}
-                            </Text>
-                          </View>
-                        );
-                      }
+          <ThreadTimeline
+            listRef={listRef}
+            turns={turns}
+            loading={loading}
+            renderTurnItem={renderTurnItem}
+            onListScroll={onListScroll}
+            onListScrollToTop={onListScrollToTop}
+            onScrollBeginDrag={() => {
+              draggingRef.current = true;
+            }}
+            onScrollEndDrag={() => {
+              draggingRef.current = false;
+            }}
+            onMomentumScrollEnd={() => {
+              draggingRef.current = false;
+            }}
+            onContentSizeChange={() => {
+              scheduleAutoFollow(false);
+            }}
+            footer={
+              <LiveFooter
+                liveFooterTurns={liveFooterTurns}
+                smoothIsThinking={smoothIsThinking}
+                threadId={threadId ?? null}
+                imageProxyConfig={imageProxyConfig}
+                latestUserPromptFallback={latestUserPromptFallback}
+                onOpenTerminalOutput={onOpenTerminalOutput}
+              />
+            }
+          />
 
-                      if (
-                        item.activity.title === "Reasoning" ||
-                        item.activity.title === "Plan" ||
-                        item.activity.title === "File changes" ||
-                        item.activity.title === "Tool progress" ||
-                        item.activity.title.startsWith("Web search")
-                      ) {
-                        const webSearchFallback =
-                          item.activity.title.startsWith("Web search") && !item.activity.detail
-                            ? latestUserPromptFallback
-                            : null;
-                        const activityDetail =
-                          item.activity.title === "Reasoning"
-                            ? formatReasoningDetail(item.activity.detail ?? "")
-                            : item.activity.detail ?? (webSearchFallback ? `From prompt: ${webSearchFallback}` : "");
-
-                        if (!activityDetail) {
-                          return (
-                            <View className="w-full py-1">
-                              <Text className="text-center text-base font-medium text-muted-foreground">{item.activity.title}</Text>
-                            </View>
-                          );
-                        }
-
-                        return (
-                          <View className="w-full rounded-xl border border-border/20 bg-black/35 px-3 py-2">
-                            <Text className="mb-1 text-xs font-semibold uppercase tracking-[0.8px] text-muted-foreground">
-                              {item.activity.title}
-                            </Text>
-                            <Text
-                              className={`text-[12px] leading-5 text-foreground ${
-                                item.activity.title === "File changes" ? "font-mono" : ""
-                              }`}
-                            >
-                              {activityDetail}
-                            </Text>
-                          </View>
-                        );
-                      }
-
-                      return (
-                        <View className="w-full py-1">
-                          <Text className="text-center text-base font-medium text-muted-foreground">{item.activity.title}</Text>
-                          {item.activity.detail ? (
-                            <Text className="mt-0.5 text-center text-sm text-muted-foreground" numberOfLines={1}>
-                              {item.activity.detail}
-                            </Text>
-                          ) : null}
-                        </View>
-                      );
-                    })()
-                  ) : item.role === "assistant" ? (
-                    (() => {
-                      const footerAssistantText = sanitizeAssistantDisplayText(item.text ?? "");
-                      const footerDisplayText = rewriteLocalMarkdownImagePaths(
-                        footerAssistantText,
-                        threadId ?? null,
-                        imageProxyConfig
-                      );
-                      return (
-                        <View className="w-full px-1 py-1">
-                          {footerDisplayText.length > 0 ? (
-                            <Markdown style={markdownStyles} rules={selectableMarkdownRules}>
-                              {footerDisplayText}
-                            </Markdown>
-                          ) : null}
-                        </View>
-                      );
-                    })()
-                  ) : null}
-                </View>
-              ))}
-              <AnimatePresence>
-                {smoothIsThinking ? <ThinkingShinyPill key="thinking" /> : null}
-              </AnimatePresence>
-            </View>
-          }
-        />
-
-        {showScrollToBottom ? (
-          <Pressable
-            onPress={scrollToBottom}
-            className="absolute bottom-[158px] z-20 self-center rounded-full border border-border/10 bg-muted"
-            style={{ width: 36, height: 36, justifyContent: "center", alignItems: "center" }}
-          >
-            <Ionicons name="arrow-down" size={16} color="#e0e0e0" />
-          </Pressable>
-        ) : null}
-
-        {(() => {
-          const composerContent = (
-            <>
-              {activeRequestUserInput ? (
-                <View className="mb-2 rounded-2xl border border-border/40 bg-card px-3 py-3">
-                  <View className="mb-2 flex-row items-center justify-between">
-                    <View className="flex-row items-center gap-2">
-                      <Ionicons name="help-circle-outline" size={16} color="#e5e7eb" />
-                      <Text className="text-sm font-semibold text-foreground">Input required</Text>
-                    </View>
-                    <Text className="text-[11px] text-muted-foreground">
-                      {pendingRequestUserInputs.length > 1
-                        ? `1/${pendingRequestUserInputs.length} pending`
-                        : activeRequestExpiryLabel
-                        ? `Expires ${activeRequestExpiryLabel}`
-                        : "Pending"}
-                    </Text>
-                  </View>
-
-                  {activeRequestQuestion ? (
-                    (() => {
-                      const question = activeRequestQuestion;
-                      const selectedAnswers = activeRequestSelections[question.id] ?? [];
-                      const textValue = activeRequestText[question.id] ?? "";
-                      const hasOptions = Array.isArray(question.options) && question.options.length > 0;
-                      const isLastQuestion = activeRequestQuestionIndex === activeRequestUserInput.questions.length - 1;
-
-                      return (
-                        <View key={`${activeRequestUserInput.id}-${question.id}`}>
-                          <Text className="text-[11px] text-muted-foreground">
-                            Question {activeRequestQuestionIndex + 1}/{activeRequestUserInput.questions.length}
-                          </Text>
-                          <Text className="mt-1 text-xs font-semibold uppercase tracking-[0.7px] text-muted-foreground">
-                            {question.header}
-                          </Text>
-                          <Text className="mt-1 text-sm text-foreground">{question.question}</Text>
-
-                          {hasOptions ? (
-                            <View className="mt-2 gap-2">
-                              {question.options?.map((option) => {
-                                const selected = selectedAnswers.includes(option.label);
-                                return (
-                                  <Pressable
-                                    key={`${activeRequestUserInput.id}-${question.id}-${option.label}`}
-                                    onPress={() => toggleRequestQuestionOption(activeRequestUserInput.id, question.id, option.label)}
-                                    className={`rounded-xl border px-3 py-2 ${
-                                      selected ? "border-border bg-muted" : "border-border/40 bg-black/20"
-                                    }`}
-                                  >
-                                    <View className="flex-row items-start gap-2">
-                                      <Ionicons
-                                        name={selected ? "checkmark-circle" : "ellipse-outline"}
-                                        size={18}
-                                        color={selected ? "#e5e7eb" : "#9ca3af"}
-                                      />
-                                      <View className="flex-1">
-                                        <Text className="text-sm font-semibold text-foreground">{option.label}</Text>
-                                        {option.description ? (
-                                          <Text className="mt-0.5 text-xs leading-4 text-muted-foreground">{option.description}</Text>
-                                        ) : null}
-                                      </View>
-                                    </View>
-                                  </Pressable>
-                                );
-                              })}
-                            </View>
-                          ) : null}
-
-                          {!hasOptions || question.isOther ? (
-                            <TextInput
-                              value={textValue}
-                              onChangeText={(value) => setRequestQuestionText(activeRequestUserInput.id, question.id, value)}
-                              placeholder={hasOptions ? "Other" : "Type your answer"}
-                              placeholderTextColor="#6b7280"
-                              secureTextEntry={question.isSecret}
-                              multiline={!question.isSecret}
-                              className="mt-2 rounded-xl border border-border/40 bg-black/20 px-3 py-2 text-sm text-foreground"
-                            />
-                          ) : null}
-
-                          {activeRequestError ? <Text className="mt-2 text-xs text-red-300">{activeRequestError}</Text> : null}
-
-                          <View className="mt-3 flex-row items-center justify-between gap-2">
-                            <Pressable
-                              onPress={onBackRequestQuestion}
-                              disabled={activeRequestQuestionIndex === 0 || activeRequestSubmitting}
-                              className={`h-10 flex-1 items-center justify-center rounded-xl border ${
-                                activeRequestQuestionIndex === 0 || activeRequestSubmitting
-                                  ? "border-border/20 bg-muted/30"
-                                  : "border-border/40 bg-black/20"
-                              }`}
-                            >
-                              <Text className="text-sm font-semibold text-foreground">Back</Text>
-                            </Pressable>
-
-                            <Pressable
-                              disabled={activeRequestSubmitting}
-                              onPress={
-                                isLastQuestion
-                                  ? () => submitRequestUserInput(activeRequestUserInput)
-                                  : onAdvanceRequestQuestion
-                              }
-                              className={`h-10 flex-1 items-center justify-center rounded-xl ${
-                                activeRequestSubmitting ? "bg-muted" : "bg-foreground"
-                              }`}
-                            >
-                              <Text className={`text-sm font-semibold ${activeRequestSubmitting ? "text-muted-foreground" : "text-background"}`}>
-                                {activeRequestSubmitting ? "Submitting..." : isLastQuestion ? "Submit input" : "Next"}
-                              </Text>
-                            </Pressable>
-                          </View>
-                        </View>
-                      );
-                    })()
-                  ) : null}
-
-                </View>
-              ) : null}
-
-              {optionsLoaded && resolvedSelectedModel && currentReasoningOptions.length > 0 ? (
-                <View className="mb-1.5 flex-row justify-between gap-2">
-                  <View className="flex-row gap-2">
-                    <Pressable
-                      onPress={() => setOpenDropdown("model")}
-                      className="h-9 flex gap-2 flex-row items-center justify-between rounded-full px-3"
-                    >
-                      <Text className="text-sm font-semibold text-foreground">
-                        {modelOptions.find((option) => option.value === resolvedSelectedModel)?.label}
-                      </Text>
-                      <View className="w-4 items-center justify-center">
-                        <Ionicons name="chevron-up" size={14} className="text-foreground" />
-                      </View>
-                    </Pressable>
-                    <Pressable
-                      onPress={() => setOpenDropdown("reasoning")}
-                      className="h-9 flex gap-2 flex-row items-center justify-between rounded-full px-3"
-                    >
-                      <Text className="text-sm font-semibold text-foreground">
-                        {currentReasoningOptions.find((option) => option.value === resolvedSelectedReasoning)?.label}
-                      </Text>
-                      <View className="w-4 items-center justify-center">
-                        <Ionicons name="chevron-up" size={14} className="text-foreground" />
-                      </View>
-                    </Pressable>
-                    <Pressable
-                      onPress={() => {
-                        const next = selectedCollaborationMode === "default" ? "plan" : "default";
-                        setSelectedCollaborationMode(next);
-                        setPlanModeToast(next === "plan" ? "Plan mode on" : "Plan mode off");
-                      }}
-                      className="h-9 w-9 items-center justify-center rounded-full"
-                    >
-                      <FontAwesome6
-                        name="list-check"
-                        size={16}
-                        color={selectedCollaborationMode === "plan" ? "#3b82f6" : "#64748b"}
-                      />
-                    </Pressable>
-                  </View>
-                  {keyboardVisible ? (
-                    <MotiView
-                      from={{ opacity: 0, scale: 0.8 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.8 }}
-                      transition={{ type: "timing", duration: 150 }}
-                    >
-                      <Pressable
-                        onPress={() => Keyboard.dismiss()}
-                        className="h-9 flex-row items-center justify-center gap-1.5 rounded-full border border-border/10 bg-muted px-3"
-                      >
-                        <Ionicons name="keypad" size={16} color="#e0e0e0" />
-                        <Ionicons name="chevron-down" className="pt-0.5" size={14} color="#e0e0e0" />
-                      </Pressable>
-                    </MotiView>
-                  ) : null}
-                </View>
-              ) : null}
-
-              {showMentionSuggestions ? (
-                <View className="mb-2 max-h-56 overflow-hidden rounded-2xl border border-border/10 bg-muted">
-                  <View className="flex-row items-center gap-1.5 border-b border-border/10 px-3 py-1.5">
-                    <Ionicons name="at" size={13} color="#94a3b8" />
-                    <Text className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                      Files
-                    </Text>
-                    {mentionLoading ? (
-                      <ActivityIndicator size="small" color="#94a3b8" className="ml-auto" />
-                    ) : null}
-                  </View>
-                  {mentionError ? (
-                    <View className="flex-row items-center gap-2 px-3 py-2.5">
-                      <Ionicons name="warning-outline" size={14} color="#fbbf24" />
-                      <Text className="text-xs text-amber-300">{mentionError}</Text>
-                    </View>
-                  ) : null}
-                  {mentionLoading && mentionSuggestions.length === 0 ? (
-                    <View className="px-3 py-3">
-                      <Text className="text-xs text-muted-foreground">Searching files…</Text>
-                    </View>
-                  ) : null}
-                  {!mentionLoading && !mentionError && mentionSuggestions.length === 0 ? (
-                    <View className="flex-row items-center gap-2 px-3 py-3">
-                      <Ionicons name="document-outline" size={14} color="#64748b" />
-                      <Text className="text-xs text-muted-foreground">No matching files</Text>
-                    </View>
-                  ) : null}
-                  <ScrollView
-                    nestedScrollEnabled
-                    keyboardShouldPersistTaps="handled"
-                    showsVerticalScrollIndicator
-                    className="max-h-44"
-                  >
-                    {mentionSuggestions.map((filePath) => {
-                      const parts = filePath.split("/");
-                      const fileName = parts.pop() ?? filePath;
-                      const dirPath = parts.join("/");
-                      return (
-                        <Pressable
-                          key={`mention-${filePath}`}
-                          onPress={() => applyMentionSelection(filePath)}
-                          className="flex-row items-center gap-2.5 border-b border-border/5 px-3 py-2 active:bg-white/5"
-                        >
-                          <Ionicons name="document-text-outline" size={16} color="#94a3b8" />
-                          <View className="flex-1">
-                            <Text className="font-mono text-[13px] font-semibold text-foreground" numberOfLines={1}>
-                              {fileName}
-                            </Text>
-                            {dirPath ? (
-                              <Text className="font-mono text-[11px] text-muted-foreground" numberOfLines={1}>
-                                {dirPath}
-                              </Text>
-                            ) : null}
-                          </View>
-                        </Pressable>
-                      );
-                    })}
-                  </ScrollView>
-                </View>
-              ) : null}
-
-              {pendingImages.length > 0 ? (
-                <View className="mb-2">
-                  <FlatList
-                    horizontal
-                    data={pendingImages}
-                    keyExtractor={(item) => item.id}
-                    showsHorizontalScrollIndicator={false}
-                    renderItem={({ item }) => (
-                      <View className="mr-2">
-                        <Pressable onPress={() => setPreviewImageUri(item.uri)}>
-                          <Image source={{ uri: item.uri }} resizeMode="cover" className="h-16 w-16 rounded-lg bg-black/25" />
-                        </Pressable>
-                        <Pressable
-                          onPress={() =>
-                            setPendingImages((existing) => existing.filter((image) => image.id !== item.id))
-                          }
-                          className="absolute -right-1 -top-1 rounded-full bg-black/70 p-1"
-                        >
-                          <Ionicons name="close" size={12} color="#ffffff" />
-                        </Pressable>
-                      </View>
-                    )}
-                  />
-                </View>
-              ) : null}
-
-              <View className="flex-row items-end gap-2">
-                <Pressable
-                  onPress={onPickImages}
-                  className="h-11 w-11 items-center justify-center rounded-full border border-border/10 bg-muted"
-                >
-                  <Ionicons name="image-outline" size={18} className="text-primary-foreground" />
-                </Pressable>
-                <TextInput
-                  ref={composerInputRef}
-                  value={composerText}
-                  onChangeText={setComposerText}
-                  onSelectionChange={(event) => setComposerSelection(event.nativeEvent.selection)}
-                  selection={composerSelection}
-                  placeholder="Continue this thread..."
-                  placeholderTextColor="#94a3b8"
-                  keyboardAppearance="dark"
-                  multiline
-                  className="max-h-36 flex-1 rounded-3xl border border-border/10 bg-muted px-4 py-3 text-foreground"
-                />
-                <Pressable
-                  disabled={isResponding ? stopping : sending || !composerHasDraft || Boolean(activeRequestUserInput)}
-                  onPress={isResponding ? onStopResponse : onSend}
-                  className={`h-11 w-11 items-center justify-center rounded-full ${
-                    isResponding || sending || !composerHasDraft || activeRequestUserInput ? "bg-secondary" : "bg-primary"
-                  }`}
-                >
-                  <AnimatePresence>
-                    <MotiView
-                      key={`${composerActionIconName}-${isResponding ? "responding" : "idle"}-${stopping ? "stopping" : "active"}`}
-                      from={{ opacity: 0, scale: 0.78, rotate: "-10deg" }}
-                      animate={{ opacity: 1, scale: 1, rotate: "0deg" }}
-                      exit={{ opacity: 0, scale: 0.78, rotate: "10deg" }}
-                      transition={{ type: "timing", duration: 140 }}
-                      style={{ width: 20, height: 20, alignItems: "center", justifyContent: "center" }}
-                    >
-                      <Ionicons name={composerActionIconName} size={20} className="text-primary-foreground" />
-                    </MotiView>
-                  </AnimatePresence>
-                </Pressable>
-              </View>
-            </>
-          );
-
-          return Platform.OS === "android" ? (
-            <KeyboardStickyView offset={{ closed: 0, opened: 0 }}>
-              <View
-                className="-mx-4 border-t border-border/50 bg-background px-4 pt-2"
-                style={{ paddingBottom: Math.max(insets.bottom, 8) }}
-              >
-                {composerContent}
-              </View>
-            </KeyboardStickyView>
-          ) : (
-            <View
-              className="-mx-4 border-t border-border/50 bg-background px-4 pt-2"
-              style={{ paddingBottom: keyboardVisible ? 10 : Math.max(insets.bottom, 8) }}
-            >
-              {composerContent}
-            </View>
-          );
-        })()}
+          <ThreadComposer
+            activeRequestUserInput={activeRequestUserInput}
+            pendingRequestUserInputs={pendingRequestUserInputs}
+            activeRequestExpiryLabel={activeRequestExpiryLabel}
+            activeRequestQuestion={activeRequestQuestion}
+            activeRequestSelections={activeRequestSelections}
+            activeRequestText={activeRequestText}
+            activeRequestQuestionIndex={activeRequestQuestionIndex}
+            activeRequestError={activeRequestError}
+            activeRequestSubmitting={activeRequestSubmitting}
+            onToggleRequestQuestionOption={toggleRequestQuestionOption}
+            onSetRequestQuestionText={setRequestQuestionText}
+            onBackRequestQuestion={onBackRequestQuestion}
+            onAdvanceRequestQuestion={onAdvanceRequestQuestion}
+            onSubmitRequestUserInput={(request) => {
+              void submitRequestUserInput(request);
+            }}
+            queuedMessages={queuedMessages}
+            queueActionPendingIds={queueActionPendingIds}
+            queueErrorsById={queueErrorsById}
+            sending={sending}
+            onSteerQueuedMessage={(messageId) => {
+              void onSteerQueuedMessage(messageId);
+            }}
+            onRemoveQueuedMessage={(messageId) => {
+              void onRemoveQueuedMessage(messageId);
+            }}
+            optionsLoaded={optionsLoaded}
+            resolvedSelectedModel={resolvedSelectedModel}
+            currentReasoningOptions={currentReasoningOptions}
+            modelOptions={modelOptions}
+            resolvedSelectedReasoning={resolvedSelectedReasoning}
+            selectedCollaborationMode={selectedCollaborationMode}
+            keyboardVisible={keyboardVisible}
+            onOpenModelDropdown={() => setOpenDropdown("model")}
+            onOpenReasoningDropdown={() => setOpenDropdown("reasoning")}
+            onToggleCollaborationMode={() => {
+              const next = selectedCollaborationMode === "default" ? "plan" : "default";
+              setSelectedCollaborationMode(next);
+              setPlanModeToast(next === "plan" ? "Plan mode on" : "Plan mode off");
+            }}
+            onDismissKeyboard={() => Keyboard.dismiss()}
+            showMentionSuggestions={showMentionSuggestions}
+            mentionLoading={mentionLoading}
+            mentionError={mentionError}
+            mentionSuggestions={mentionSuggestions}
+            onApplyMentionSelection={applyMentionSelection}
+            pendingImages={pendingImages}
+            onPreviewPendingImage={(uri) => setPreviewImageUri(uri)}
+            onRemovePendingImage={(imageId) => {
+              setPendingImages((existing) => existing.filter((image) => image.id !== imageId));
+            }}
+            onPickImages={() => {
+              void onPickImages();
+            }}
+            composerInputRef={composerInputRef}
+            composerText={composerText}
+            onComposerTextChange={setComposerText}
+            composerSelection={composerSelection}
+            onComposerSelectionChange={setComposerSelection}
+            composerActionDisabled={composerActionDisabled}
+            shouldShowStopAction={shouldShowStopAction}
+            onStopResponse={() => {
+              void onStopResponse();
+            }}
+            onSend={() => {
+              void onSend();
+            }}
+            composerActionIconName={composerActionIconName}
+            stopping={stopping}
+            insetsBottom={insets.bottom}
+          />
       </View>
       </KeyboardAvoidingView>
 
-      <AnimatePresence>
-        {planModeToast !== null && (
-          <MotiView
-            from={{ opacity: 0, translateY: 20 }}
-            animate={{ opacity: 1, translateY: 0 }}
-            exit={{ opacity: 0, translateY: 20 }}
-            transition={{ type: "timing", duration: 200 }}
-            className="absolute left-0 right-0 items-center"
-            style={{ bottom: Math.max(insets.bottom, 8) + 100 }}
-            pointerEvents="none"
-          >
-            <View className="rounded-full bg-muted px-4 py-2 border border-border/10">
-              <Text className="text-sm font-medium text-foreground">{planModeToast}</Text>
-            </View>
-          </MotiView>
-        )}
-      </AnimatePresence>
+      <PlanModeToast visibleText={planModeToast} bottomOffset={Math.max(insets.bottom, 8) + 100} />
 
-      <Modal
-        transparent
-        visible={openDropdown !== null && optionsLoaded}
-        animationType="fade"
-        onRequestClose={() => setOpenDropdown(null)}
-      >
-        <Pressable
-          className="flex-1 justify-end bg-background/80 px-4"
-          style={{ paddingBottom: Math.max(insets.bottom, 8) + 96 }}
-          onPress={() => setOpenDropdown(null)}
-        >
-          <AnimatePresence>
-            {openDropdown !== null && (
-              <MotiView
-                from={{ opacity: 0, translateY: 100 }}
-                animate={{ opacity: 1, translateY: 0 }}
-                exit={{ opacity: 0, translateY: 100 }}
-                transition={{ type: "timing", duration: 250 }}
-              >
-                <Pressable
-                  className="rounded-xl border border-border/10 bg-muted p-2"
-                  onPress={(event) => {
-                    event.stopPropagation();
-                  }}
-                >
-                  {(openDropdown === "model"
-                    ? modelOptions
-                    : currentReasoningOptions
-                  ).map((option) => {
-                    const active =
-                      openDropdown === "model"
-                        ? resolvedSelectedModel === option.value
-                        : resolvedSelectedReasoning === option.value;
-                    return (
-                      <Pressable
-                        key={`${openDropdown}-${option.label}`}
-                        className={`rounded-lg px-3 py-3 flex-row items-center justify-between ${active ? "bg-card" : "bg-transparent"}`}
-                        onPress={() => {
-                          if (openDropdown === "model") {
-                            setSelectedModel(option.value as string);
-                          } else {
-                            setSelectedReasoning(option.value as ReasoningEffort);
-                          }
-                          setOpenDropdown(null);
-                        }}
-                      >
-                        <Text className={`text-base ${active ? "font-semibold text-primary-foreground" : "text-muted-foreground"}`}>{option.label}</Text>
-                        {active && (
-                          <Ionicons name="checkmark" size={20} className="text-primary-foreground" />
-                        )}
-                      </Pressable>
-                    );
-                  })}
-                </Pressable>
-              </MotiView>
-            )}
-          </AnimatePresence>
-        </Pressable>
-      </Modal>
+      <OptionPickerModal
+        openDropdown={openDropdown}
+        optionsLoaded={optionsLoaded}
+        insetsBottom={insets.bottom}
+        modelOptions={modelOptions}
+        currentReasoningOptions={currentReasoningOptions}
+        resolvedSelectedModel={resolvedSelectedModel}
+        resolvedSelectedReasoning={resolvedSelectedReasoning}
+        onClose={() => setOpenDropdown(null)}
+        onSelectModel={(value) => setSelectedModel(value)}
+        onSelectReasoning={(value) => setSelectedReasoning(value)}
+      />
 
-      <Modal
-        transparent
-        visible={previewImageUri !== null}
-        animationType="fade"
-        onRequestClose={() => setPreviewImageUri(null)}
-      >
-        <Pressable
-          className="flex-1 bg-black/95 px-4"
-          style={{
-            paddingTop: Math.max(insets.top, 8) + 8,
-            paddingBottom: Math.max(insets.bottom, 8) + 8,
-          }}
-          onPress={() => setPreviewImageUri(null)}
-        >
-          <View className="mb-3 flex-row justify-end">
-            <View className="rounded-full bg-white/10 p-2">
-              <Ionicons name="close" size={20} color="#ffffff" />
-            </View>
-          </View>
-          <Pressable
-            className="flex-1 items-center justify-center"
-            onPress={(event) => {
-              event.stopPropagation();
-            }}
-          >
-            {previewImageUri ? (
-              <Image source={{ uri: previewImageUri }} resizeMode="contain" className="h-full w-full" />
-            ) : null}
-          </Pressable>
-        </Pressable>
-      </Modal>
+      <TerminalOutputModal
+        activeTerminalOutput={activeTerminalOutput}
+        insetsTop={insets.top}
+        insetsBottom={insets.bottom}
+        onClose={() => setActiveTerminalOutput(null)}
+      />
+
+      <ImagePreviewModal
+        previewImageUri={previewImageUri}
+        insetsTop={insets.top}
+        insetsBottom={insets.bottom}
+        onClose={() => setPreviewImageUri(null)}
+      />
     </SafeAreaView>
   );
 }

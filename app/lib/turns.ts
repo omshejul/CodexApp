@@ -24,6 +24,116 @@ export interface RenderedTurn {
   };
 }
 
+function normalizeSummaryPath(pathValue: string): string {
+  return pathValue.replace(/\\/g, "/").trim();
+}
+
+function changeSummaryKey(summary: NonNullable<RenderedTurn["summary"]>, turnId?: string): string {
+  const files = summary.files
+    .map((file) => `${normalizeSummaryPath(file.path)}:${file.additions}:${file.deletions}`)
+    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
+    .join(";");
+  return `${turnId ?? ""}|${files}`;
+}
+
+function mergeChangeSummaryFiles(
+  left: NonNullable<RenderedTurn["summary"]>["files"],
+  right: NonNullable<RenderedTurn["summary"]>["files"]
+): NonNullable<RenderedTurn["summary"]>["files"] {
+  const byKey = new Map<
+    string,
+    {
+      path: string;
+      additions: number;
+      deletions: number;
+      snippets?: string[];
+      diff?: string;
+    }
+  >();
+
+  const upsert = (file: {
+    path: string;
+    additions: number;
+    deletions: number;
+    snippets?: string[];
+    diff?: string;
+  }) => {
+    const key = `${normalizeSummaryPath(file.path)}:${file.additions}:${file.deletions}`;
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, {
+        ...file,
+        path: normalizeSummaryPath(file.path),
+      });
+      return;
+    }
+
+    const hasExistingDiff = typeof existing.diff === "string" && existing.diff.length > 0;
+    const hasIncomingDiff = typeof file.diff === "string" && file.diff.length > 0;
+    if (!hasExistingDiff && hasIncomingDiff) {
+      existing.diff = file.diff;
+    }
+
+    const existingSnippets = Array.isArray(existing.snippets) ? existing.snippets : [];
+    const incomingSnippets = Array.isArray(file.snippets) ? file.snippets : [];
+    if (existingSnippets.length === 0 && incomingSnippets.length > 0) {
+      existing.snippets = incomingSnippets;
+    }
+  };
+
+  for (const file of left) {
+    upsert(file);
+  }
+  for (const file of right) {
+    upsert(file);
+  }
+
+  return Array.from(byKey.values());
+}
+
+function mergeChangeSummaries(
+  left: NonNullable<RenderedTurn["summary"]>,
+  right: NonNullable<RenderedTurn["summary"]>
+): NonNullable<RenderedTurn["summary"]> {
+  const mergedFiles = mergeChangeSummaryFiles(left.files, right.files);
+  return {
+    displayKind:
+      left.displayKind === "change" || right.displayKind === "change" ? "change" : left.displayKind ?? right.displayKind,
+    filesChanged: mergedFiles.length,
+    files: mergedFiles,
+  };
+}
+
+function dedupeRenderedTurns(turns: RenderedTurn[]): RenderedTurn[] {
+  const deduped: RenderedTurn[] = [];
+  const changeSummaryIndexByKey = new Map<string, number>();
+
+  for (const turn of turns) {
+    if (turn.kind === "changeSummary" && turn.summary) {
+      const key = changeSummaryKey(turn.summary, turn.turnId);
+      const existingIndex = changeSummaryIndexByKey.get(key);
+      if (typeof existingIndex === "number") {
+        const existing = deduped[existingIndex];
+        if (existing?.kind === "changeSummary" && existing.summary) {
+          deduped[existingIndex] = {
+            ...existing,
+            summary: mergeChangeSummaries(existing.summary, turn.summary),
+          };
+          continue;
+        }
+      }
+
+      changeSummaryIndexByKey.set(key, deduped.length);
+      deduped.push(turn);
+      continue;
+    }
+
+    deduped.push(turn);
+  }
+
+  return deduped;
+}
+
 function normalizeText(value: string): string {
   return value.replace(/\r\n/g, "\n").replace(/(?:\n[ \t]*){3,}/g, "\n\n").trim();
 }
@@ -527,7 +637,7 @@ export function toRenderedTurns(turns: unknown[]): RenderedTurn[] {
     }
   }
 
-  return rendered;
+  return dedupeRenderedTurns(rendered);
 }
 
 export function extractDeltaText(params: unknown): string {

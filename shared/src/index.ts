@@ -66,6 +66,16 @@ export const DirectoryBrowseResponseSchema = z.object({
   folders: z.array(DirectoryEntrySchema),
 });
 
+export const DirectoryCreateRequestSchema = z.object({
+  parentPath: z.string().min(1),
+  name: z.string().min(1).max(255),
+});
+
+export const DirectoryCreateResponseSchema = z.object({
+  ok: z.literal(true),
+  createdPath: z.string().min(1),
+});
+
 export const ThreadFilesQuerySchema = z.object({
   query: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(1000).optional(),
@@ -168,9 +178,70 @@ export const ThreadMessageRequestSchema = z.object({
   }
 });
 
+export const ThreadMessageQueueRequestSchema = ThreadMessageRequestSchema;
+
 export const ThreadMessageResponseSchema = z.object({
   ok: z.literal(true),
   turnId: z.string().optional(),
+});
+
+export const QueueDispatchModeSchema = z.enum(["start", "steer"]);
+
+export const QueuedThreadMessageSchema = z.object({
+  id: z.string().min(1),
+  threadId: z.string().min(1),
+  request: ThreadMessageQueueRequestSchema,
+  createdAt: z.string().datetime(),
+  createdByDeviceId: z.string().min(1).optional(),
+});
+
+export const QueuedThreadMessagesResponseSchema = z.object({
+  messages: z.array(QueuedThreadMessageSchema),
+});
+
+export const QueuedThreadMessageEnqueueResponseSchema = z.object({
+  ok: z.literal(true),
+  message: QueuedThreadMessageSchema,
+  queueLength: z.number().int().min(0),
+});
+
+export const QueuedThreadMessageRemoveResponseSchema = z.object({
+  ok: z.literal(true),
+  id: z.string().min(1),
+  remaining: z.number().int().min(0),
+});
+
+export const QueuedThreadMessageSteerResponseSchema = z.object({
+  ok: z.literal(true),
+  id: z.string().min(1),
+  mode: QueueDispatchModeSchema,
+  turnId: z.string().min(1).optional(),
+});
+
+export const GatewayQueueEnqueuedEventSchema = z.object({
+  threadId: z.string().min(1),
+  message: QueuedThreadMessageSchema,
+  queueLength: z.number().int().min(0),
+});
+
+export const GatewayQueueRemovedEventSchema = z.object({
+  threadId: z.string().min(1),
+  id: z.string().min(1),
+  remaining: z.number().int().min(0),
+});
+
+export const GatewayQueueDispatchedEventSchema = z.object({
+  threadId: z.string().min(1),
+  id: z.string().min(1),
+  mode: QueueDispatchModeSchema,
+  turnId: z.string().min(1).optional(),
+  request: ThreadMessageQueueRequestSchema,
+});
+
+export const GatewayQueueDispatchFailedEventSchema = z.object({
+  threadId: z.string().min(1),
+  id: z.string().min(1),
+  error: z.string().min(1),
 });
 
 export const ThreadInterruptRequestSchema = z.object({
@@ -246,6 +317,8 @@ export type ThreadsResponse = z.infer<typeof ThreadsResponseSchema>;
 export type WorkspacesResponse = z.infer<typeof WorkspacesResponseSchema>;
 export type DirectoryEntry = z.infer<typeof DirectoryEntrySchema>;
 export type DirectoryBrowseResponse = z.infer<typeof DirectoryBrowseResponseSchema>;
+export type DirectoryCreateRequest = z.infer<typeof DirectoryCreateRequestSchema>;
+export type DirectoryCreateResponse = z.infer<typeof DirectoryCreateResponseSchema>;
 export type ThreadFilesQuery = z.infer<typeof ThreadFilesQuerySchema>;
 export type ThreadFilesResponse = z.infer<typeof ThreadFilesResponseSchema>;
 export type ThreadResponse = z.infer<typeof ThreadResponseSchema>;
@@ -262,7 +335,18 @@ export type ThreadNameSetRequest = z.infer<typeof ThreadNameSetRequestSchema>;
 export type ThreadNameSetResponse = z.infer<typeof ThreadNameSetResponseSchema>;
 export type CollaborationMode = z.infer<typeof CollaborationModeSchema>;
 export type ThreadMessageRequest = z.infer<typeof ThreadMessageRequestSchema>;
+export type ThreadMessageQueueRequest = z.infer<typeof ThreadMessageQueueRequestSchema>;
 export type ThreadMessageResponse = z.infer<typeof ThreadMessageResponseSchema>;
+export type QueueDispatchMode = z.infer<typeof QueueDispatchModeSchema>;
+export type QueuedThreadMessage = z.infer<typeof QueuedThreadMessageSchema>;
+export type QueuedThreadMessagesResponse = z.infer<typeof QueuedThreadMessagesResponseSchema>;
+export type QueuedThreadMessageEnqueueResponse = z.infer<typeof QueuedThreadMessageEnqueueResponseSchema>;
+export type QueuedThreadMessageRemoveResponse = z.infer<typeof QueuedThreadMessageRemoveResponseSchema>;
+export type QueuedThreadMessageSteerResponse = z.infer<typeof QueuedThreadMessageSteerResponseSchema>;
+export type GatewayQueueEnqueuedEvent = z.infer<typeof GatewayQueueEnqueuedEventSchema>;
+export type GatewayQueueRemovedEvent = z.infer<typeof GatewayQueueRemovedEventSchema>;
+export type GatewayQueueDispatchedEvent = z.infer<typeof GatewayQueueDispatchedEventSchema>;
+export type GatewayQueueDispatchFailedEvent = z.infer<typeof GatewayQueueDispatchFailedEventSchema>;
 export type ThreadInterruptRequest = z.infer<typeof ThreadInterruptRequestSchema>;
 export type ThreadInterruptResponse = z.infer<typeof ThreadInterruptResponseSchema>;
 export type ModelOption = z.infer<typeof ModelOptionSchema>;

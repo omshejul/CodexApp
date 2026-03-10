@@ -1,21 +1,63 @@
 import { useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Pressable, Text, View } from "react-native";
+import { ActivityIndicator, Modal, Pressable, Text, TextInput, View } from "react-native";
 import { CameraView, BarcodeScanningResult, useCameraPermissions } from "expo-camera";
 import { router } from "expo-router";
 import { MotiView } from "moti";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { claimPairing, parsePairingUrl } from "@/lib/api";
+import { claimPairing, getGatewayById, parsePairingUrl, renameGateway } from "@/lib/api";
 import { getOrCreateDeviceIdentity } from "@/lib/device";
 import { registerPushTokenWithGatewayIfPossible } from "@/lib/push-notifications";
 import { sendActivePresenceNowIfPaired } from "@/lib/app-presence";
+
+const MAX_NICKNAME_LENGTH = 40;
 
 export default function PairScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showNicknamePrompt, setShowNicknamePrompt] = useState(false);
+  const [pendingGatewayId, setPendingGatewayId] = useState<string | null>(null);
+  const [defaultNickname, setDefaultNickname] = useState("");
+  const [nicknameDraft, setNicknameDraft] = useState("");
+  const [finalizingPair, setFinalizingPair] = useState(false);
   const scanInFlightRef = useRef(false);
 
-  const canScan = useMemo(() => !!permission?.granted && !busy, [permission?.granted, busy]);
+  const canScan = useMemo(
+    () => !!permission?.granted && !busy && !finalizingPair && !showNicknamePrompt,
+    [permission?.granted, busy, finalizingPair, showNicknamePrompt]
+  );
+
+  const completePairing = async () => {
+    if (!pendingGatewayId || finalizingPair) {
+      return;
+    }
+
+    setFinalizingPair(true);
+    setError(null);
+    try {
+      const fallbackNickname = defaultNickname.trim() || "Gateway";
+      const nextNickname = nicknameDraft.trim() || fallbackNickname;
+      await renameGateway(pendingGatewayId, nextNickname.slice(0, MAX_NICKNAME_LENGTH));
+
+      await registerPushTokenWithGatewayIfPossible().catch((pushError) => {
+        const message = pushError instanceof Error ? pushError.message : "Unknown push token error";
+        console.warn("Push token registration skipped", message);
+      });
+      await sendActivePresenceNowIfPaired().catch((presenceError) => {
+        const message = presenceError instanceof Error ? presenceError.message : "Unknown app presence error";
+        console.warn("App presence sync skipped", message);
+      });
+
+      setShowNicknamePrompt(false);
+      setPendingGatewayId(null);
+      router.replace("/threads");
+    } catch (finalizeError) {
+      const message = finalizeError instanceof Error ? finalizeError.message : "Unable to finish pairing.";
+      setError(message);
+    } finally {
+      setFinalizingPair(false);
+    }
+  };
 
   const onScan = async (result: BarcodeScanningResult) => {
     if (!canScan || scanInFlightRef.current) {
@@ -28,16 +70,14 @@ export default function PairScreen() {
     try {
       const parsed = parsePairingUrl(result.data);
       const identity = await getOrCreateDeviceIdentity();
-      await claimPairing(parsed, identity);
-      await registerPushTokenWithGatewayIfPossible().catch((pushError) => {
-        const message = pushError instanceof Error ? pushError.message : "Unknown push token error";
-        console.warn("Push token registration skipped", message);
-      });
-      await sendActivePresenceNowIfPaired().catch((presenceError) => {
-        const message = presenceError instanceof Error ? presenceError.message : "Unknown app presence error";
-        console.warn("App presence sync skipped", message);
-      });
-      router.replace("/threads");
+      const claimed = await claimPairing(parsed, identity);
+      const pairedGateway = await getGatewayById(claimed.gatewayId);
+      const fallbackNickname = pairedGateway?.host?.trim() || parsed.serverBaseUrl;
+      const initialNickname = pairedGateway?.nickname?.trim() || fallbackNickname;
+      setPendingGatewayId(claimed.gatewayId);
+      setDefaultNickname(fallbackNickname.slice(0, MAX_NICKNAME_LENGTH));
+      setNicknameDraft(initialNickname.slice(0, MAX_NICKNAME_LENGTH));
+      setShowNicknamePrompt(true);
     } catch (scanError) {
       const message = scanError instanceof Error ? scanError.message : "Unable to pair device.";
       setError(message);
@@ -67,7 +107,7 @@ export default function PairScreen() {
           <View className="relative mt-5 overflow-hidden rounded-2xl border border-border/50 bg-card">
             <CameraView
               style={{ width: "100%", height: 420 }}
-              onBarcodeScanned={busy ? undefined : onScan}
+              onBarcodeScanned={canScan ? onScan : undefined}
               barcodeScannerSettings={{
                 barcodeTypes: ["qr"],
               }}
@@ -111,6 +151,42 @@ export default function PairScreen() {
           </View>
         </View>
       </MotiView>
+
+      <Modal transparent visible={showNicknamePrompt} animationType="fade">
+        <View className="flex-1 items-center justify-center bg-background/80 px-5">
+          <View className="w-full rounded-2xl border border-border/50 bg-card p-5">
+            <Text className="text-lg font-semibold text-card-foreground">Name this gateway</Text>
+            <Text className="mt-1 text-sm text-muted-foreground">
+              Add a nickname so you can switch between multiple Macs.
+            </Text>
+            <TextInput
+              value={nicknameDraft}
+              onChangeText={setNicknameDraft}
+              editable={!finalizingPair}
+              maxLength={MAX_NICKNAME_LENGTH}
+              placeholder={defaultNickname || "Gateway"}
+              placeholderTextColor="rgba(148, 163, 184, 0.8)"
+              className="mt-4 rounded-xl border border-border/60 bg-muted px-3 py-3 text-base text-foreground"
+            />
+            <Text className="mt-2 text-xs text-muted-foreground">
+              Leave blank to use: {defaultNickname || "Gateway"}
+            </Text>
+            <Pressable
+              onPress={() => {
+                completePairing().catch(() => undefined);
+              }}
+              disabled={finalizingPair}
+              className={`mt-4 rounded-xl px-4 py-3 ${finalizingPair ? "bg-primary/60" : "bg-primary"}`}
+            >
+              {finalizingPair ? (
+                <ActivityIndicator size="small" color="#ffffff" />
+              ) : (
+                <Text className="text-center text-base font-semibold text-primary-foreground">Continue</Text>
+              )}
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }

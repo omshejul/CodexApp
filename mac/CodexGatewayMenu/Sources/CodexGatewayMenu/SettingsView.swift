@@ -19,7 +19,7 @@ struct SettingsView: View {
         LabeledField(label: "Magic DNS URL", text: $publicBaseURL, placeholder: "https://your-machine.tailnet.ts.net")
         LabeledField(label: "Gateway Port", text: $portText, placeholder: "8787")
         LabeledField(label: "Codex CLI Path (optional)", text: $codexBinaryPath, placeholder: "/opt/homebrew/bin/codex")
-        LabeledField(label: "Tailscale CLI Path (optional)", text: $tailscaleBinaryPath, placeholder: "/opt/homebrew/bin/tailscale")
+        LabeledField(label: "Tailscale CLI Path (optional)", text: $tailscaleBinaryPath, placeholder: "/usr/local/bin/tailscale")
       }
 
       Toggle("Keep gateway running in background", isOn: $autoStart)

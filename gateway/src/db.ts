@@ -41,6 +41,14 @@ export interface ThreadEventRow {
   createdAt: number;
 }
 
+export interface ThreadQueuedMessageRow {
+  id: string;
+  threadId: string;
+  requestJson: string;
+  createdAt: number;
+  createdByDeviceId: string | null;
+}
+
 export interface PushTokenRow {
   deviceId: string;
   token: string;
@@ -123,6 +131,14 @@ export class GatewayDatabase {
         createdAt INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS thread_message_queue (
+        id TEXT PRIMARY KEY,
+        threadId TEXT NOT NULL,
+        requestJson TEXT NOT NULL,
+        createdAt INTEGER NOT NULL,
+        createdByDeviceId TEXT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS push_tokens (
         token TEXT PRIMARY KEY,
         deviceId TEXT NOT NULL,
@@ -136,6 +152,7 @@ export class GatewayDatabase {
       CREATE INDEX IF NOT EXISTS idx_thread_names_updated ON thread_names (updatedAt);
       CREATE INDEX IF NOT EXISTS idx_thread_cwds_updated ON thread_cwds (updatedAt);
       CREATE INDEX IF NOT EXISTS idx_thread_events_thread_created ON thread_events (threadId, createdAt);
+      CREATE INDEX IF NOT EXISTS idx_thread_message_queue_thread_created ON thread_message_queue (threadId, createdAt, id);
       CREATE INDEX IF NOT EXISTS idx_push_tokens_device_updated ON push_tokens (deviceId, updatedAt);
     `);
 
@@ -361,6 +378,65 @@ export class GatewayDatabase {
 
   cleanupThreadEventsOlderThan(cutoffMs: number) {
     this.db.prepare("DELETE FROM thread_events WHERE createdAt < ?").run(cutoffMs);
+  }
+
+  countQueuedThreadMessages(threadId: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS count FROM thread_message_queue WHERE threadId = ?")
+      .get(threadId) as { count: number };
+    return row.count;
+  }
+
+  enqueueThreadMessage(row: ThreadQueuedMessageRow) {
+    this.db
+      .prepare(
+        `INSERT INTO thread_message_queue (id, threadId, requestJson, createdAt, createdByDeviceId)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run(row.id, row.threadId, row.requestJson, row.createdAt, row.createdByDeviceId);
+  }
+
+  listQueuedThreadMessages(threadId: string, limit = 200): ThreadQueuedMessageRow[] {
+    return this.db
+      .prepare(
+        `SELECT id, threadId, requestJson, createdAt, createdByDeviceId
+         FROM thread_message_queue
+         WHERE threadId = ?
+         ORDER BY createdAt ASC, id ASC
+         LIMIT ?`
+      )
+      .all(threadId, Math.max(1, limit)) as ThreadQueuedMessageRow[];
+  }
+
+  peekOldestQueuedThreadMessage(threadId: string): ThreadQueuedMessageRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, threadId, requestJson, createdAt, createdByDeviceId
+         FROM thread_message_queue
+         WHERE threadId = ?
+         ORDER BY createdAt ASC, id ASC
+         LIMIT 1`
+      )
+      .get(threadId) as ThreadQueuedMessageRow | undefined;
+    return row ?? null;
+  }
+
+  getQueuedThreadMessage(threadId: string, id: string): ThreadQueuedMessageRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, threadId, requestJson, createdAt, createdByDeviceId
+         FROM thread_message_queue
+         WHERE threadId = ? AND id = ?`
+      )
+      .get(threadId, id) as ThreadQueuedMessageRow | undefined;
+    return row ?? null;
+  }
+
+  removeQueuedThreadMessage(threadId: string, id: string): boolean {
+    const result = this.db
+      .prepare("DELETE FROM thread_message_queue WHERE threadId = ? AND id = ?")
+      .run(threadId, id);
+    return result.changes > 0;
   }
 
   upsertPushToken(entry: PushTokenRow) {

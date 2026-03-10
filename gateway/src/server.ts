@@ -25,12 +25,25 @@ import {
   GatewayOptionsResponseSchema,
   HealthResponseSchema,
   DirectoryBrowseResponseSchema,
+  DirectoryCreateRequestSchema,
+  DirectoryCreateResponseSchema,
   PairClaimRequestSchema,
   PairClaimResponseSchema,
   PairCreateResponseSchema,
   ThreadCreateRequestSchema,
+  type ThreadMessageRequest,
+  ThreadMessageQueueRequestSchema,
   ThreadMessageRequestSchema,
   ThreadMessageResponseSchema,
+  GatewayQueueDispatchFailedEventSchema,
+  GatewayQueueDispatchedEventSchema,
+  GatewayQueueEnqueuedEventSchema,
+  GatewayQueueRemovedEventSchema,
+  QueuedThreadMessageSchema,
+  QueuedThreadMessagesResponseSchema,
+  QueuedThreadMessageEnqueueResponseSchema,
+  QueuedThreadMessageRemoveResponseSchema,
+  QueuedThreadMessageSteerResponseSchema,
   ThreadInterruptRequestSchema,
   ThreadInterruptResponseSchema,
   ThreadNameSetRequestSchema,
@@ -47,7 +60,7 @@ import {
   PushTokenUpsertResponseSchema,
 } from "@codex-phone/shared";
 import { CodexRpcClient } from "./codex-rpc";
-import { GatewayDatabase, PairSessionRow, RefreshTokenRow } from "./db";
+import { GatewayDatabase, PairSessionRow, RefreshTokenRow, ThreadQueuedMessageRow } from "./db";
 import { createRuntimeLogWriter } from "./runtime-logs";
 import { generatePairCode, generateRefreshSecret, hashValue, safeEqualHex } from "./security";
 
@@ -97,9 +110,14 @@ const APP_PRESENCE_ACTIVE_TTL_MS = 75_000;
 const APP_PRESENCE_CODEX_HEALTH_CHECK_INTERVAL_MS = 20_000;
 const INTERACTIVE_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const INTERACTIVE_REQUEST_MAX_PENDING = 200;
+const THREAD_MESSAGE_QUEUE_MAX_PER_THREAD = 50;
 const STREAM_METHOD_INTERACTIVE_REQUESTED = "gateway/interactive/requested";
 const STREAM_METHOD_INTERACTIVE_RESPONDED = "gateway/interactive/responded";
 const STREAM_METHOD_INTERACTIVE_EXPIRED = "gateway/interactive/expired";
+const STREAM_METHOD_QUEUE_ENQUEUED = "gateway/queue/enqueued";
+const STREAM_METHOD_QUEUE_REMOVED = "gateway/queue/removed";
+const STREAM_METHOD_QUEUE_DISPATCHED = "gateway/queue/dispatched";
+const STREAM_METHOD_QUEUE_DISPATCH_FAILED = "gateway/queue/dispatch_failed";
 
 const codex = new CodexRpcClient(codexWsUrl, GATEWAY_NAME, GATEWAY_VERSION);
 let managedCodexProcess: ChildProcess | null = null;
@@ -1222,6 +1240,123 @@ function extractTurnIdFromParams(value: unknown): string | null {
   return null;
 }
 
+interface PreparedThreadMessage {
+  request: ThreadMessageRequest;
+  input: Array<{ type: "text"; text: string; text_elements: unknown[] } | { type: "image"; url: string }>;
+  turnStartParams: Record<string, unknown>;
+}
+
+function prepareThreadMessage(threadId: string, rawRequest: ThreadMessageRequest): { ok: true; value: PreparedThreadMessage } | { ok: false; error: string } {
+  const trimmedText = typeof rawRequest.text === "string" ? rawRequest.text.trim() : "";
+  const images = (rawRequest.images ?? [])
+    .map((image) => image.imageUrl.trim())
+    .filter((imageUrl) => imageUrl.length > 0)
+    .map((imageUrl) => ({ imageUrl }));
+
+  if (!trimmedText && images.length === 0) {
+    return {
+      ok: false,
+      error: "Either text or images must be provided.",
+    };
+  }
+
+  const normalizedRequest: ThreadMessageRequest = {
+    ...(trimmedText ? { text: trimmedText } : {}),
+    ...(images.length > 0 ? { images } : {}),
+    ...(rawRequest.model ? { model: rawRequest.model } : {}),
+    ...(rawRequest.reasoningEffort ? { reasoningEffort: rawRequest.reasoningEffort } : {}),
+    ...(rawRequest.collaborationMode ? { collaborationMode: rawRequest.collaborationMode } : {}),
+  };
+
+  if (normalizedRequest.collaborationMode && !normalizedRequest.model) {
+    return {
+      ok: false,
+      error: "collaborationMode requires a model value.",
+    };
+  }
+
+  const input = [
+    ...(trimmedText ? [{ type: "text" as const, text: trimmedText, text_elements: [] as unknown[] }] : []),
+    ...images.map((image) => ({ type: "image" as const, url: image.imageUrl })),
+  ];
+
+  const turnStartParams: Record<string, unknown> = {
+    threadId,
+    approvalPolicy: "never",
+    sandboxPolicy: buildDefaultDangerFullAccessSandboxPolicy(),
+    model: normalizedRequest.model ?? null,
+    effort: normalizedRequest.reasoningEffort ?? null,
+    input,
+  };
+
+  if (normalizedRequest.collaborationMode) {
+    turnStartParams.collaborationMode = {
+      mode: normalizedRequest.collaborationMode,
+      settings: {
+        model: normalizedRequest.model ?? null,
+        reasoning_effort: normalizedRequest.reasoningEffort ?? null,
+        developer_instructions: null,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    value: {
+      request: normalizedRequest,
+      input,
+      turnStartParams,
+    },
+  };
+}
+
+function parseQueuedThreadMessageRow(
+  row: ThreadQueuedMessageRow
+): { message: ReturnType<typeof QueuedThreadMessageSchema.parse>; request: ThreadMessageRequest } | null {
+  let parsedRequestJson: unknown = null;
+  try {
+    parsedRequestJson = JSON.parse(row.requestJson);
+  } catch {
+    return null;
+  }
+
+  const parsedRequest = ThreadMessageQueueRequestSchema.safeParse(parsedRequestJson);
+  if (!parsedRequest.success) {
+    return null;
+  }
+
+  const parsedMessage = QueuedThreadMessageSchema.safeParse({
+    id: row.id,
+    threadId: row.threadId,
+    request: parsedRequest.data,
+    createdAt: new Date(row.createdAt).toISOString(),
+    createdByDeviceId: row.createdByDeviceId ?? undefined,
+  });
+  if (!parsedMessage.success) {
+    return null;
+  }
+
+  return {
+    message: parsedMessage.data,
+    request: parsedRequest.data,
+  };
+}
+
+function shouldFallbackSteerToStart(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("expectedturnid") ||
+    message.includes("expected turn id") ||
+    message.includes("no active turn") ||
+    message.includes("no active turnid") ||
+    message.includes("not in progress") ||
+    message.includes("active turn changed")
+  );
+}
+
 function normalizeThreads(result: unknown): Array<{
   id: string;
   name?: string;
@@ -1373,6 +1508,52 @@ function browseDirectories(rawPath: unknown): { currentPath: string; parentPath:
     parentPath: parentPath === currentPath ? null : parentPath,
     folders: entries,
   };
+}
+
+function normalizeExistingDirectoryPath(rawPath: unknown): string | null {
+  if (typeof rawPath !== "string" || rawPath.trim().length === 0) {
+    return null;
+  }
+  const resolved = path.resolve(rawPath.trim());
+  if (!fs.existsSync(resolved)) {
+    return null;
+  }
+  try {
+    return fs.statSync(resolved).isDirectory() ? resolved : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeNewFolderName(rawName: unknown): string | null {
+  if (typeof rawName !== "string") {
+    return null;
+  }
+  const trimmed = rawName.trim();
+  if (trimmed.length === 0 || trimmed === "." || trimmed === "..") {
+    return null;
+  }
+  if (trimmed.includes("/") || trimmed.includes("\\") || trimmed.includes("\0")) {
+    return null;
+  }
+  return trimmed;
+}
+
+function createDirectory(parentPathRaw: unknown, folderNameRaw: unknown): string | null {
+  const parentPath = normalizeExistingDirectoryPath(parentPathRaw);
+  const folderName = normalizeNewFolderName(folderNameRaw);
+  if (!parentPath || !folderName) {
+    return null;
+  }
+
+  const createdPath = path.resolve(parentPath, folderName);
+  const relative = path.relative(parentPath, createdPath);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    return null;
+  }
+
+  fs.mkdirSync(createdPath, { recursive: false });
+  return createdPath;
 }
 
 function isExistingDirectory(candidate: unknown): candidate is string {
@@ -1712,12 +1893,14 @@ const app = Fastify({
 async function bootstrap() {
   runtimeLogs.event("gateway.bootstrap.start", { host, port, codexWsUrl, eventsLogPath, errorsLogPath });
   const activeTurnIdByThread = new Map<string, string>();
+  const pendingTurnStartByThread = new Set<string>();
   const turnInitiatorDeviceByThread = new Map<string, string>();
   const turnInitiatorDeviceByTurnKey = new Map<string, string>();
   const turnInitiatorTurnKeyOrder: string[] = [];
   const notifiedCompletionTurnKeys: string[] = [];
   const notifiedCompletionTurnSet = new Set<string>();
   const recentCompletionFallbackByThread = new Map<string, { fingerprint: string; seenAt: number }>();
+  const queueDrainPromiseByThread = new Map<string, Promise<void>>();
   const gatewayThreadListeners = new Map<string, Set<ThreadStreamListener>>();
   const pendingInteractiveRequestsById = new Map<string, PendingInteractiveRequest>();
   const pendingInteractiveRequestOrder: string[] = [];
@@ -1816,6 +1999,163 @@ async function bootstrap() {
       method,
       params,
     });
+  };
+
+  const startTurnFromPreparedMessage = async (
+    threadId: string,
+    prepared: PreparedThreadMessage,
+    requestDeviceId: string | null
+  ): Promise<string | undefined> => {
+    const shouldTrackByThread = !activeTurnIdByThread.has(threadId) && !pendingTurnStartByThread.has(threadId);
+    if (shouldTrackByThread && requestDeviceId) {
+      rememberTurnInitiatorDevice(threadId, requestDeviceId, null);
+    }
+    if (shouldTrackByThread) {
+      pendingTurnStartByThread.add(threadId);
+    }
+
+    let result: unknown;
+    try {
+      result = await codex.call("turn/start", prepared.turnStartParams);
+    } catch (error) {
+      if (shouldTrackByThread) {
+        pendingTurnStartByThread.delete(threadId);
+      }
+      if (
+        shouldTrackByThread &&
+        requestDeviceId &&
+        turnInitiatorDeviceByThread.get(threadId) === requestDeviceId &&
+        !activeTurnIdByThread.has(threadId)
+      ) {
+        turnInitiatorDeviceByThread.delete(threadId);
+      }
+      throw error;
+    }
+
+    const turnId = extractTurnIdFromParams(result) ?? undefined;
+    if (turnId) {
+      activeTurnIdByThread.set(threadId, turnId);
+      pendingTurnStartByThread.delete(threadId);
+      if (requestDeviceId) {
+        rememberTurnInitiatorDevice(threadId, requestDeviceId, turnId);
+      }
+    }
+
+    return turnId;
+  };
+
+  const emitQueueEnqueuedEvent = (
+    threadId: string,
+    message: ReturnType<typeof QueuedThreadMessageSchema.parse>,
+    queueLength: number
+  ) => {
+    emitGatewayThreadPayload(threadId, {
+      method: STREAM_METHOD_QUEUE_ENQUEUED,
+      params: GatewayQueueEnqueuedEventSchema.parse({
+        threadId,
+        message,
+        queueLength,
+      }),
+    });
+  };
+
+  const emitQueueRemovedEvent = (threadId: string, id: string, remaining: number) => {
+    emitGatewayThreadPayload(threadId, {
+      method: STREAM_METHOD_QUEUE_REMOVED,
+      params: GatewayQueueRemovedEventSchema.parse({
+        threadId,
+        id,
+        remaining,
+      }),
+    });
+  };
+
+  const emitQueueDispatchedEvent = (
+    threadId: string,
+    id: string,
+    mode: "start" | "steer",
+    request: ThreadMessageRequest,
+    turnId?: string
+  ) => {
+    emitGatewayThreadPayload(threadId, {
+      method: STREAM_METHOD_QUEUE_DISPATCHED,
+      params: GatewayQueueDispatchedEventSchema.parse({
+        threadId,
+        id,
+        mode,
+        turnId,
+        request,
+      }),
+    });
+  };
+
+  const emitQueueDispatchFailedEvent = (threadId: string, id: string, error: string) => {
+    emitGatewayThreadPayload(threadId, {
+      method: STREAM_METHOD_QUEUE_DISPATCH_FAILED,
+      params: GatewayQueueDispatchFailedEventSchema.parse({
+        threadId,
+        id,
+        error,
+      }),
+    });
+  };
+
+  const drainQueuedThreadMessages = async (threadId: string) => {
+    if (activeTurnIdByThread.has(threadId) || pendingTurnStartByThread.has(threadId)) {
+      return;
+    }
+
+    const row = db.peekOldestQueuedThreadMessage(threadId);
+    if (!row) {
+      return;
+    }
+
+    const parsedRow = parseQueuedThreadMessageRow(row);
+    if (!parsedRow) {
+      db.removeQueuedThreadMessage(threadId, row.id);
+      const remaining = db.countQueuedThreadMessages(threadId);
+      emitQueueRemovedEvent(threadId, row.id, remaining);
+      return;
+    }
+
+    const prepared = prepareThreadMessage(threadId, parsedRow.request);
+    if (!prepared.ok) {
+      db.removeQueuedThreadMessage(threadId, row.id);
+      const remaining = db.countQueuedThreadMessages(threadId);
+      emitQueueRemovedEvent(threadId, row.id, remaining);
+      emitQueueDispatchFailedEvent(threadId, row.id, prepared.error);
+      return;
+    }
+
+    try {
+      const turnId = await startTurnFromPreparedMessage(threadId, prepared.value, row.createdByDeviceId);
+      db.removeQueuedThreadMessage(threadId, row.id);
+      emitQueueDispatchedEvent(threadId, row.id, "start", prepared.value.request, turnId);
+    } catch (error) {
+      emitQueueDispatchFailedEvent(
+        threadId,
+        row.id,
+        error instanceof Error && error.message.trim().length > 0 ? error.message : "Unable to dispatch queued message."
+      );
+    }
+  };
+
+  const scheduleQueueDrain = (threadId: string) => {
+    const existing = queueDrainPromiseByThread.get(threadId) ?? Promise.resolve();
+    const next = existing
+      .catch(() => {
+        // Keep the drain chain alive after errors.
+      })
+      .then(() => drainQueuedThreadMessages(threadId))
+      .catch((error) => {
+        runtimeLogs.error("queue.drain.failed", error, { threadId });
+      })
+      .finally(() => {
+        if (queueDrainPromiseByThread.get(threadId) === next) {
+          queueDrainPromiseByThread.delete(threadId);
+        }
+      });
+    queueDrainPromiseByThread.set(threadId, next);
   };
 
   const removePendingInteractiveRequest = (requestId: string): PendingInteractiveRequest | null => {
@@ -2008,6 +2348,7 @@ async function bootstrap() {
     const resolvedTurnId = threadId ? turnId ?? activeTurnIdByThread.get(threadId) ?? null : null;
     if (threadId && turnId && lowerMethod === "turn/started") {
       activeTurnIdByThread.set(threadId, turnId);
+      pendingTurnStartByThread.delete(threadId);
       const initiatingDeviceId = turnInitiatorDeviceByThread.get(threadId);
       if (initiatingDeviceId) {
         rememberTurnInitiatorDevice(threadId, initiatingDeviceId, turnId);
@@ -2069,7 +2410,9 @@ async function bootstrap() {
 
     if (threadId && (lowerMethod === "turn/completed" || lowerMethod === "turn/failed" || lowerMethod === "turn/cancelled")) {
       activeTurnIdByThread.delete(threadId);
+      pendingTurnStartByThread.delete(threadId);
       turnInitiatorDeviceByThread.delete(threadId);
+      scheduleQueueDrain(threadId);
     }
 
     const update = parseThreadNameUpdate(method, params);
@@ -2560,7 +2903,7 @@ async function bootstrap() {
         ...item,
         name: persistedNames.get(item.id)?.name ?? item.name,
         cwd: persistedCwds.get(item.id)?.cwd ?? item.cwd,
-        inProgress: item.inProgress === true || activeTurnIdByThread.has(item.id),
+        inProgress: item.inProgress === true || activeTurnIdByThread.has(item.id) || pendingTurnStartByThread.has(item.id),
       })),
     });
     return reply.send(payload);
@@ -2575,6 +2918,37 @@ async function bootstrap() {
     const query = request.query as { path?: string };
     const payload = DirectoryBrowseResponseSchema.parse(browseDirectories(query.path));
     return reply.send(payload);
+  });
+
+  app.post("/directories", { preHandler: [requireAuth] }, async (request, reply) => {
+    const parsedBody = DirectoryCreateRequestSchema.safeParse(request.body ?? {});
+    if (!parsedBody.success) {
+      return reply.code(400).send({ error: parsedBody.error.flatten() });
+    }
+
+    try {
+      const createdPath = createDirectory(parsedBody.data.parentPath, parsedBody.data.name);
+      if (!createdPath) {
+        return reply.code(400).send({ error: "Invalid parent path or folder name." });
+      }
+      const payload = DirectoryCreateResponseSchema.parse({
+        ok: true,
+        createdPath,
+      });
+      return reply.send(payload);
+    } catch (error) {
+      const code = typeof error === "object" && error && "code" in error ? (error as NodeJS.ErrnoException).code : undefined;
+      if (code === "EEXIST") {
+        return reply.code(409).send({ error: "Folder already exists." });
+      }
+      if (code === "EACCES" || code === "EPERM" || code === "EROFS") {
+        return reply.code(403).send({ error: "Permission denied while creating folder." });
+      }
+      return reply.code(500).send({
+        error: "Unable to create folder.",
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    }
   });
 
   app.get("/threads/:id/files", { preHandler: [requireAuth] }, async (request, reply) => {
@@ -2821,6 +3195,8 @@ async function bootstrap() {
       runtimeLogs.event("thread.resume.unmaterialized", { threadId: params.id });
     }
 
+    scheduleQueueDrain(params.id);
+
     const payload = ThreadResumeResponseSchema.parse({ ok: true });
     return reply.send(payload);
   });
@@ -2835,73 +3211,188 @@ async function bootstrap() {
       return reply.code(401).send({ error: "Invalid access token" });
     }
     const requestDeviceId = request.auth.deviceId;
-
-    const trimmedText = typeof parsedBody.data.text === "string" ? parsedBody.data.text.trim() : "";
-    const imageInputs = (parsedBody.data.images ?? [])
-      .map((image) => image.imageUrl.trim())
-      .filter((imageUrl) => imageUrl.length > 0)
-      .map((imageUrl) => ({ type: "image", url: imageUrl }));
-    const input = [
-      ...(trimmedText ? [{ type: "text", text: trimmedText, text_elements: [] }] : []),
-      ...imageInputs,
-    ];
-
-    const turnStartParams: Record<string, unknown> = {
-      threadId: params.id,
-      approvalPolicy: "never",
-      sandboxPolicy: buildDefaultDangerFullAccessSandboxPolicy(),
-      model: parsedBody.data.model ?? null,
-      effort: parsedBody.data.reasoningEffort ?? null,
-      input,
-    };
-
-    const collaborationMode = parsedBody.data.collaborationMode;
-    if (collaborationMode) {
-      const collaborationModeModel = parsedBody.data.model;
-      if (!collaborationModeModel) {
-        return reply.code(400).send({
-          error: "collaborationMode requires a model value.",
-        });
-      }
-      turnStartParams.collaborationMode = {
-        mode: collaborationMode,
-        settings: {
-          model: collaborationModeModel,
-          reasoning_effort: parsedBody.data.reasoningEffort ?? null,
-          developer_instructions: null,
-        },
-      };
+    if (!activeTurnIdByThread.has(params.id) && pendingTurnStartByThread.has(params.id)) {
+      return reply.code(409).send({
+        error: "A turn is starting for this thread. Retry in a moment.",
+      });
     }
 
-    const shouldTrackByThread = !activeTurnIdByThread.has(params.id);
-    if (shouldTrackByThread) {
-      rememberTurnInitiatorDevice(params.id, requestDeviceId, null);
+    const prepared = prepareThreadMessage(params.id, parsedBody.data);
+    if (!prepared.ok) {
+      return reply.code(400).send({
+        error: prepared.error,
+      });
     }
-    let result: unknown;
-    try {
-      result = await codex.call("turn/start", turnStartParams);
-    } catch (error) {
-      if (
-        shouldTrackByThread &&
-        turnInitiatorDeviceByThread.get(params.id) === requestDeviceId &&
-        !activeTurnIdByThread.has(params.id)
-      ) {
-        turnInitiatorDeviceByThread.delete(params.id);
-      }
-      throw error;
-    }
-
-    const turnId = extractTurnIdFromParams(result) ?? undefined;
-    if (turnId) {
-      activeTurnIdByThread.set(params.id, turnId);
-      rememberTurnInitiatorDevice(params.id, requestDeviceId, turnId);
-    }
+    const turnId = await startTurnFromPreparedMessage(params.id, prepared.value, requestDeviceId);
 
     const payload = ThreadMessageResponseSchema.parse({
       ok: true,
       turnId,
     });
 
+    return reply.send(payload);
+  });
+
+  app.get("/threads/:id/messages/queue", { preHandler: [requireAuth] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const rows = db.listQueuedThreadMessages(params.id, 500);
+    const messages = rows
+      .map((row) => parseQueuedThreadMessageRow(row)?.message ?? null)
+      .filter((message): message is ReturnType<typeof QueuedThreadMessageSchema.parse> => message !== null);
+
+    const payload = QueuedThreadMessagesResponseSchema.parse({
+      messages,
+    });
+    return reply.send(payload);
+  });
+
+  app.post("/threads/:id/messages/queue", { preHandler: [requireAuth] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const parsedBody = ThreadMessageQueueRequestSchema.safeParse(request.body);
+    if (!parsedBody.success) {
+      return reply.code(400).send({ error: parsedBody.error.flatten() });
+    }
+    if (!request.auth?.deviceId) {
+      return reply.code(401).send({ error: "Invalid access token" });
+    }
+
+    const prepared = prepareThreadMessage(params.id, parsedBody.data);
+    if (!prepared.ok) {
+      return reply.code(400).send({
+        error: prepared.error,
+      });
+    }
+
+    const queueCount = db.countQueuedThreadMessages(params.id);
+    if (queueCount >= THREAD_MESSAGE_QUEUE_MAX_PER_THREAD) {
+      return reply.code(409).send({
+        error: `Queue limit reached (max ${THREAD_MESSAGE_QUEUE_MAX_PER_THREAD} messages per thread).`,
+      });
+    }
+
+    const row: ThreadQueuedMessageRow = {
+      id: randomUUID(),
+      threadId: params.id,
+      requestJson: safeJsonStringify(prepared.value.request),
+      createdAt: Date.now(),
+      createdByDeviceId: request.auth.deviceId,
+    };
+    db.enqueueThreadMessage(row);
+
+    const parsedQueuedMessage = parseQueuedThreadMessageRow(row);
+    if (!parsedQueuedMessage) {
+      db.removeQueuedThreadMessage(row.threadId, row.id);
+      return reply.code(500).send({
+        error: "Unable to persist queued message.",
+      });
+    }
+
+    const queueLength = db.countQueuedThreadMessages(params.id);
+    emitQueueEnqueuedEvent(params.id, parsedQueuedMessage.message, queueLength);
+    scheduleQueueDrain(params.id);
+
+    const payload = QueuedThreadMessageEnqueueResponseSchema.parse({
+      ok: true,
+      message: parsedQueuedMessage.message,
+      queueLength,
+    });
+    return reply.send(payload);
+  });
+
+  app.delete("/threads/:id/messages/queue/:messageId", { preHandler: [requireAuth] }, async (request, reply) => {
+    const params = request.params as { id: string; messageId: string };
+    const existing = db.getQueuedThreadMessage(params.id, params.messageId);
+    if (!existing) {
+      return reply.code(404).send({ error: "Queued message not found." });
+    }
+
+    db.removeQueuedThreadMessage(params.id, params.messageId);
+    const remaining = db.countQueuedThreadMessages(params.id);
+    emitQueueRemovedEvent(params.id, params.messageId, remaining);
+
+    const payload = QueuedThreadMessageRemoveResponseSchema.parse({
+      ok: true,
+      id: params.messageId,
+      remaining,
+    });
+    return reply.send(payload);
+  });
+
+  app.post("/threads/:id/messages/queue/:messageId/steer", { preHandler: [requireAuth] }, async (request, reply) => {
+    const params = request.params as { id: string; messageId: string };
+    if (!request.auth?.deviceId) {
+      return reply.code(401).send({ error: "Invalid access token" });
+    }
+
+    const row = db.getQueuedThreadMessage(params.id, params.messageId);
+    if (!row) {
+      return reply.code(404).send({ error: "Queued message not found." });
+    }
+
+    const parsedQueued = parseQueuedThreadMessageRow(row);
+    if (!parsedQueued) {
+      db.removeQueuedThreadMessage(params.id, params.messageId);
+      const remaining = db.countQueuedThreadMessages(params.id);
+      emitQueueRemovedEvent(params.id, params.messageId, remaining);
+      return reply.code(409).send({ error: "Queued message payload is invalid and was removed." });
+    }
+
+    const prepared = prepareThreadMessage(params.id, parsedQueued.request);
+    if (!prepared.ok) {
+      db.removeQueuedThreadMessage(params.id, params.messageId);
+      const remaining = db.countQueuedThreadMessages(params.id);
+      emitQueueRemovedEvent(params.id, params.messageId, remaining);
+      emitQueueDispatchFailedEvent(params.id, params.messageId, prepared.error);
+      return reply.code(409).send({ error: prepared.error });
+    }
+
+    let mode: "start" | "steer" = "start";
+    let turnId: string | undefined;
+
+    const activeTurnId = activeTurnIdByThread.get(params.id) ?? null;
+    if (!activeTurnId && pendingTurnStartByThread.has(params.id)) {
+      return reply.code(409).send({
+        error: "A turn is starting for this thread. Retry in a moment.",
+      });
+    }
+    if (activeTurnId) {
+      try {
+        await codex.call("turn/steer", {
+          threadId: params.id,
+          expectedTurnId: activeTurnId,
+          input: prepared.value.input,
+        });
+        mode = "steer";
+        turnId = activeTurnId;
+      } catch (error) {
+        if (!shouldFallbackSteerToStart(error)) {
+          throw error;
+        }
+        mode = "start";
+        turnId = await startTurnFromPreparedMessage(
+          params.id,
+          prepared.value,
+          row.createdByDeviceId ?? request.auth.deviceId
+        );
+      }
+    } else {
+      mode = "start";
+      turnId = await startTurnFromPreparedMessage(
+        params.id,
+        prepared.value,
+        row.createdByDeviceId ?? request.auth.deviceId
+      );
+    }
+
+    db.removeQueuedThreadMessage(params.id, params.messageId);
+    emitQueueDispatchedEvent(params.id, params.messageId, mode, prepared.value.request, turnId);
+
+    const payload = QueuedThreadMessageSteerResponseSchema.parse({
+      ok: true,
+      id: params.messageId,
+      mode,
+      turnId,
+    });
     return reply.send(payload);
   });
 
