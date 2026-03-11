@@ -206,6 +206,82 @@ function normalizeRecord(record: GatewayRecord): GatewayRecord {
   };
 }
 
+async function updateGatewayBaseUrl(gatewayId: GatewayId, serverBaseUrl: string): Promise<GatewayRecord | null> {
+  const store = await loadGatewayStore();
+  let updatedGateway: GatewayRecord | null = null;
+
+  const gateways = store.gateways.map((gateway) => {
+    if (gateway.id !== gatewayId) {
+      return gateway;
+    }
+
+    updatedGateway = normalizeRecord({
+      ...gateway,
+      serverBaseUrl,
+    });
+    return updatedGateway;
+  });
+
+  if (!updatedGateway) {
+    return null;
+  }
+
+  const finalizedGateway = updatedGateway as GatewayRecord;
+
+  await persistGatewayStore({
+    ...store,
+    gateways,
+    activeGatewayId: store.activeGatewayId === gatewayId ? finalizedGateway.id : store.activeGatewayId,
+  });
+
+  if (finalizedGateway.id !== gatewayId) {
+    const cachedToken = accessTokenByGatewayId.get(gatewayId);
+    if (cachedToken !== undefined) {
+      accessTokenByGatewayId.set(finalizedGateway.id, cachedToken);
+      accessTokenByGatewayId.delete(gatewayId);
+    }
+    const inFlightRefresh = refreshPromiseByGatewayId.get(gatewayId);
+    if (inFlightRefresh) {
+      refreshPromiseByGatewayId.set(finalizedGateway.id, inFlightRefresh);
+      refreshPromiseByGatewayId.delete(gatewayId);
+    }
+  }
+
+  return finalizedGateway;
+}
+
+async function retryWithGatewayBasePathFallback(
+  gateway: GatewayRecord,
+  requestWithBaseUrl: (serverBaseUrl: string) => Promise<Response>
+): Promise<{ gateway: GatewayRecord; response: Response }> {
+  let response = await requestWithBaseUrl(gateway.serverBaseUrl);
+  let effectiveGateway = gateway;
+
+  if (!response.ok && PAIRING_ROUTE_MISCONFIG_STATUSES.has(response.status) && !hasBasePath(gateway.serverBaseUrl)) {
+    for (const fallbackBasePath of PAIRING_ROUTE_FALLBACK_BASE_PATHS) {
+      const fallbackBaseUrl = appendBasePath(gateway.serverBaseUrl, fallbackBasePath);
+      if (fallbackBaseUrl === gateway.serverBaseUrl) {
+        continue;
+      }
+
+      const fallbackResponse = await requestWithBaseUrl(fallbackBaseUrl);
+      if (!fallbackResponse.ok && PAIRING_ROUTE_MISCONFIG_STATUSES.has(fallbackResponse.status)) {
+        continue;
+      }
+
+      const updatedGateway = await updateGatewayBaseUrl(gateway.id, fallbackBaseUrl);
+      effectiveGateway = updatedGateway ?? gateway;
+      response = fallbackResponse;
+      break;
+    }
+  }
+
+  return {
+    gateway: effectiveGateway,
+    response,
+  };
+}
+
 function normalizeGatewayStore(raw: unknown): GatewayStoreV1 {
   const base: GatewayStoreV1 = {
     version: 1,
@@ -643,6 +719,25 @@ export async function claimPairing(
     }
   };
 
+  const parsePairClaimResponse = async (
+    response: Response
+  ): Promise<
+    | { ok: true; value: ReturnType<typeof PairClaimResponseSchema.parse> }
+    | { ok: false; error: unknown }
+  > => {
+    try {
+      return {
+        ok: true,
+        value: PairClaimResponseSchema.parse(await response.json()),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        error,
+      };
+    }
+  };
+
   let effectiveServerBaseUrl = normalizeBaseUrl(pairing.serverBaseUrl);
   let response = await requestPairClaim(effectiveServerBaseUrl);
 
@@ -677,7 +772,43 @@ export async function claimPairing(
     throw new Error(`Pairing failed (${response.status}): ${suffix}`);
   }
 
-  const parsed = PairClaimResponseSchema.parse(await response.json());
+  let parsedResult = await parsePairClaimResponse(response);
+
+  if (!parsedResult.ok && !hasBasePath(effectiveServerBaseUrl)) {
+    for (const fallbackBasePath of PAIRING_ROUTE_FALLBACK_BASE_PATHS) {
+      const fallbackBaseUrl = appendBasePath(effectiveServerBaseUrl, fallbackBasePath);
+      if (fallbackBaseUrl === effectiveServerBaseUrl) {
+        continue;
+      }
+
+      try {
+        const fallbackResponse = await requestPairClaim(fallbackBaseUrl);
+        if (!fallbackResponse.ok) {
+          continue;
+        }
+
+        const fallbackParsedResult = await parsePairClaimResponse(fallbackResponse);
+        if (!fallbackParsedResult.ok) {
+          continue;
+        }
+
+        effectiveServerBaseUrl = fallbackBaseUrl;
+        response = fallbackResponse;
+        parsedResult = fallbackParsedResult;
+        break;
+      } catch {
+        // Try the next fallback base path.
+      }
+    }
+  }
+
+  if (!parsedResult.ok) {
+    throw parsedResult.error instanceof Error
+      ? parsedResult.error
+      : new Error("Pairing failed: gateway returned an invalid response.");
+  }
+
+  const parsed = parsedResult.value;
   const store = await loadGatewayStore();
   const normalizedBaseUrl = normalizeBaseUrl(effectiveServerBaseUrl);
   const gatewayId = createGatewayId(normalizedBaseUrl);
@@ -735,28 +866,29 @@ async function refreshAccessToken(gatewayId?: GatewayId): Promise<string> {
   }
 
   const promise = (async () => {
-    let response: Response;
-    try {
-      response = await fetch(`${gateway.serverBaseUrl}/auth/refresh`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          refreshToken: gateway.refreshToken,
-        }),
-      });
-    } catch (error) {
-      toGatewayConnectionError(error);
-    }
+    const { gateway: effectiveGateway, response } = await retryWithGatewayBasePathFallback(gateway, async (serverBaseUrl) => {
+      try {
+        return await fetch(`${serverBaseUrl}/auth/refresh`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            refreshToken: gateway.refreshToken,
+          }),
+        });
+      } catch (error) {
+        toGatewayConnectionError(error);
+      }
+    });
 
     if (!response.ok) {
-      await removeGatewayInternal(gateway.id);
+      await removeGatewayInternal(effectiveGateway.id);
       throw new ReauthRequiredError("Refresh token rejected");
     }
 
     const payload = AuthRefreshResponseSchema.parse(await response.json());
-    accessTokenByGatewayId.set(gateway.id, payload.accessToken);
+    accessTokenByGatewayId.set(effectiveGateway.id, payload.accessToken);
     return payload.accessToken;
   })().finally(() => {
     refreshPromiseByGatewayId.delete(gateway.id);
@@ -796,12 +928,12 @@ export async function authenticatedRequest<T>(
   options: Omit<RequestInit, "headers"> & { headers?: Record<string, string> } = {},
   gatewayId?: GatewayId
 ): Promise<T> {
-  const { url, gateway } = await buildUrl(pathname, gatewayId);
+  const gateway = await resolveGatewayRecord(gatewayId);
   let { accessToken } = await getValidAccessToken(gateway.id);
 
-  const doRequest = async (token: string) => {
+  const doRequest = async (token: string, serverBaseUrl: string) => {
     try {
-      return await fetch(url, {
+      return await fetch(joinBaseUrlAndPath(serverBaseUrl, pathname), {
         ...options,
         headers: {
           ...(options.headers ?? {}),
@@ -813,15 +945,19 @@ export async function authenticatedRequest<T>(
     }
   };
 
-  let response = await doRequest(accessToken);
+  let requestResult = await retryWithGatewayBasePathFallback(gateway, (serverBaseUrl) => doRequest(accessToken, serverBaseUrl));
+  let response = requestResult.response;
+  let effectiveGateway = requestResult.gateway;
 
   if (response.status === 401) {
-    accessToken = await refreshAccessToken(gateway.id);
-    response = await doRequest(accessToken);
+    accessToken = await refreshAccessToken(effectiveGateway.id);
+    requestResult = await retryWithGatewayBasePathFallback(effectiveGateway, (serverBaseUrl) => doRequest(accessToken, serverBaseUrl));
+    response = requestResult.response;
+    effectiveGateway = requestResult.gateway;
   }
 
   if (response.status === 401) {
-    await removeGatewayInternal(gateway.id);
+    await removeGatewayInternal(effectiveGateway.id);
     throw new ReauthRequiredError();
   }
 
@@ -830,7 +966,7 @@ export async function authenticatedRequest<T>(
     throw new ApiHttpError(response.status, body);
   }
 
-  await markGatewayAsUsed(gateway.id);
+  await markGatewayAsUsed(effectiveGateway.id);
 
   if (response.status === 204) {
     return undefined as T;

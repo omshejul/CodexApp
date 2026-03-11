@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 
 private let tailscaleServiceName = "codexgateway"
+private let tailscaleLegacyServeBasePath = "/codex-gateway"
 private let launchAgentLabel = "com.codex.gateway"
 
 @MainActor
@@ -22,6 +23,7 @@ final class GatewayManager: ObservableObject {
     let pid: Int32
     let command: String
     let isManagedGateway: Bool
+    let matchesCurrentBundle: Bool
   }
 
   private struct SetupDiagnostics {
@@ -208,19 +210,27 @@ final class GatewayManager: ObservableObject {
     let port = configuredPort()
     if let listener = diagnostics.portListener {
       if listener.isManagedGateway {
-        _ = await ensureTailscaleServeRoutesToGatewayAsync(port: port)
-        isRunning = true
-        statusMessage = "Running"
-        appendOutput("Gateway is already running on 127.0.0.1:\(port) (PID \(listener.pid)).")
-        Task { await refreshPairedDevices() }
+        if listener.matchesCurrentBundle {
+          _ = await ensureTailscaleServeRoutesToGatewayAsync(port: port)
+          isRunning = true
+          statusMessage = "Running"
+          appendOutput("Gateway is already running on 127.0.0.1:\(port) (PID \(listener.pid)).")
+          Task { await refreshPairedDevices() }
+          return
+        }
+
+        appendOutput("A managed gateway from an older app bundle is running on 127.0.0.1:\(port) (PID \(listener.pid)). Restarting it from the current app.")
+        _ = stopLaunchAgent(removePlist: true)
+        cleanupManagedProcess()
+      }
+      if !listener.isManagedGateway {
+        conflictingPID = listener.pid
+        statusMessage = "Port \(port) is already in use."
+        appendOutput("Another process is already using 127.0.0.1:\(port) (PID \(listener.pid)).")
+        appendOutput("Command: \(listener.command)")
+        appendOutput("Action: stop the other process in this app, or change the gateway port in Settings.")
         return
       }
-      conflictingPID = listener.pid
-      statusMessage = "Port \(port) is already in use."
-      appendOutput("Another process is already using 127.0.0.1:\(port) (PID \(listener.pid)).")
-      appendOutput("Command: \(listener.command)")
-      appendOutput("Action: stop the other process in this app, or change the gateway port in Settings.")
-      return
     }
 
     _ = await ensureTailscaleServeRoutesToGatewayAsync(port: port)
@@ -991,7 +1001,8 @@ final class GatewayManager: ObservableObject {
     return PortListener(
       pid: pid,
       command: command,
-      isManagedGateway: isManagedGatewayCommand(command)
+      isManagedGateway: isManagedGatewayCommand(command),
+      matchesCurrentBundle: isCurrentBundleGatewayCommand(command)
     )
   }
 
@@ -1020,7 +1031,12 @@ final class GatewayManager: ObservableObject {
       .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
       .first ?? ""
 
-    return PortListener(pid: pid, command: command, isManagedGateway: isManagedGatewayCommand(command))
+    return PortListener(
+      pid: pid,
+      command: command,
+      isManagedGateway: isManagedGatewayCommand(command),
+      matchesCurrentBundle: isCurrentBundleGatewayCommand(command)
+    )
   }
 
   private func processCommand(forPID pid: Int32) -> String {
@@ -1040,13 +1056,14 @@ final class GatewayManager: ObservableObject {
     guard !command.isEmpty else { return false }
     if command.contains("/GatewayRuntime/dist/server.js") { return true }
     if command.contains("codex-gateway-runtime") && command.contains("server.js") { return true }
-    if let resourcePath = Bundle.main.resourcePath,
-       command.contains(resourcePath),
-       command.contains("server.js")
-    {
-      return true
-    }
+    if isCurrentBundleGatewayCommand(command) { return true }
     return false
+  }
+
+  private func isCurrentBundleGatewayCommand(_ command: String) -> Bool {
+    guard !command.isEmpty else { return false }
+    guard let resourcePath = Bundle.main.resourcePath else { return false }
+    return command.contains(resourcePath) && command.contains("server.js")
   }
 
   private func waitForGatewayReachable(port: Int, timeoutSeconds: TimeInterval) async -> Bool {
@@ -1504,14 +1521,16 @@ final class GatewayManager: ObservableObject {
     if configureResult.output.contains("invalid service name") || configureResult.output.contains("flag -service") {
       let legacyResult = runSync(
         executablePath: tailscalePath,
-        arguments: ["serve", "--bg", "http://127.0.0.1:\(port)"],
+        arguments: ["serve", "--bg", "--set-path", tailscaleLegacyServeBasePath, "http://127.0.0.1:\(port)"],
         workingDirectory: nil,
         environment: environment
       )
       if legacyResult.exitCode == 0 {
         didConfigureServeRouteThisSession = false
         didConfigureLegacyServeRouteThisSession = true
-        appendOutput("Configured Tailscale route in node mode (service mode unsupported by this Tailscale CLI).")
+        appendOutput(
+          "Configured Tailscale route in node mode at \(tailscaleLegacyServeBasePath) (service mode unsupported by this Tailscale CLI)."
+        )
         return true
       }
       appendOutput("Failed to configure Tailscale route in fallback mode.")
@@ -1557,14 +1576,16 @@ final class GatewayManager: ObservableObject {
     if configureResult.output.contains("invalid service name") || configureResult.output.contains("flag -service") {
       let legacyResult = await runSyncAsync(
         executablePath: tailscalePath,
-        arguments: ["serve", "--bg", "http://127.0.0.1:\(port)"],
+        arguments: ["serve", "--bg", "--set-path", tailscaleLegacyServeBasePath, "http://127.0.0.1:\(port)"],
         workingDirectory: nil,
         environment: environment
       )
       if legacyResult.exitCode == 0 {
         didConfigureServeRouteThisSession = false
         didConfigureLegacyServeRouteThisSession = true
-        appendOutput("Configured Tailscale route in node mode (service mode unsupported by this Tailscale CLI).")
+        appendOutput(
+          "Configured Tailscale route in node mode at \(tailscaleLegacyServeBasePath) (service mode unsupported by this Tailscale CLI)."
+        )
         return true
       }
       appendOutput("Failed to configure Tailscale route in fallback mode.")

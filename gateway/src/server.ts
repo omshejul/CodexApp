@@ -74,6 +74,7 @@ const ACCESS_TTL_SECONDS = 15 * 60;
 const NEVER_EXPIRES_AT_MS = 253402300799000; // 9999-12-31T23:59:59.000Z
 const GATEWAY_VERSION = process.env.GATEWAY_VERSION ?? "0.1.0";
 const GATEWAY_NAME = "codex-phone-gateway";
+const TAILSCALE_BIN = process.env.TAILSCALE_BIN ?? "tailscale";
 
 const port = Number(process.env.PORT ?? DEFAULT_PORT);
 const host = process.env.HOST ?? DEFAULT_HOST;
@@ -550,11 +551,12 @@ async function restartCodexAppServerAfterDeriveConfigFailure(): Promise<void> {
 
 function detectTailscaleBaseUrl(): string | null {
   if (cachedDetectedBaseUrl) {
-    return cachedDetectedBaseUrl;
+    const basePath = detectTailscaleServeBasePath();
+    return `${cachedDetectedBaseUrl}${basePath}`;
   }
 
   try {
-    const raw = execFileSync("tailscale", ["status", "--json"], {
+    const raw = execFileSync(TAILSCALE_BIN, ["status", "--json"], {
       stdio: ["ignore", "pipe", "ignore"],
       encoding: "utf8",
     });
@@ -562,14 +564,15 @@ function detectTailscaleBaseUrl(): string | null {
     const dns = parsed?.Self?.DNSName?.replace(/\.$/, "");
     if (dns) {
       cachedDetectedBaseUrl = `https://${dns}`;
-      return cachedDetectedBaseUrl;
+      const basePath = detectTailscaleServeBasePath();
+      return `${cachedDetectedBaseUrl}${basePath}`;
     }
   } catch {
     // fallthrough
   }
 
   try {
-    const rawIp = execFileSync("tailscale", ["ip", "-4"], {
+    const rawIp = execFileSync(TAILSCALE_BIN, ["ip", "-4"], {
       stdio: ["ignore", "pipe", "ignore"],
       encoding: "utf8",
     })
@@ -578,13 +581,43 @@ function detectTailscaleBaseUrl(): string | null {
       .find((line) => line.length > 0);
     if (rawIp) {
       cachedDetectedBaseUrl = `https://${rawIp}`;
-      return cachedDetectedBaseUrl;
+      const basePath = detectTailscaleServeBasePath();
+      return `${cachedDetectedBaseUrl}${basePath}`;
     }
   } catch {
     return null;
   }
 
   return null;
+}
+
+function detectTailscaleServeBasePath(): string {
+  try {
+    const raw = execFileSync(TAILSCALE_BIN, ["serve", "status", "--json"], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8",
+    });
+    const parsed = JSON.parse(raw) as {
+      Web?: Record<string, { Handlers?: Record<string, { Proxy?: string }> }>;
+    };
+    const targetProxy = `http://127.0.0.1:${port}`;
+
+    for (const entry of Object.values(parsed.Web ?? {})) {
+      for (const [handlerPath, handler] of Object.entries(entry?.Handlers ?? {})) {
+        if (handler?.Proxy !== targetProxy) {
+          continue;
+        }
+        if (!handlerPath || handlerPath === "/") {
+          return "";
+        }
+        return handlerPath.replace(/\/+$/, "");
+      }
+    }
+  } catch {
+    // fall through to no base path
+  }
+
+  return "";
 }
 
 function resolvePublicBaseUrl(request: FastifyRequest): string {
