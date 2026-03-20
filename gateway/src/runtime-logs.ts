@@ -6,6 +6,10 @@ interface RuntimeLogWriter {
   error: (type: string, error: unknown, data?: unknown) => void;
 }
 
+interface ThreadEventLogWriter {
+  append: (threadId: string, payload: unknown) => void;
+}
+
 function toJsonLine(payload: unknown): string {
   return `${JSON.stringify(payload)}\n`;
 }
@@ -73,6 +77,29 @@ export function createRuntimeLogWriter(eventsPath: string, errorsPath: string): 
         error: normalizeError(error),
         data: clip(data),
       });
+    },
+  };
+}
+
+function safeThreadLogFileName(threadId: string): string {
+  const trimmed = threadId.trim();
+  if (!trimmed) {
+    return "_unknown-thread.jsonl";
+  }
+  return `${encodeURIComponent(trimmed)}.jsonl`;
+}
+
+export function createThreadEventLogWriter(baseDir: string): ThreadEventLogWriter {
+  fs.mkdirSync(baseDir, { recursive: true });
+
+  return {
+    append: (threadId: string, payload: unknown) => {
+      const targetPath = path.join(baseDir, safeThreadLogFileName(threadId));
+      try {
+        fs.appendFileSync(targetPath, toJsonLine(payload), "utf8");
+      } catch {
+        // do not crash gateway due to logging IO
+      }
     },
   };
 }

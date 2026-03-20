@@ -61,7 +61,7 @@ import {
 } from "@codex-phone/shared";
 import { CodexRpcClient } from "./codex-rpc";
 import { GatewayDatabase, PairSessionRow, RefreshTokenRow, ThreadQueuedMessageRow } from "./db";
-import { createRuntimeLogWriter } from "./runtime-logs";
+import { createRuntimeLogWriter, createThreadEventLogWriter } from "./runtime-logs";
 import { generatePairCode, generateRefreshSecret, hashValue, safeEqualHex } from "./security";
 
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
@@ -91,7 +91,10 @@ const tokenHashSecret = process.env.TOKEN_HASH_SECRET ?? jwtSecret;
 const publicBaseUrlOverride = process.env.PUBLIC_BASE_URL;
 const eventsLogPath = process.env.EVENTS_LOG_PATH ?? path.resolve(__dirname, "../logs/events.log");
 const errorsLogPath = process.env.ERRORS_LOG_PATH ?? path.resolve(__dirname, "../logs/errors.log");
+const threadRawEventsDir =
+  process.env.THREAD_RAW_EVENTS_DIR ?? path.resolve(path.dirname(eventsLogPath), "thread-raw-events");
 const runtimeLogs = createRuntimeLogWriter(eventsLogPath, errorsLogPath);
+const threadRawEventLogs = createThreadEventLogWriter(threadRawEventsDir);
 const logLevel = process.env.LOG_LEVEL ?? "info";
 const prettyLogsEnabled = (process.env.LOG_PRETTY ?? "1") !== "0";
 const preventSystemSleepWhileGatewayActive =
@@ -1924,7 +1927,7 @@ const app = Fastify({
 });
 
 async function bootstrap() {
-  runtimeLogs.event("gateway.bootstrap.start", { host, port, codexWsUrl, eventsLogPath, errorsLogPath });
+  runtimeLogs.event("gateway.bootstrap.start", { host, port, codexWsUrl, eventsLogPath, errorsLogPath, threadRawEventsDir });
   const activeTurnIdByThread = new Map<string, string>();
   const pendingTurnStartByThread = new Set<string>();
   const turnInitiatorDeviceByThread = new Map<string, string>();
@@ -2379,6 +2382,17 @@ async function bootstrap() {
     const threadId = extractThreadIdFromParams(params);
     const turnId = extractTurnIdFromParams(params);
     const resolvedTurnId = threadId ? turnId ?? activeTurnIdByThread.get(threadId) ?? null : null;
+    if (threadId) {
+      threadRawEventLogs.append(threadId, {
+        ts: new Date().toISOString(),
+        source: "codex.notification",
+        method,
+        threadId,
+        turnId: turnId ?? undefined,
+        resolvedTurnId: resolvedTurnId ?? undefined,
+        params: params ?? null,
+      });
+    }
     if (threadId && turnId && lowerMethod === "turn/started") {
       activeTurnIdByThread.set(threadId, turnId);
       pendingTurnStartByThread.delete(threadId);
