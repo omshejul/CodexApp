@@ -9,6 +9,7 @@ The Linux TUI mirrors the mac menu app flow:
 - Runs setup checks (gateway build, Codex CLI, Tailscale)
 - Starts/stops gateway
 - Configures Tailscale Serve route to gateway
+  Linux uses `tailscale serve --bg http://127.0.0.1:<port>` and verifies it with `tailscale serve status --json`
 - Shows paired devices and allows revocation
 - Shows recent manager/runtime logs
 

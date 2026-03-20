@@ -91,7 +91,7 @@ class LinuxGatewayManager {
   }
 
   public refreshSetupStatus() {
-    const diagnostics = this.diagnoseSetup(false);
+    const diagnostics = this.diagnoseSetup(true);
 
     if (!diagnostics.gatewayBuildReady) {
       this.isRunning = false;
@@ -290,7 +290,7 @@ class LinuxGatewayManager {
       this.saveConfigToDisk(this.config);
 
       if (this.ensureTailscaleServeRoutesToGateway(this.config.port)) {
-        this.appendOutput(`Tailscale service route '${TAILSCALE_SERVICE_NAME}' is configured.`);
+        this.appendOutput("Tailscale Serve route is configured.");
       }
 
       const diagnostics = this.diagnoseSetup(true);
@@ -435,13 +435,13 @@ class LinuxGatewayManager {
   }
 
   public diagnosticsSummary(): string[] {
-    const diagnostics = this.diagnoseSetup(false);
+    const diagnostics = this.diagnoseSetup(true);
     const lines = [
       `Gateway build: ${diagnostics.gatewayBuildReady ? "ok" : "missing"}`,
       `Codex CLI: ${diagnostics.codexReady ? "ok" : "missing"}`,
       `Tailscale CLI: ${diagnostics.tailscaleAvailable ? "ok" : "missing"}`,
-      `Tailscale auth: ${diagnostics.tailscaleAuthenticated ? "ok" : "not checked/not authenticated"}`,
-      `Tailscale serve route: ${diagnostics.serveConfigured ? "configured" : "not checked/not configured"}`,
+      `Tailscale auth: ${diagnostics.tailscaleAuthenticated ? "ok" : "not authenticated"}`,
+      `Tailscale serve route: ${diagnostics.serveConfigured ? "configured" : "not configured"}`,
     ];
 
     if (diagnostics.portListener) {
@@ -1146,9 +1146,7 @@ WantedBy=default.target
       return false;
     }
 
-    const hasEndpoint = status.output.includes(`127.0.0.1:${port}`);
-    const hasService = status.output.includes(TAILSCALE_SERVICE_NAME);
-    return hasEndpoint && (hasService || status.output.includes('"Web"'));
+    return this.serveStatusRoutesToPort(status.output, port);
   }
 
   private ensureTailscaleServeRoutesToGateway(port: number): boolean {
@@ -1164,38 +1162,38 @@ WantedBy=default.target
       return false;
     }
 
-    const configure = this.runCommand(
-      tailscalePath,
-      ["serve", "--service", TAILSCALE_SERVICE_NAME, "--bg", `http://127.0.0.1:${port}`],
-      { env }
-    );
-
-    if (configure.exitCode === 0) {
-      this.didConfigureServeRouteThisSession = true;
-      this.didConfigureLegacyServeRouteThisSession = false;
-      this.appendOutput(`Configured Tailscale Serve route to 127.0.0.1:${port}.`);
-      return true;
-    }
-
-    if (configure.output.includes("invalid service name") || configure.output.includes("flag -service")) {
-      const fallback = this.runCommand(tailscalePath, ["serve", "--bg", `http://127.0.0.1:${port}`], { env });
-      if (fallback.exitCode === 0) {
-        this.didConfigureServeRouteThisSession = false;
-        this.didConfigureLegacyServeRouteThisSession = true;
-        this.appendOutput(
-          "Configured Tailscale route in node mode (service mode unsupported by this Tailscale CLI)."
-        );
-        return true;
-      }
-
-      this.appendOutput("Failed to configure Tailscale route in fallback mode.");
-      this.appendOutput(fallback.output);
+    const configure = this.runCommand(tailscalePath, ["serve", "--bg", `http://127.0.0.1:${port}`], { env });
+    if (configure.exitCode !== 0) {
+      this.appendOutput("Failed to configure Tailscale route.");
+      this.appendOutput(configure.output);
       return false;
     }
 
-    this.appendOutput("Failed to configure Tailscale route.");
-    this.appendOutput(configure.output);
-    return false;
+    const status = this.runCommand(tailscalePath, ["serve", "status", "--json"], {
+      env,
+    });
+    if (status.exitCode !== 0) {
+      this.appendOutput("Configured Tailscale route, but could not verify it with `tailscale serve status --json`.");
+      this.appendOutput(status.output);
+      return false;
+    }
+
+    if (!this.serveStatusRoutesToPort(status.output, port)) {
+      this.appendOutput("Configured Tailscale route, but `tailscale serve status --json` does not point to the gateway port.");
+      this.appendOutput(status.output);
+      return false;
+    }
+
+    this.didConfigureServeRouteThisSession = false;
+    this.didConfigureLegacyServeRouteThisSession = true;
+    this.appendOutput(`Configured Tailscale Serve route to 127.0.0.1:${port}.`);
+    return true;
+  }
+
+  private serveStatusRoutesToPort(statusOutput: string, port: number): boolean {
+    const hasEndpoint = statusOutput.includes(`127.0.0.1:${port}`);
+    const hasService = statusOutput.includes(TAILSCALE_SERVICE_NAME);
+    return hasEndpoint && (hasService || statusOutput.includes('"Web"'));
   }
 
   private disableTailscaleServeIfManagedByApp() {
@@ -1218,7 +1216,7 @@ WantedBy=default.target
         this.appendOutput(clear.output);
       }
     } else if (this.didConfigureLegacyServeRouteThisSession) {
-      this.appendOutput("Leaving existing node-level Tailscale route unchanged (legacy CLI mode).");
+      this.appendOutput("Leaving existing node-level Tailscale route unchanged.");
     }
 
     this.didConfigureServeRouteThisSession = false;
