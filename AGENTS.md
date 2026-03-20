@@ -81,6 +81,7 @@ NOTARYTOOL_PROFILE="codex-gateway"
 - For build/reinstall iOS app say:
   `cd /Users/omshejul/Code/CodexApp/app`
   `bunx expo run:ios --device --no-bundler --configuration Debug`
+- When the user asks to make a phone build, default to the iPhone Release build unless they explicitly ask for Debug or a different target.
 - Standalone iOS build (no Metro):
   `cd /Users/omshejul/Code/CodexApp/app`
   `bunx expo run:ios --device --no-bundler --configuration Debug`
