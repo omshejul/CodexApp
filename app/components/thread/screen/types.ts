@@ -72,6 +72,7 @@ export type LiveStreamBucket =
 export interface LiveStreamState {
   assistant: string;
   terminalOutput: string;
+  terminalOutputComplete: boolean;
   reasoning: string;
   plan: string;
   fileChanges: string;

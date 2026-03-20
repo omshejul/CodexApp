@@ -329,77 +329,31 @@ export function useSmoothedFlag(value: boolean, exitDelayMs = 180): boolean {
   return smoothed;
 }
 
-export function ThinkingShinyPill() {
+interface PlanActivityCardProps {
+  detail: string;
+  onImplementPlan: () => void;
+  onRevisePlan: () => void;
+}
+
+export function PlanActivityCard({ detail, onImplementPlan, onRevisePlan }: PlanActivityCardProps) {
   return (
-    <MotiView
-      from={{ opacity: 0, translateY: 8 }}
-      animate={{ opacity: 1, translateY: 0 }}
-      exit={{ opacity: 0, translateY: -4 }}
-      transition={{ type: "timing", duration: 300 }}
-      className="pb-4 pt-2"
-    >
-      <MotiView
-        from={{ translateY: 0 }}
-        animate={{ translateY: -3 }}
-        transition={{ type: "timing", duration: 1400, loop: true, repeatReverse: true }}
-      >
-        <View className="relative self-start overflow-hidden rounded-full border border-white/20 bg-white/5 px-4 py-2">
-          <MotiView
-            from={{ translateX: -160, opacity: 0 }}
-            animate={{ translateX: 240, opacity: 0.6 }}
-            transition={{ type: "timing", duration: 1400, loop: true, repeatReverse: false }}
-            className="absolute -bottom-8 -top-8 w-20 bg-white/30"
-            style={{
-              transform: [{ rotate: "18deg" }],
-            }}
-          />
-          <MotiView
-            from={{ translateX: -100, opacity: 0 }}
-            animate={{ translateX: 240, opacity: 0.3 }}
-            transition={{ type: "timing", duration: 1800, loop: true, repeatReverse: false, delay: 400 }}
-            className="absolute -bottom-8 -top-8 w-10 bg-white/20"
-            style={{
-              transform: [{ rotate: "18deg" }],
-            }}
-          />
-          <View className="relative flex-row items-center gap-2">
-            <MotiView
-              from={{ opacity: 0.4 }}
-              animate={{ opacity: 1 }}
-              transition={{
-                type: "timing",
-                duration: 800,
-                loop: true,
-                repeatReverse: true,
-              }}
-            >
-              <Ionicons name="sparkles-outline" size={14} color="#ffffff" />
-            </MotiView>
-            <Text className="text-sm font-semibold text-white">Thinking</Text>
-            <View className="flex-row items-center gap-1">
-              <MotiView
-                from={{ opacity: 0.2, scale: 0.7 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ type: "timing", duration: 500, loop: true, repeatReverse: true, delay: 0 }}
-                className="h-1.5 w-1.5 rounded-full bg-white"
-              />
-              <MotiView
-                from={{ opacity: 0.2, scale: 0.7 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ type: "timing", duration: 500, loop: true, repeatReverse: true, delay: 150 }}
-                className="h-1.5 w-1.5 rounded-full bg-white"
-              />
-              <MotiView
-                from={{ opacity: 0.2, scale: 0.7 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ type: "timing", duration: 500, loop: true, repeatReverse: true, delay: 300 }}
-                className="h-1.5 w-1.5 rounded-full bg-white"
-              />
-            </View>
-          </View>
-        </View>
-      </MotiView>
-    </MotiView>
+    <View className="w-full rounded-2xl border border-border/20 bg-black/35 px-3 py-3">
+      <Text className="mb-2 text-xs font-semibold uppercase tracking-[0.8px] text-muted-foreground">Plan</Text>
+      <Markdown style={markdownStyles} rules={selectableMarkdownRules}>
+        {detail}
+      </Markdown>
+      <View className="mt-2 flex-row gap-2">
+        <Pressable onPress={onImplementPlan} className="h-9 flex-1 items-center justify-center rounded-xl bg-foreground">
+          <Text className="text-xs font-semibold text-background">Implement</Text>
+        </Pressable>
+        <Pressable
+          onPress={onRevisePlan}
+          className="h-9 flex-1 items-center justify-center rounded-xl border border-border/40 bg-black/20"
+        >
+          <Text className="text-xs font-semibold text-foreground">Revise</Text>
+        </Pressable>
+      </View>
+    </View>
   );
 }
 
@@ -567,6 +521,7 @@ export interface ThreadTurnRowProps {
   isLiveStreamingActive: boolean;
   suppressRowAnimations: boolean;
   wrappedDiffIds: Set<string>;
+  expandedDiffIds: Set<string>;
   wrapToast: { diffId: string; wrapped: boolean } | null;
   lastCopiedDiffId: string | null;
   expandedActivityIds: Set<string>;
@@ -574,8 +529,10 @@ export interface ThreadTurnRowProps {
   copyGroups: CopyGroups;
   webSearchFallback: string | null;
   onToggleDiffWrap: (diffId: string) => void;
+  onToggleDiffExpand: (diffId: string) => void;
   onCopyDiffText: (diffId: string, diffText?: string) => void;
   onOpenTerminalOutput: (detail: string) => void;
+  onPlanAction: (action: "implement" | "revise", detail: string) => void;
   onToggleActivity: (turnId: string) => void;
   onPreviewImage: (uri: string) => void;
   onCopyTurnText: (turnId: string, text?: string) => void;
@@ -591,6 +548,7 @@ function areThreadTurnRowPropsEqual(previous: ThreadTurnRowProps, next: ThreadTu
     previous.isLiveStreamingActive === next.isLiveStreamingActive &&
     previous.suppressRowAnimations === next.suppressRowAnimations &&
     previous.wrappedDiffIds === next.wrappedDiffIds &&
+    previous.expandedDiffIds === next.expandedDiffIds &&
     previous.wrapToast === next.wrapToast &&
     previous.lastCopiedDiffId === next.lastCopiedDiffId &&
     previous.expandedActivityIds === next.expandedActivityIds &&
@@ -600,6 +558,7 @@ function areThreadTurnRowPropsEqual(previous: ThreadTurnRowProps, next: ThreadTu
     previous.onToggleDiffWrap === next.onToggleDiffWrap &&
     previous.onCopyDiffText === next.onCopyDiffText &&
     previous.onOpenTerminalOutput === next.onOpenTerminalOutput &&
+    previous.onPlanAction === next.onPlanAction &&
     previous.onToggleActivity === next.onToggleActivity &&
     previous.onPreviewImage === next.onPreviewImage &&
     previous.onCopyTurnText === next.onCopyTurnText &&
@@ -615,6 +574,7 @@ export const ThreadTurnRow = memo(function ThreadTurnRow({
   isLiveStreamingActive,
   suppressRowAnimations,
   wrappedDiffIds,
+  expandedDiffIds,
   wrapToast,
   lastCopiedDiffId,
   expandedActivityIds,
@@ -624,6 +584,8 @@ export const ThreadTurnRow = memo(function ThreadTurnRow({
   onToggleDiffWrap,
   onCopyDiffText,
   onOpenTerminalOutput,
+  onPlanAction,
+  onToggleDiffExpand,
   onToggleActivity,
   onPreviewImage,
   onCopyTurnText,
@@ -669,18 +631,29 @@ export const ThreadTurnRow = memo(function ThreadTurnRow({
           </Text>
           {item.summary.files.map((file) => {
             const diffId = `${item.id}:${file.path}`;
+            const isExpanded = expandedDiffIds.has(diffId);
             const isWrapped = wrappedDiffIds.has(diffId);
             const diffLines = diffLinesByDiffId.get(diffId) ?? [];
             return (
-              <View key={`${item.id}-${file.path}`} className="">
-                <View className="flex-row items-center justify-between">
-                  <Text className="max-w-[70%] flex-shrink text-xs leading-5 text-foreground">{file.path}</Text>
+              <View key={`${item.id}-${file.path}`} className="mt-2">
+                <Pressable
+                  onPress={() => onToggleDiffExpand(diffId)}
+                  className="flex-row items-center justify-between rounded-xl border border-border/20 bg-black/20 px-3 py-2.5"
+                >
+                  <View className="max-w-[74%] flex-row items-center gap-2">
+                    <Ionicons
+                      name={isExpanded ? "chevron-down" : "chevron-forward"}
+                      size={14}
+                      color="#cbd5e1"
+                    />
+                    <Text className="flex-shrink text-xs leading-5 text-foreground">{file.path}</Text>
+                  </View>
                   <Text className="text-lg font-semibold">
                     <Text className="text-emerald-400">+{file.additions}</Text>
                     <Text className="text-red-400"> -{file.deletions}</Text>
                   </Text>
-                </View>
-                {typeof file.diff === "string" && file.diff.length > 0 ? (
+                </Pressable>
+                {isExpanded && typeof file.diff === "string" && file.diff.length > 0 ? (
                   <View className="mt-2 rounded-lg border border-border/40 bg-muted/60 px-2.5 py-2">
                     <View className="mb-1 flex-row justify-end">
                       <View className="relative mr-1">
@@ -764,9 +737,19 @@ export const ThreadTurnRow = memo(function ThreadTurnRow({
             return <TerminalOutputPreviewCard detail={terminalDetail} onPress={() => onOpenTerminalOutput(terminalDetail)} />;
           }
 
+          if (item.activity.title === "Plan" && item.activity.detail) {
+            const planDetail = item.activity.detail;
+            return (
+              <PlanActivityCard
+                detail={planDetail}
+                onImplementPlan={() => onPlanAction("implement", planDetail)}
+                onRevisePlan={() => onPlanAction("revise", planDetail)}
+              />
+            );
+          }
+
           if (
             item.activity.title === "Reasoning" ||
-            item.activity.title === "Plan" ||
             item.activity.title === "File changes" ||
             item.activity.title === "Tool progress" ||
             item.activity.title.startsWith("Web search")

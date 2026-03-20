@@ -1,5 +1,5 @@
 import { ApiHttpError, type QueuedThreadMessage } from "@/lib/api";
-import { type RenderedTurn } from "@/lib/turns";
+import { extractDeltaText, type RenderedTurn } from "@/lib/turns";
 import {
   MAX_TRANSIENT_CHANGE_SUMMARY_THREADS,
   transientChangeSummariesByThreadKey,
@@ -105,6 +105,7 @@ export function createEmptyLiveStreamState(): LiveStreamState {
   return {
     assistant: "",
     terminalOutput: "",
+    terminalOutputComplete: false,
     reasoning: "",
     plan: "",
     fileChanges: "",
@@ -127,6 +128,7 @@ export function sameLiveStreamState(left: LiveStreamState, right: LiveStreamStat
   return (
     left.assistant === right.assistant &&
     left.terminalOutput === right.terminalOutput &&
+    left.terminalOutputComplete === right.terminalOutputComplete &&
     left.reasoning === right.reasoning &&
     left.plan === right.plan &&
     left.fileChanges === right.fileChanges &&
@@ -651,6 +653,22 @@ export function changeSummarySignature(summary: NonNullable<RenderedTurn["summar
   return `change:${turnAnchor}:${files}`;
 }
 
+export function changeSummaryMergeSignature(summary: NonNullable<RenderedTurn["summary"]>, turnAnchor = ""): string {
+  const normalizedTurnAnchor = turnAnchor.trim();
+  if (normalizedTurnAnchor.length > 0) {
+    return `change-turn:${normalizedTurnAnchor}`;
+  }
+  return changeSummarySignature(summary, normalizedTurnAnchor);
+}
+
+export function turnMergeSignature(item: RenderedTurn): string {
+  const turnAnchor = item.turnId ?? "";
+  if (item.kind === "changeSummary" && item.summary) {
+    return changeSummaryMergeSignature(item.summary, turnAnchor);
+  }
+  return turnContentSignature(item);
+}
+
 export function turnContentSignature(item: RenderedTurn): string {
   const turnAnchor = item.turnId ?? "";
   if (item.kind === "changeSummary" && item.summary) {
@@ -742,7 +760,7 @@ export function mergeTurnsBySignature(turns: RenderedTurn[]): RenderedTurn[] {
   const indexBySignature = new Map<string, number>();
 
   for (const turn of turns) {
-    const signature = turnContentSignature(turn);
+    const signature = turnMergeSignature(turn);
     const existingIndex = indexBySignature.get(signature);
     if (typeof existingIndex !== "number") {
       indexBySignature.set(signature, merged.length);
@@ -1228,12 +1246,227 @@ export function extractActivityFromEvent(method: string, params: unknown): Rende
   return null;
 }
 
+export function extractTerminalOutputTurnFromEvent(
+  method: string,
+  params: unknown
+): (RenderedTurn & { itemId?: string }) | null {
+  const lower = method.toLowerCase();
+  if (!params || typeof params !== "object") {
+    return null;
+  }
+
+  const record = params as Record<string, unknown>;
+  const nestedMsg = record.msg && typeof record.msg === "object" ? (record.msg as Record<string, unknown>) : null;
+  const item = record.item ?? nestedMsg?.item;
+  const itemRecord = item && typeof item === "object" ? (item as Record<string, unknown>) : null;
+
+  if (lower.includes("commandexecution/outputdelta")) {
+    const delta = extractDeltaText(params);
+    const itemId =
+      firstNonEmptyString(record.itemId, record.item_id) ??
+      firstNonEmptyString(itemRecord?.id);
+    if (!delta || !itemId) {
+      return null;
+    }
+    return {
+      id: `terminal-${itemId}`,
+      itemId,
+      role: "system",
+      text: "",
+      kind: "activity",
+      activity: {
+        title: "Terminal output",
+        detail: delta,
+      },
+    };
+  }
+
+  if (
+    lower === "item/completed" ||
+    lower === "codex/event/item_completed" ||
+    lower === "rawresponseitem/completed"
+  ) {
+    if (!itemRecord) {
+      return null;
+    }
+    const itemType = typeof itemRecord.type === "string" ? itemRecord.type.toLowerCase() : "";
+    if (itemType !== "commandexecution") {
+      return null;
+    }
+    const detail =
+      firstNonEmptyString(itemRecord.aggregatedOutput, itemRecord.output, itemRecord.stdout) ??
+      extractDeltaText(itemRecord);
+    const itemId = firstNonEmptyString(itemRecord.id);
+    if (!detail || !itemId) {
+      return null;
+    }
+    return {
+      id: `terminal-${itemId}`,
+      itemId,
+      role: "system",
+      text: "",
+      kind: "activity",
+      activity: {
+        title: "Terminal output",
+        detail,
+      },
+    };
+  }
+
+  return null;
+}
+
+export function extractStreamingActivityTurnFromEvent(
+  method: string,
+  params: unknown
+): (RenderedTurn & { itemId?: string }) | null {
+  const lower = method.toLowerCase();
+  const record = params && typeof params === "object" ? (params as Record<string, unknown>) : null;
+  const nestedMsg = record?.msg && typeof record.msg === "object" ? (record.msg as Record<string, unknown>) : null;
+  const item = record?.item ?? nestedMsg?.item;
+  const itemRecord = item && typeof item === "object" ? (item as Record<string, unknown>) : null;
+  const itemId =
+    firstNonEmptyString(record?.itemId, record?.item_id) ??
+    firstNonEmptyString(itemRecord?.id);
+
+  const createTurn = (title: string, detail: string | null) => {
+    if (!detail) {
+      return null;
+    }
+    return {
+      id: `${title.toLowerCase().replace(/\s+/g, "-")}-${itemId ?? "turn"}`,
+      itemId: itemId ?? undefined,
+      role: "system" as const,
+      text: "",
+      kind: "activity" as const,
+      activity: {
+        title,
+        detail,
+      },
+    };
+  };
+
+  if (
+    lower.includes("reasoning/textdelta") ||
+    lower.includes("reasoning/summarytextdelta") ||
+    lower.includes("reasoning/summarypartadded")
+  ) {
+    return createTurn("Reasoning", extractReasoningText(params));
+  }
+
+  if (lower.includes("item/plan/delta") || lower.includes("turn/plan/updated")) {
+    const detail =
+      extractDeltaText(params) ||
+      (params && typeof params === "object" ? JSON.stringify(params, null, 2) : "");
+    return createTurn("Plan", detail);
+  }
+
+  if (lower.includes("item/filechange/outputdelta")) {
+    const detail =
+      extractDeltaText(params) ||
+      (params && typeof params === "object" ? JSON.stringify(params, null, 2) : "");
+    return createTurn("File changes", detail);
+  }
+
+  if (lower.includes("item/mcptoolcall/progress")) {
+    const progressToolName = firstNonEmptyString(
+      record?.toolName,
+      record?.tool_name,
+      record?.name,
+      record?.callName,
+      record?.call_name,
+      itemRecord?.name,
+      itemRecord?.toolName,
+      itemRecord?.tool_name,
+      itemRecord?.serverToolName,
+      itemRecord?.server_tool_name
+    );
+    const progressQueries = extractWebSearchQueries(params);
+    if (progressQueries.length > 0 || isLikelyWebSearchToolName(progressToolName ?? "")) {
+      return null;
+    }
+
+    const detail =
+      extractDeltaText(params) ||
+      (params && typeof params === "object" ? JSON.stringify(params, null, 2) : "");
+    return createTurn("Tool progress", detail);
+  }
+
+  return null;
+}
+
+export function mergeActivityTurns(existing: RenderedTurn, candidate: RenderedTurn): RenderedTurn {
+  if (existing.kind !== "activity" || !existing.activity || candidate.kind !== "activity" || !candidate.activity) {
+    return candidate;
+  }
+  if (existing.activity.title !== candidate.activity.title) {
+    return candidate;
+  }
+
+  const mergeableTitles = new Set(["Terminal output", "Reasoning", "Plan", "File changes", "Tool progress"]);
+  if (!mergeableTitles.has(existing.activity.title)) {
+    return candidate;
+  }
+
+  const existingDetail = existing.activity.detail ?? "";
+  const candidateDetail = candidate.activity.detail ?? "";
+  if (!existingDetail) {
+    return candidate;
+  }
+  if (!candidateDetail) {
+    return existing;
+  }
+  if (existingDetail === candidateDetail) {
+    return {
+      ...existing,
+      ...candidate,
+      activity: {
+        ...candidate.activity,
+        detail: existingDetail,
+      },
+    };
+  }
+  if (candidateDetail.startsWith(existingDetail)) {
+    return candidate;
+  }
+  if (existingDetail.startsWith(candidateDetail)) {
+    return {
+      ...existing,
+      ...candidate,
+      activity: {
+        ...candidate.activity,
+        detail: existingDetail,
+      },
+    };
+  }
+
+  return {
+    ...existing,
+    ...candidate,
+    activity: {
+      ...candidate.activity,
+      detail: `${existingDetail}${candidateDetail}`,
+    },
+  };
+}
+
 export function toPersistedEventTurns(
   events: Array<{ id: number; method: string; params?: unknown; createdAt?: string; turnId?: string }>,
   existing: RenderedTurn[]
 ): RenderedTurn[] {
   const merged = [...existing];
-  const seen = new Set(merged.map((item) => turnContentSignature(item)));
+  const seen = new Set(merged.map((item) => turnMergeSignature(item)));
+  const streamingActivityIndexByKey = new Map<string, number>();
+  merged.forEach((item, index) => {
+    if (
+      item.kind === "activity" &&
+      item.activity &&
+      ["Terminal output", "Reasoning", "Plan", "File changes", "Tool progress"].includes(item.activity.title)
+    ) {
+      const key = `${item.turnId ?? ""}:${item.activity.title}:${item.id}`;
+      streamingActivityIndexByKey.set(key, index);
+    }
+  });
   const insertCandidate = (candidate: RenderedTurn) => {
     if (candidate.turnId) {
       let firstAssistantInTurn = -1;
@@ -1291,9 +1524,61 @@ export function toPersistedEventTurns(
 
     merged.push(candidate);
   };
+  const mergeCandidate = (candidate: RenderedTurn): boolean => {
+    const signature = turnMergeSignature(candidate);
+    const existingIndex = merged.findIndex((item) => turnMergeSignature(item) === signature);
+    if (existingIndex < 0) {
+      return false;
+    }
+
+    const existingItem = merged[existingIndex];
+    merged[existingIndex] =
+      existingItem.kind === "changeSummary" && existingItem.summary && candidate.kind === "changeSummary" && candidate.summary
+        ? mergeChangeSummaryTurns(existingItem, candidate)
+        : existingItem;
+    return true;
+  };
 
   for (const event of events) {
     const createdAtMs = parseTimestampMs(event.createdAt);
+    const terminalTurn = extractTerminalOutputTurnFromEvent(event.method, event.params ?? null);
+    if (terminalTurn) {
+      const candidate: RenderedTurn = {
+        ...terminalTurn,
+        id: `${terminalTurn.id}-${event.id}`,
+        createdAtMs: createdAtMs ?? undefined,
+        turnId: event.turnId,
+      };
+      const terminalKey = `${event.turnId ?? ""}:Terminal output:${terminalTurn.itemId ?? terminalTurn.id}`;
+      const existingIndex = streamingActivityIndexByKey.get(terminalKey);
+      if (typeof existingIndex === "number") {
+        merged[existingIndex] = mergeActivityTurns(merged[existingIndex], candidate);
+      } else {
+        insertCandidate(candidate);
+        streamingActivityIndexByKey.set(terminalKey, merged.findIndex((item) => item.id === candidate.id));
+      }
+      continue;
+    }
+
+    const streamingActivity = extractStreamingActivityTurnFromEvent(event.method, event.params ?? null);
+    if (streamingActivity) {
+      const candidate: RenderedTurn = {
+        ...streamingActivity,
+        id: `${streamingActivity.id}-${event.id}`,
+        createdAtMs: createdAtMs ?? undefined,
+        turnId: event.turnId,
+      };
+      const activityKey = `${event.turnId ?? ""}:${streamingActivity.activity?.title ?? ""}:${streamingActivity.itemId ?? streamingActivity.id}`;
+      const existingIndex = streamingActivityIndexByKey.get(activityKey);
+      if (typeof existingIndex === "number") {
+        merged[existingIndex] = mergeActivityTurns(merged[existingIndex], candidate);
+      } else {
+        insertCandidate(candidate);
+        streamingActivityIndexByKey.set(activityKey, merged.findIndex((item) => item.id === candidate.id));
+      }
+      continue;
+    }
+
     const summary = extractChangeSummaryFromEvent(event.method, event.params ?? null);
     if (summary) {
       const candidate: RenderedTurn = {
@@ -1305,10 +1590,12 @@ export function toPersistedEventTurns(
         kind: "changeSummary",
         summary,
       };
-      const signature = turnContentSignature(candidate);
+      const signature = turnMergeSignature(candidate);
       if (!seen.has(signature)) {
         seen.add(signature);
         insertCandidate(candidate);
+      } else {
+        mergeCandidate(candidate);
       }
       continue;
     }

@@ -85,13 +85,13 @@ export default function RootLayout() {
   return (
     <SafeAreaProvider>
       <KeyboardProvider>
-        <StatusBar style="light" backgroundColor="hsl(0, 0%, 4%)" />
+        <StatusBar style="light" backgroundColor="#000000" />
         <Stack
           initialRouteName="index"
           screenOptions={{
             headerShown: false,
             contentStyle: {
-              backgroundColor: "hsl(0, 0%, 4%)",
+              backgroundColor: "#000000",
             },
             headerTitleStyle: {
               fontWeight: "700",

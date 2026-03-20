@@ -1,14 +1,13 @@
 import { Text, View } from "react-native";
-import { AnimatePresence } from "moti";
 import Markdown from "react-native-markdown-display";
 import {
   formatReasoningDetail,
   markdownStyles,
+  PlanActivityCard,
   rewriteLocalMarkdownImagePaths,
   sanitizeAssistantDisplayText,
   selectableMarkdownRules,
   TerminalOutputPreviewCard,
-  ThinkingShinyPill,
   type ThreadImageProxyConfig,
 } from "@/components/thread/thread-renderers";
 import { type RenderedTurn } from "@/lib/turns";
@@ -19,7 +18,8 @@ interface LiveFooterProps {
   threadId: string | null;
   imageProxyConfig: ThreadImageProxyConfig | null;
   latestUserPromptFallback: string | null;
-  onOpenTerminalOutput: (detail: string) => void;
+  onOpenLiveTerminalOutput: () => void;
+  onPlanAction: (action: "implement" | "revise", detail: string) => void;
 }
 
 export function LiveFooter({
@@ -28,7 +28,8 @@ export function LiveFooter({
   threadId,
   imageProxyConfig,
   latestUserPromptFallback,
-  onOpenTerminalOutput,
+  onOpenLiveTerminalOutput,
+  onPlanAction,
 }: LiveFooterProps) {
   return (
     <View>
@@ -38,12 +39,22 @@ export function LiveFooter({
             (() => {
               if (item.activity.title === "Terminal output" && item.activity.detail) {
                 const terminalDetail = item.activity.detail;
-                return <TerminalOutputPreviewCard detail={terminalDetail} onPress={() => onOpenTerminalOutput(terminalDetail)} />;
+                return <TerminalOutputPreviewCard detail={terminalDetail} onPress={onOpenLiveTerminalOutput} />;
+              }
+
+              if (item.activity.title === "Plan" && item.activity.detail) {
+                const planDetail = item.activity.detail;
+                return (
+                  <PlanActivityCard
+                    detail={planDetail}
+                    onImplementPlan={() => onPlanAction("implement", planDetail)}
+                    onRevisePlan={() => onPlanAction("revise", planDetail)}
+                  />
+                );
               }
 
               if (
                 item.activity.title === "Reasoning" ||
-                item.activity.title === "Plan" ||
                 item.activity.title === "File changes" ||
                 item.activity.title === "Tool progress" ||
                 item.activity.title.startsWith("Web search")
@@ -113,7 +124,6 @@ export function LiveFooter({
           ) : null}
         </View>
       ))}
-      <AnimatePresence>{smoothIsThinking ? <ThinkingShinyPill key="thinking" /> : null}</AnimatePresence>
     </View>
   );
 }

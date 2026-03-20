@@ -31,7 +31,7 @@ export function ThreadHeader({
 
         <View className="px-12">
           <View className="items-center">
-            <Text className="text-2xl font-semibold text-foreground" numberOfLines={1}>
+            <Text className="text-xl font-semibold text-foreground" numberOfLines={1}>
               {headerTitle}
             </Text>
             <MotiView

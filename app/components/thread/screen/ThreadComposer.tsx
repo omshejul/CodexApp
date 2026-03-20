@@ -16,6 +16,7 @@ import { AnimatePresence, MotiView } from "moti";
 import { Ionicons } from "@expo/vector-icons";
 import FontAwesome6 from "@expo/vector-icons/FontAwesome6";
 import { type QueuedThreadMessage } from "@/lib/api";
+import { ResponseStatusTrack } from "@/components/thread/screen/ResponseStatusTrack";
 import {
   type CollaborationMode,
   type ComposerSelection,
@@ -75,6 +76,7 @@ interface ThreadComposerProps {
   onComposerSelectionChange: (selection: ComposerSelection) => void;
   composerActionDisabled: boolean;
   shouldShowStopAction: boolean;
+  responseStatusText: string | null;
   onStopResponse: () => void;
   onSend: () => void;
   composerActionIconName: "time-outline" | "stop-circle-outline" | "arrow-up";
@@ -130,6 +132,7 @@ export function ThreadComposer({
   onComposerSelectionChange,
   composerActionDisabled,
   shouldShowStopAction,
+  responseStatusText,
   onStopResponse,
   onSend,
   composerActionIconName,
@@ -502,16 +505,30 @@ export function ThreadComposer({
 
   return Platform.OS === "android" ? (
     <KeyboardStickyView offset={{ closed: 0, opened: 0 }}>
-      <View className="-mx-4 border-t border-border/50 bg-background px-4 pt-2" style={{ paddingBottom: Math.max(insetsBottom, 8) }}>
-        {composerContent}
+      <View>
+        {responseStatusText ? (
+          <View className="-mx-4 border-t border-border/50 bg-background px-4 py-2">
+            <ResponseStatusTrack label={responseStatusText} />
+          </View>
+        ) : null}
+        <View className="-mx-4 border-t border-border/50 bg-background px-4 pt-2" style={{ paddingBottom: Math.max(insetsBottom, 8) }}>
+          {composerContent}
+        </View>
       </View>
     </KeyboardStickyView>
   ) : (
-    <View
-      className="-mx-4 border-t border-border/50 bg-background px-4 pt-2"
-      style={{ paddingBottom: keyboardVisible ? 10 : Math.max(insetsBottom, 8) }}
-    >
-      {composerContent}
+    <View>
+      {responseStatusText ? (
+        <View className="-mx-4 border-t border-border/50 bg-background px-4 py-2">
+          <ResponseStatusTrack label={responseStatusText} />
+        </View>
+      ) : null}
+      <View
+        className="-mx-4 border-t border-border/50 bg-background px-4 pt-2"
+        style={{ paddingBottom: keyboardVisible ? 10 : Math.max(insetsBottom, 8) }}
+      >
+        {composerContent}
+      </View>
     </View>
   );
 }

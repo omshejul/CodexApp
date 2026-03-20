@@ -2,14 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   FlatList,
   Keyboard,
+  KeyboardAvoidingView,
+  LayoutChangeEvent,
   NativeScrollEvent,
   NativeSyntheticEvent,
   Platform,
+  Pressable,
   Text,
   TextInput,
   View,
 } from "react-native";
-import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { useLocalSearchParams } from "expo-router";
 import { router } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
@@ -86,7 +88,6 @@ import {
 import {
   asRecord,
   cacheTransientChangeSummaryTurn,
-  changeSummarySignature,
   createEmptyLiveStreamState,
   extractActivityFromEvent,
   extractChangeSummaryFromEvent,
@@ -100,6 +101,7 @@ import {
   hasLiveStreamContent,
   isLikelyWebSearchToolName,
   isMissingQueueRouteError,
+  mergeTurnsBySignature,
   mergeWithTransientChangeSummaryCache,
   parseSsePayload,
   queuedMessageSummary,
@@ -120,6 +122,8 @@ import {
 
 
 export default function ThreadScreen() {
+  type ActiveTerminalView = { mode: "snapshot"; detail: string } | { mode: "live"; fallbackDetail: string };
+
   const { id, gatewayId: gatewayIdParam } = useLocalSearchParams<{ id: string; gatewayId?: string }>();
   const threadId = useMemo(() => (Array.isArray(id) ? id[0] : id), [id]);
   const gatewayId = useMemo(
@@ -160,7 +164,7 @@ export default function ThreadScreen() {
   const [optionsLoaded, setOptionsLoaded] = useState(false);
   const [openDropdown, setOpenDropdown] = useState<OpenDropdown>(null);
   const [previewImageUri, setPreviewImageUri] = useState<string | null>(null);
-  const [activeTerminalOutput, setActiveTerminalOutput] = useState<string | null>(null);
+  const [activeTerminalView, setActiveTerminalView] = useState<ActiveTerminalView | null>(null);
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedThreadMessage[]>([]);
   const [queueActionPendingIds, setQueueActionPendingIds] = useState<Set<string>>(new Set());
@@ -172,6 +176,7 @@ export default function ThreadScreen() {
   const [lastCopiedTurnId, setLastCopiedTurnId] = useState<string | null>(null);
   const [lastCopiedDiffId, setLastCopiedDiffId] = useState<string | null>(null);
   const [wrappedDiffIds, setWrappedDiffIds] = useState<Set<string>>(new Set());
+  const [expandedDiffIds, setExpandedDiffIds] = useState<Set<string>>(new Set());
   const [wrapToast, setWrapToast] = useState<{ diffId: string; wrapped: boolean } | null>(null);
   const [pendingRequestUserInputs, setPendingRequestUserInputs] = useState<PendingRequestUserInput[]>([]);
   const [requestSelectionsByRequest, setRequestSelectionsByRequest] = useState<Record<string, Record<string, string[]>>>({});
@@ -181,6 +186,9 @@ export default function ThreadScreen() {
   const [requestSubmittingIds, setRequestSubmittingIds] = useState<Set<string>>(new Set());
   const [suppressRowAnimations, setSuppressRowAnimations] = useState(false);
   const [imageProxyConfig, setImageProxyConfig] = useState<ThreadImageProxyConfig | null>(null);
+  const [liveBucketOrder, setLiveBucketOrder] = useState<LiveStreamBucket[]>([]);
+  const [showScrollToBottomButton, setShowScrollToBottomButton] = useState(false);
+  const [composerHeight, setComposerHeight] = useState(0);
 
   const streamSocketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -198,7 +206,6 @@ export default function ThreadScreen() {
   const draggingRef = useRef(false);
   const initialSnapDoneRef = useRef(false);
   const seenEventIdsRef = useRef(new Set<string>());
-  const seenChangeHashesRef = useRef(new Set<string>());
   const turnsSignatureRef = useRef("");
   const mentionRequestRef = useRef(0);
   const wrapToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -240,7 +247,7 @@ export default function ThreadScreen() {
       for (const queuedTurn of queuedTurns) {
         seenTurnSignaturesRef.current.add(turnContentSignature(queuedTurn));
       }
-      return [...existing, ...queuedTurns];
+      return mergeTurnsBySignature([...existing, ...queuedTurns]);
     });
   }, []);
 
@@ -646,7 +653,24 @@ export default function ThreadScreen() {
       if (!chunk) {
         return;
       }
+      if (!liveBufferRef.current[bucket]) {
+        setLiveBucketOrder((existing) => (existing.includes(bucket) ? existing : [...existing, bucket]));
+      }
       liveBufferRef.current[bucket] = `${liveBufferRef.current[bucket]}${chunk}`;
+      if (bucket === "terminalOutput") {
+        liveBufferRef.current.terminalOutputComplete = false;
+      }
+      scheduleLiveSnapshotFlush();
+    },
+    [scheduleLiveSnapshotFlush]
+  );
+
+  const setTerminalOutputComplete = useCallback(
+    (complete: boolean) => {
+      if (liveBufferRef.current.terminalOutputComplete === complete) {
+        return;
+      }
+      liveBufferRef.current.terminalOutputComplete = complete;
       scheduleLiveSnapshotFlush();
     },
     [scheduleLiveSnapshotFlush]
@@ -659,8 +683,57 @@ export default function ThreadScreen() {
     }
     liveBufferRef.current = createEmptyLiveStreamState();
     liveLastFlushAtRef.current = 0;
+    setLiveBucketOrder((existing) => (existing.length > 0 ? [] : existing));
     setLiveSnapshot((current) => (hasLiveStreamContent(current) ? createEmptyLiveStreamState() : current));
   }, []);
+
+  const applyPersistedThreadState = useCallback(
+    (
+      threadTurns: unknown[],
+      eventRows: Array<{ id: number; method: string; params?: unknown; createdAt?: string; turnId?: string }>,
+      interactiveRequests: Awaited<ReturnType<typeof getInteractiveRequests>> | null,
+      queuedMessagesResponse: QueuedThreadMessage[] | null,
+      options?: { clearLiveAfter?: boolean }
+    ) => {
+      const rendered = toRenderedTurns(threadTurns);
+      const withPersistedEvents = toPersistedEventTurns(eventRows, rendered);
+      const withPersistedAndTransient = mergeWithTransientChangeSummaryCache(withPersistedEvents, threadPreferenceKey);
+      const nextSignature = turnsSignature(withPersistedAndTransient);
+
+      turnsSignatureRef.current = nextSignature;
+      clearBufferedStreamTurns();
+      setTurns(withPersistedAndTransient);
+      seenTurnSignaturesRef.current = new Set(withPersistedAndTransient.map((item) => turnContentSignature(item)));
+
+      if (interactiveRequests) {
+        setPendingRequestUserInputs(toPendingRequestUserInputList(interactiveRequests.requests));
+      }
+      if (queuedMessagesResponse) {
+        setQueuedMessages(sortQueuedMessages(queuedMessagesResponse));
+      }
+
+      if (options?.clearLiveAfter) {
+        clearLiveBuffers();
+      }
+    },
+    [clearBufferedStreamTurns, clearLiveBuffers, threadPreferenceKey]
+  );
+
+  const reloadPersistedThreadState = useCallback(
+    async (options?: { clearLiveAfter?: boolean }) => {
+      if (!threadId) {
+        return;
+      }
+      const [thread, eventsResponse, interactiveResponse, queuedResponse] = await Promise.all([
+        getThread(threadId, gatewayId),
+        getThreadEvents(threadId, gatewayId),
+        getInteractiveRequests(threadId, gatewayId).catch(() => null),
+        getQueuedThreadMessages(threadId, gatewayId).catch(() => null),
+      ]);
+      applyPersistedThreadState(thread.turns, eventsResponse.events, interactiveResponse, queuedResponse, options);
+    },
+    [applyPersistedThreadState, gatewayId, threadId]
+  );
 
   const finalizeLiveSnapshotToTurns = useCallback(() => {
     flushBufferedStreamTurns();
@@ -677,90 +750,13 @@ export default function ThreadScreen() {
       setSuppressRowAnimations(false);
     }, 700);
 
-    const snapshot = liveBufferRef.current;
-    const finalized: RenderedTurn[] = [];
-
-    if (snapshot.assistant.trim()) {
-      finalized.push({
-        id: makeClientTurnId("assistant"),
-        role: "assistant",
-        text: snapshot.assistant,
-      });
-    }
-    if (snapshot.terminalOutput.trim()) {
-      finalized.push({
-        id: makeClientTurnId("terminal"),
-        role: "system",
-        text: "",
-        kind: "activity",
-        activity: {
-          title: "Terminal output",
-          detail: snapshot.terminalOutput,
-        },
-      });
-    }
-    if (snapshot.reasoning.trim()) {
-      finalized.push({
-        id: makeClientTurnId("reasoning"),
-        role: "system",
-        text: "",
-        kind: "activity",
-        activity: {
-          title: "Reasoning",
-          detail: snapshot.reasoning,
-        },
-      });
-    }
-    if (snapshot.plan.trim()) {
-      finalized.push({
-        id: makeClientTurnId("plan"),
-        role: "system",
-        text: "",
-        kind: "activity",
-        activity: {
-          title: "Plan",
-          detail: snapshot.plan,
-        },
-      });
-    }
-    if (snapshot.fileChanges.trim()) {
-      finalized.push({
-        id: makeClientTurnId("filechanges"),
-        role: "system",
-        text: "",
-        kind: "activity",
-        activity: {
-          title: "File changes",
-          detail: snapshot.fileChanges,
-        },
-      });
-    }
-    if (snapshot.toolProgress.trim()) {
-      finalized.push({
-        id: makeClientTurnId("toolprogress"),
-        role: "system",
-        text: "",
-        kind: "activity",
-        activity: {
-          title: "Tool progress",
-          detail: snapshot.toolProgress,
-        },
-      });
-    }
-
-    if (finalized.length > 0) {
-      setTurns((existing) => {
-        for (const finalizedTurn of finalized) {
-          seenTurnSignaturesRef.current.add(turnContentSignature(finalizedTurn));
-        }
-        return [...existing, ...finalized];
-      });
-    }
+    reloadPersistedThreadState({ clearLiveAfter: true }).catch(() => {
+      // Keep the live snapshot visible until periodic sync catches up.
+    });
 
     liveBufferRef.current = createEmptyLiveStreamState();
     liveLastFlushAtRef.current = 0;
-    setLiveSnapshot((current) => (hasLiveStreamContent(current) ? createEmptyLiveStreamState() : current));
-  }, [flushBufferedStreamTurns, makeClientTurnId]);
+  }, [flushBufferedStreamTurns, reloadPersistedThreadState]);
 
   useEffect(() => {
     if (!threadId) {
@@ -785,7 +781,8 @@ export default function ThreadScreen() {
     setTurns([]);
     setImageProxyConfig(null);
     setExpandedActivityIds(new Set());
-    setActiveTerminalOutput(null);
+    setExpandedDiffIds(new Set());
+    setActiveTerminalView(null);
     setPendingRequestUserInputs([]);
     setRequestSelectionsByRequest({});
     setRequestTextByRequest({});
@@ -997,6 +994,23 @@ export default function ThreadScreen() {
             return;
           }
 
+          const isCommandExecutionCompleted = (() => {
+            if (method !== "item/completed" && method !== "codex/event/item_completed") {
+              return false;
+            }
+            if (!payload.params || typeof payload.params !== "object") {
+              return false;
+            }
+            const record = payload.params as Record<string, unknown>;
+            const nestedMsg = record.msg && typeof record.msg === "object" ? (record.msg as Record<string, unknown>) : null;
+            const item = record.item ?? nestedMsg?.item;
+            if (!item || typeof item !== "object") {
+              return false;
+            }
+            const type = typeof (item as Record<string, unknown>).type === "string" ? ((item as Record<string, unknown>).type as string) : "";
+            return type.toLowerCase() === "commandexecution";
+          })();
+
           if (method === "turn/started" || method === "item/started" || method.includes("reasoning") || method.includes("plan/")) {
             setIsThinking(true);
             if (method === "turn/started" && payload.params && typeof payload.params === "object") {
@@ -1026,22 +1040,21 @@ export default function ThreadScreen() {
 
           const summary = extractChangeSummaryFromEvent(method, payload.params);
           if (summary) {
-            const summaryTurnId = observedTurnId ?? latestObservedTurnId;
-            const key = changeSummarySignature(summary, summaryTurnId ?? "");
-            if (!seenChangeHashesRef.current.has(key)) {
-              seenChangeHashesRef.current.add(key);
-              const candidate: RenderedTurn = {
-                id: makeClientTurnId("change"),
-                role: "system",
-                text: "",
-                turnId: summaryTurnId ?? undefined,
-                kind: "changeSummary",
-                summary,
-              };
-              enqueueBufferedStreamTurn(candidate);
-              if (threadPreferenceKey) {
-                cacheTransientChangeSummaryTurn(threadPreferenceKey, candidate);
-              }
+            const summaryTurnId = observedTurnId;
+            if (!summaryTurnId) {
+              return;
+            }
+            const candidate: RenderedTurn = {
+              id: makeClientTurnId("change"),
+              role: "system",
+              text: "",
+              turnId: summaryTurnId,
+              kind: "changeSummary",
+              summary,
+            };
+            enqueueBufferedStreamTurn(candidate);
+            if (threadPreferenceKey) {
+              cacheTransientChangeSummaryTurn(threadPreferenceKey, candidate);
             }
             return;
           }
@@ -1052,6 +1065,10 @@ export default function ThreadScreen() {
               appendLiveChunk("terminalOutput", delta);
             }
             return;
+          }
+
+          if (isCommandExecutionCompleted) {
+            setTerminalOutputComplete(true);
           }
 
           if (
@@ -1182,21 +1199,8 @@ export default function ThreadScreen() {
         setHeaderTitle(headerName);
         setHeaderPath(matchingSummary?.cwd?.trim() || null);
 
-        const initialTurns = toRenderedTurns(thread.turns);
-        const withPersistedEvents = toPersistedEventTurns(eventsResponse.events, initialTurns);
-        const withPersistedAndTransient = mergeWithTransientChangeSummaryCache(withPersistedEvents, threadPreferenceKey);
-        clearBufferedStreamTurns();
-        setTurns(withPersistedAndTransient);
+        applyPersistedThreadState(thread.turns, eventsResponse.events, interactiveResponse, queuedResponse);
         setError(null);
-        turnsSignatureRef.current = turnsSignature(withPersistedAndTransient);
-        seenTurnSignaturesRef.current = new Set(withPersistedAndTransient.map((item) => turnContentSignature(item)));
-        seenChangeHashesRef.current = new Set(
-          withPersistedAndTransient
-            .filter((item) => item.kind === "changeSummary" && item.summary)
-            .map((item) => turnContentSignature(item))
-        );
-        setPendingRequestUserInputs(interactiveResponse ? toPendingRequestUserInputList(interactiveResponse.requests) : []);
-        setQueuedMessages(sortQueuedMessages(queuedResponse));
         await connectStream();
       } catch (setupError) {
         if (setupError instanceof ReauthRequiredError) {
@@ -1250,6 +1254,7 @@ export default function ThreadScreen() {
     clearLiveBuffers,
     clearBufferedStreamTurns,
     enqueueBufferedStreamTurn,
+    setTerminalOutputComplete,
   ]);
 
   useEffect(() => {
@@ -1282,22 +1287,16 @@ export default function ThreadScreen() {
         const withPersistedAndTransient = mergeWithTransientChangeSummaryCache(withPersistedEvents, threadPreferenceKey);
         const nextSignature = turnsSignature(withPersistedAndTransient);
         if (nextSignature !== turnsSignatureRef.current) {
-          turnsSignatureRef.current = nextSignature;
-          clearLiveBuffers();
-          clearBufferedStreamTurns();
-          setTurns(withPersistedAndTransient);
-          seenTurnSignaturesRef.current = new Set(withPersistedAndTransient.map((item) => turnContentSignature(item)));
-          seenChangeHashesRef.current = new Set(
-            withPersistedAndTransient
-              .filter((item) => item.kind === "changeSummary" && item.summary)
-              .map((item) => turnContentSignature(item))
-          );
-        }
-        if (interactiveResponse) {
-          setPendingRequestUserInputs(toPendingRequestUserInputList(interactiveResponse.requests));
-        }
-        if (queuedResponse) {
-          setQueuedMessages(sortQueuedMessages(queuedResponse));
+          applyPersistedThreadState(thread.turns, eventsResponse.events, interactiveResponse, queuedResponse, {
+            clearLiveAfter: true,
+          });
+        } else {
+          if (interactiveResponse) {
+            setPendingRequestUserInputs(toPendingRequestUserInputList(interactiveResponse.requests));
+          }
+          if (queuedResponse) {
+            setQueuedMessages(sortQueuedMessages(queuedResponse));
+          }
         }
         markConnectionRecovered();
       } catch {
@@ -1309,7 +1308,7 @@ export default function ThreadScreen() {
       active = false;
       clearInterval(timer);
     };
-  }, [threadId, gatewayId, threadPreferenceKey, loading, streamStatus.tone, markConnectionRecovered, clearLiveBuffers, clearBufferedStreamTurns]);
+  }, [threadId, gatewayId, threadPreferenceKey, loading, streamStatus.tone, markConnectionRecovered, applyPersistedThreadState]);
 
   useEffect(() => {
     let active = true;
@@ -1342,6 +1341,7 @@ export default function ThreadScreen() {
       return;
     }
     autoFollowLastRunAtRef.current = Date.now();
+    setShowScrollToBottomButton(false);
     listRef.current?.scrollToEnd({ animated: initialSnapDoneRef.current ? animated : false });
     if (!initialSnapDoneRef.current) {
       initialSnapDoneRef.current = true;
@@ -1376,14 +1376,24 @@ export default function ThreadScreen() {
       return;
     }
     scheduleAutoFollow(false);
+  }, [turns, scheduleAutoFollow]);
+
+  useEffect(() => {
+    if (!followBottomRef.current || draggingRef.current) {
+      return;
+    }
+    if (!hasLiveStreamContent(liveSnapshot)) {
+      return;
+    }
+    scheduleAutoFollow(true);
   }, [
-    turns,
     liveSnapshot.assistant,
     liveSnapshot.terminalOutput,
     liveSnapshot.reasoning,
     liveSnapshot.plan,
     liveSnapshot.fileChanges,
     liveSnapshot.toolProgress,
+    liveSnapshot,
     scheduleAutoFollow,
   ]);
 
@@ -1412,17 +1422,25 @@ export default function ThreadScreen() {
     const isNearBottom = distanceFromBottom < 120;
     // If the user scrolls away from bottom, stop auto-following streamed tokens.
     followBottomRef.current = isNearBottom;
+    setShowScrollToBottomButton(!isNearBottom);
   };
 
   const onListScrollToTop = useCallback(() => {
     // iOS status-bar tap jumps to top without a drag gesture.
     followBottomRef.current = false;
     draggingRef.current = false;
+    setShowScrollToBottomButton(true);
     if (autoFollowTimerRef.current) {
       clearTimeout(autoFollowTimerRef.current);
       autoFollowTimerRef.current = null;
     }
   }, []);
+
+  const onScrollToBottom = useCallback(() => {
+    followBottomRef.current = true;
+    draggingRef.current = false;
+    keepToBottom(true);
+  }, [keepToBottom]);
 
   const copyTurnText = useCallback(async (turnId: string, text?: string) => {
     if (!text) {
@@ -1474,6 +1492,18 @@ export default function ThreadScreen() {
         setWrapToast((current) => (current?.diffId === diffId ? null : current));
         wrapToastTimerRef.current = null;
       }, 1000);
+      return next;
+    });
+  }, []);
+
+  const toggleDiffExpand = useCallback((diffId: string) => {
+    setExpandedDiffIds((existing) => {
+      const next = new Set(existing);
+      if (next.has(diffId)) {
+        next.delete(diffId);
+      } else {
+        next.add(diffId);
+      }
       return next;
     });
   }, []);
@@ -2087,10 +2117,29 @@ export default function ThreadScreen() {
   }, [activeRequestUserInput, clearRequestError]);
 
   const isLiveStreamingActive = hasLiveStreamContent(liveSnapshot);
-  const isResponding = sending || isThinking || isLiveStreamingActive;
+  const hasActiveTurn = activeTurnId !== null;
+  const isResponding = sending || hasActiveTurn || isThinking || isLiveStreamingActive;
   const smoothIsThinking = useSmoothedFlag(isThinking, 240);
   const composerHasDraft = composerText.trim().length > 0 || pendingImages.length > 0;
   const shouldShowStopAction = isResponding && !composerHasDraft;
+  const responseStatusText = useMemo(() => {
+    if (stopping) {
+      return "Stopping response...";
+    }
+    if (sending) {
+      return "Starting response...";
+    }
+    if (isLiveStreamingActive) {
+      return "Receiving output...";
+    }
+    if (isThinking) {
+      return "Thinking...";
+    }
+    if (hasActiveTurn) {
+      return "Working...";
+    }
+    return null;
+  }, [hasActiveTurn, isLiveStreamingActive, isThinking, sending, stopping]);
   const composerActionDisabled = shouldShowStopAction
     ? stopping
     : sending || !composerHasDraft || Boolean(activeRequestUserInput);
@@ -2104,93 +2153,43 @@ export default function ThreadScreen() {
   const showMentionSuggestions = Boolean(activeMention);
   const mentionSuggestions = mentionFiles.slice(0, 12);
 
-  const liveFooterTurns: RenderedTurn[] = [
-    ...(liveSnapshot.assistant
-      ? [
-          {
-            id: "live-assistant",
-            role: "assistant" as const,
-            text: liveSnapshot.assistant,
-            streaming: true,
-          },
-        ]
-      : []),
-    ...(liveSnapshot.reasoning
-      ? [
-          {
-            id: "live-reasoning",
-            role: "system" as const,
-            text: "",
-            kind: "activity" as const,
-            activity: {
-              title: "Reasoning",
-              detail: liveSnapshot.reasoning,
-            },
-            streaming: true,
-          },
-        ]
-      : []),
-    ...(liveSnapshot.plan
-      ? [
-          {
-            id: "live-plan",
-            role: "system" as const,
-            text: "",
-            kind: "activity" as const,
-            activity: {
-              title: "Plan",
-              detail: liveSnapshot.plan,
-            },
-            streaming: true,
-          },
-        ]
-      : []),
-    ...(liveSnapshot.fileChanges
-      ? [
-          {
-            id: "live-filechanges",
-            role: "system" as const,
-            text: "",
-            kind: "activity" as const,
-            activity: {
-              title: "File changes",
-              detail: liveSnapshot.fileChanges,
-            },
-            streaming: true,
-          },
-        ]
-      : []),
-    ...(liveSnapshot.toolProgress
-      ? [
-          {
-            id: "live-toolprogress",
-            role: "system" as const,
-            text: "",
-            kind: "activity" as const,
-            activity: {
-              title: "Tool progress",
-              detail: liveSnapshot.toolProgress,
-            },
-            streaming: true,
-          },
-        ]
-      : []),
-    ...(liveSnapshot.terminalOutput
-      ? [
-          {
-            id: "live-terminal",
-            role: "system" as const,
-            text: "",
-            kind: "activity" as const,
-            activity: {
-              title: "Terminal output",
-              detail: liveSnapshot.terminalOutput,
-            },
-            streaming: true,
-          },
-        ]
-      : []),
-  ];
+  const liveFooterTurns: RenderedTurn[] = liveBucketOrder.reduce<RenderedTurn[]>((acc, bucket) => {
+    const detail = liveSnapshot[bucket];
+    if (!detail) {
+      return acc;
+    }
+
+    if (bucket === "assistant") {
+      acc.push({
+        id: "live-assistant",
+        role: "assistant",
+        text: detail,
+        streaming: true,
+      });
+      return acc;
+    }
+
+    const activityTitleByBucket: Record<Exclude<LiveStreamBucket, "assistant">, string> = {
+      reasoning: "Reasoning",
+      plan: "Plan",
+      fileChanges: "File changes",
+      toolProgress: "Tool progress",
+      terminalOutput: "Terminal output",
+    };
+
+    acc.push({
+      id: `live-${bucket}`,
+      role: "system",
+      text: "",
+      kind: "activity",
+      activity: {
+        title: activityTitleByBucket[bucket],
+        detail,
+      },
+      streaming: true,
+    });
+    return acc;
+  }, []);
 
   const copyGroupKeyForTurn = useCallback((turn: RenderedTurn) => `${turn.role}:${turn.turnId ?? turn.id}`, []);
 
@@ -2246,13 +2245,57 @@ export default function ThreadScreen() {
 
   const latestUserPromptFallback = webSearchFallbackByIndex.get(turns.length) ?? null;
 
-  const onOpenTerminalOutput = useCallback((detail: string) => {
+  const onOpenTerminalOutputSnapshot = useCallback((detail: string) => {
     const normalized = detail.trim();
     if (!normalized) {
       return;
     }
-    setActiveTerminalOutput(detail);
+    setActiveTerminalView({ mode: "snapshot", detail });
   }, []);
+
+  const onOpenLiveTerminalOutput = useCallback(() => {
+    const detail = liveSnapshot.terminalOutput;
+    if (!detail.trim()) {
+      return;
+    }
+    setActiveTerminalView({ mode: "live", fallbackDetail: detail });
+  }, [liveSnapshot.terminalOutput]);
+
+  const onPlanAction = useCallback((action: "implement" | "revise", _detail: string) => {
+    const nextText =
+      action === "implement"
+        ? "Implement the latest approved plan."
+        : "Revise the latest plan. Changes I want:";
+    setComposerText(nextText);
+    setComposerSelection({ start: nextText.length, end: nextText.length });
+    setTimeout(() => {
+      composerInputRef.current?.focus();
+    }, 10);
+  }, []);
+
+  useEffect(() => {
+    const detail = liveSnapshot.terminalOutput;
+    if (!detail.trim()) {
+      return;
+    }
+
+    setActiveTerminalView((current) => {
+      if (!current || current.mode !== "live" || current.fallbackDetail === detail) {
+        return current;
+      }
+      return { ...current, fallbackDetail: detail };
+    });
+  }, [liveSnapshot.terminalOutput]);
+
+  const terminalOutputForModal = useMemo(() => {
+    if (!activeTerminalView) {
+      return null;
+    }
+    if (activeTerminalView.mode === "snapshot") {
+      return activeTerminalView.detail;
+    }
+    return liveSnapshot.terminalOutput.trim() ? liveSnapshot.terminalOutput : activeTerminalView.fallbackDetail;
+  }, [activeTerminalView, liveSnapshot.terminalOutput]);
 
   const onToggleActivity = useCallback((turnId: string) => {
     setExpandedActivityIds((existing) => {
@@ -2280,6 +2323,7 @@ export default function ThreadScreen() {
         isLiveStreamingActive={isLiveStreamingActive}
         suppressRowAnimations={suppressRowAnimations}
         wrappedDiffIds={wrappedDiffIds}
+        expandedDiffIds={expandedDiffIds}
         wrapToast={wrapToast}
         lastCopiedDiffId={lastCopiedDiffId}
         expandedActivityIds={expandedActivityIds}
@@ -2287,8 +2331,10 @@ export default function ThreadScreen() {
         copyGroups={copyGroups}
         webSearchFallback={webSearchFallbackByIndex.get(index) ?? null}
         onToggleDiffWrap={toggleDiffWrap}
+        onToggleDiffExpand={toggleDiffExpand}
         onCopyDiffText={copyDiffText}
-        onOpenTerminalOutput={onOpenTerminalOutput}
+        onOpenTerminalOutput={onOpenTerminalOutputSnapshot}
+        onPlanAction={onPlanAction}
         onToggleActivity={onToggleActivity}
         onPreviewImage={onPreviewTurnImage}
         onCopyTurnText={copyTurnText}
@@ -2301,6 +2347,7 @@ export default function ThreadScreen() {
       imageProxyConfig,
       suppressRowAnimations,
       wrappedDiffIds,
+      expandedDiffIds,
       wrapToast,
       lastCopiedDiffId,
       expandedActivityIds,
@@ -2308,8 +2355,10 @@ export default function ThreadScreen() {
       copyGroups,
       webSearchFallbackByIndex,
       toggleDiffWrap,
+      toggleDiffExpand,
       copyDiffText,
-      onOpenTerminalOutput,
+      onOpenTerminalOutputSnapshot,
+      onPlanAction,
       onToggleActivity,
       onPreviewTurnImage,
       copyTurnText,
@@ -2355,7 +2404,7 @@ export default function ThreadScreen() {
               draggingRef.current = false;
             }}
             onContentSizeChange={() => {
-              scheduleAutoFollow(false);
+              scheduleAutoFollow(isLiveStreamingActive);
             }}
             footer={
               <LiveFooter
@@ -2364,87 +2413,112 @@ export default function ThreadScreen() {
                 threadId={threadId ?? null}
                 imageProxyConfig={imageProxyConfig}
                 latestUserPromptFallback={latestUserPromptFallback}
-                onOpenTerminalOutput={onOpenTerminalOutput}
+                onOpenLiveTerminalOutput={onOpenLiveTerminalOutput}
+                onPlanAction={onPlanAction}
               />
             }
           />
 
-          <ThreadComposer
-            activeRequestUserInput={activeRequestUserInput}
-            pendingRequestUserInputs={pendingRequestUserInputs}
-            activeRequestExpiryLabel={activeRequestExpiryLabel}
-            activeRequestQuestion={activeRequestQuestion}
-            activeRequestSelections={activeRequestSelections}
-            activeRequestText={activeRequestText}
-            activeRequestQuestionIndex={activeRequestQuestionIndex}
-            activeRequestError={activeRequestError}
-            activeRequestSubmitting={activeRequestSubmitting}
-            onToggleRequestQuestionOption={toggleRequestQuestionOption}
-            onSetRequestQuestionText={setRequestQuestionText}
-            onBackRequestQuestion={onBackRequestQuestion}
-            onAdvanceRequestQuestion={onAdvanceRequestQuestion}
-            onSubmitRequestUserInput={(request) => {
-              void submitRequestUserInput(request);
+          <View
+            onLayout={(event: LayoutChangeEvent) => {
+              const nextHeight = event.nativeEvent.layout.height;
+              setComposerHeight((current) => (Math.abs(current - nextHeight) > 1 ? nextHeight : current));
             }}
-            queuedMessages={queuedMessages}
-            queueActionPendingIds={queueActionPendingIds}
-            queueErrorsById={queueErrorsById}
-            sending={sending}
-            onSteerQueuedMessage={(messageId) => {
-              void onSteerQueuedMessage(messageId);
-            }}
-            onRemoveQueuedMessage={(messageId) => {
-              void onRemoveQueuedMessage(messageId);
-            }}
-            optionsLoaded={optionsLoaded}
-            resolvedSelectedModel={resolvedSelectedModel}
-            currentReasoningOptions={currentReasoningOptions}
-            modelOptions={modelOptions}
-            resolvedSelectedReasoning={resolvedSelectedReasoning}
-            selectedCollaborationMode={selectedCollaborationMode}
-            keyboardVisible={keyboardVisible}
-            onOpenModelDropdown={() => setOpenDropdown("model")}
-            onOpenReasoningDropdown={() => setOpenDropdown("reasoning")}
-            onToggleCollaborationMode={() => {
-              const next = selectedCollaborationMode === "default" ? "plan" : "default";
-              setSelectedCollaborationMode(next);
-              setPlanModeToast(next === "plan" ? "Plan mode on" : "Plan mode off");
-            }}
-            onDismissKeyboard={() => Keyboard.dismiss()}
-            showMentionSuggestions={showMentionSuggestions}
-            mentionLoading={mentionLoading}
-            mentionError={mentionError}
-            mentionSuggestions={mentionSuggestions}
-            onApplyMentionSelection={applyMentionSelection}
-            pendingImages={pendingImages}
-            onPreviewPendingImage={(uri) => setPreviewImageUri(uri)}
-            onRemovePendingImage={(imageId) => {
-              setPendingImages((existing) => existing.filter((image) => image.id !== imageId));
-            }}
-            onPickImages={() => {
-              void onPickImages();
-            }}
-            composerInputRef={composerInputRef}
-            composerText={composerText}
-            onComposerTextChange={setComposerText}
-            composerSelection={composerSelection}
-            onComposerSelectionChange={setComposerSelection}
-            composerActionDisabled={composerActionDisabled}
-            shouldShowStopAction={shouldShowStopAction}
-            onStopResponse={() => {
-              void onStopResponse();
-            }}
-            onSend={() => {
-              void onSend();
-            }}
-            composerActionIconName={composerActionIconName}
-            stopping={stopping}
-            insetsBottom={insets.bottom}
-          />
+          >
+            <ThreadComposer
+              activeRequestUserInput={activeRequestUserInput}
+              pendingRequestUserInputs={pendingRequestUserInputs}
+              activeRequestExpiryLabel={activeRequestExpiryLabel}
+              activeRequestQuestion={activeRequestQuestion}
+              activeRequestSelections={activeRequestSelections}
+              activeRequestText={activeRequestText}
+              activeRequestQuestionIndex={activeRequestQuestionIndex}
+              activeRequestError={activeRequestError}
+              activeRequestSubmitting={activeRequestSubmitting}
+              onToggleRequestQuestionOption={toggleRequestQuestionOption}
+              onSetRequestQuestionText={setRequestQuestionText}
+              onBackRequestQuestion={onBackRequestQuestion}
+              onAdvanceRequestQuestion={onAdvanceRequestQuestion}
+              onSubmitRequestUserInput={(request) => {
+                void submitRequestUserInput(request);
+              }}
+              queuedMessages={queuedMessages}
+              queueActionPendingIds={queueActionPendingIds}
+              queueErrorsById={queueErrorsById}
+              sending={sending}
+              onSteerQueuedMessage={(messageId) => {
+                void onSteerQueuedMessage(messageId);
+              }}
+              onRemoveQueuedMessage={(messageId) => {
+                void onRemoveQueuedMessage(messageId);
+              }}
+              optionsLoaded={optionsLoaded}
+              resolvedSelectedModel={resolvedSelectedModel}
+              currentReasoningOptions={currentReasoningOptions}
+              modelOptions={modelOptions}
+              resolvedSelectedReasoning={resolvedSelectedReasoning}
+              selectedCollaborationMode={selectedCollaborationMode}
+              keyboardVisible={keyboardVisible}
+              onOpenModelDropdown={() => setOpenDropdown("model")}
+              onOpenReasoningDropdown={() => setOpenDropdown("reasoning")}
+              onToggleCollaborationMode={() => {
+                const next = selectedCollaborationMode === "default" ? "plan" : "default";
+                setSelectedCollaborationMode(next);
+                setPlanModeToast(next === "plan" ? "Plan mode on" : "Plan mode off");
+              }}
+              onDismissKeyboard={() => Keyboard.dismiss()}
+              showMentionSuggestions={showMentionSuggestions}
+              mentionLoading={mentionLoading}
+              mentionError={mentionError}
+              mentionSuggestions={mentionSuggestions}
+              onApplyMentionSelection={applyMentionSelection}
+              pendingImages={pendingImages}
+              onPreviewPendingImage={(uri) => setPreviewImageUri(uri)}
+              onRemovePendingImage={(imageId) => {
+                setPendingImages((existing) => existing.filter((image) => image.id !== imageId));
+              }}
+              onPickImages={() => {
+                void onPickImages();
+              }}
+              composerInputRef={composerInputRef}
+              composerText={composerText}
+              onComposerTextChange={setComposerText}
+              composerSelection={composerSelection}
+              onComposerSelectionChange={setComposerSelection}
+              composerActionDisabled={composerActionDisabled}
+              shouldShowStopAction={shouldShowStopAction}
+              responseStatusText={responseStatusText}
+              onStopResponse={() => {
+                void onStopResponse();
+              }}
+              onSend={() => {
+                void onSend();
+              }}
+              composerActionIconName={composerActionIconName}
+              stopping={stopping}
+              insetsBottom={insets.bottom}
+            />
+          </View>
+
+          {showScrollToBottomButton ? (
+            <View
+              pointerEvents="box-none"
+              style={{ bottom: composerHeight + 20, zIndex: 50, elevation: 50 }}
+              className="absolute inset-x-0 items-center"
+            >
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Go to bottom"
+                onPress={onScrollToBottom}
+                className="flex-row items-center gap-2 rounded-full border border-border/20 bg-card/95 px-4 py-2.5"
+              >
+                <Ionicons name="arrow-down" size={16} color="#f5f5f5" />
+                <Text className="text-sm font-medium text-foreground">Go to bottom</Text>
+              </Pressable>
+            </View>
+          ) : null}
       </View>
       </KeyboardAvoidingView>
-
-      <PlanModeToast visibleText={planModeToast} bottomOffset={Math.max(insets.bottom, 8) + 100} />
 
       <OptionPickerModal
         openDropdown={openDropdown}
@@ -2460,10 +2534,16 @@ export default function ThreadScreen() {
       />
 
       <TerminalOutputModal
-        activeTerminalOutput={activeTerminalOutput}
+        terminalOutput={terminalOutputForModal}
+        outputComplete={
+          activeTerminalView?.mode === "snapshot" ||
+          (activeTerminalView?.mode === "live"
+            ? liveSnapshot.terminalOutputComplete || !isLiveStreamingActive
+            : !isLiveStreamingActive)
+        }
         insetsTop={insets.top}
         insetsBottom={insets.bottom}
-        onClose={() => setActiveTerminalOutput(null)}
+        onClose={() => setActiveTerminalView(null)}
       />
 
       <ImagePreviewModal
