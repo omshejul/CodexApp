@@ -255,6 +255,15 @@ systemd_user_available() {
   have_cmd systemctl && systemctl --user show-environment >/dev/null 2>&1
 }
 
+stop_existing_gateway_service() {
+  if ! systemd_user_available; then
+    return
+  fi
+
+  log "Stopping existing gateway service before updating runtime files..."
+  systemctl --user stop com.codex.gateway.service >/dev/null 2>&1 || true
+}
+
 rebuild_native_modules_for_node() {
   if ! have_cmd npm; then
     log "npm not found; skipping Node native module rebuild."
@@ -276,8 +285,8 @@ rebuild_native_modules_for_node() {
   fi
 
   if [[ "${#package_dirs[@]}" -eq 0 ]]; then
-    log "better-sqlite3 package directory not found; skipping native rebuild."
-    return
+    echo "[codex-gateway-tui] better-sqlite3 package directory not found after install." >&2
+    exit 1
   fi
 
   local rebuilt=0
@@ -325,12 +334,15 @@ mkdir -p "$INSTALL_ROOT"
 if [[ -d "$REPO_DIR/.git" ]]; then
   log "Updating existing checkout: $REPO_DIR"
   git -C "$REPO_DIR" fetch --depth 1 origin "$BRANCH"
-  git -C "$REPO_DIR" checkout -B "$BRANCH" "origin/$BRANCH"
+  git -C "$REPO_DIR" reset --hard FETCH_HEAD
+  git -C "$REPO_DIR" checkout -B "$BRANCH" FETCH_HEAD
 else
   log "Cloning repository into: $REPO_DIR"
   rm -rf "$REPO_DIR"
   git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$REPO_DIR"
 fi
+
+stop_existing_gateway_service
 
 log "Installing dependencies and building gateway runtime..."
 bun install --cwd "$REPO_DIR"

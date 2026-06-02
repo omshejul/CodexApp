@@ -36,6 +36,21 @@ fi
       `#!/usr/bin/env bash
 set -euo pipefail
 echo "bun $*" >> "$MOCK_LOG_PATH"
+if [[ "\${1:-}" == "install" ]]; then
+  repo_dir=""
+  for ((i=1; i<=$#; i++)); do
+    arg="\${!i}"
+    if [[ "$arg" == "--cwd" ]]; then
+      next=$((i + 1))
+      repo_dir="\${!next}"
+    fi
+  done
+  if [[ -n "$repo_dir" ]]; then
+    package_dir="$repo_dir/node_modules/.bun/better-sqlite3@11.10.0/node_modules/better-sqlite3"
+    mkdir -p "$package_dir" "$repo_dir/gateway/node_modules"
+    ln -sfn "../../node_modules/.bun/better-sqlite3@11.10.0/node_modules/better-sqlite3" "$repo_dir/gateway/node_modules/better-sqlite3"
+  fi
+fi
 `
     );
   }
@@ -129,6 +144,21 @@ cat > "\${BUN_INSTALL:-$HOME/.bun}/bin/bun" <<'BUN'
 #!/usr/bin/env bash
 set -euo pipefail
 echo "bun $*" >> "$MOCK_LOG_PATH"
+if [[ "\${1:-}" == "install" ]]; then
+  repo_dir=""
+  for ((i=1; i<=$#; i++)); do
+    arg="\${!i}"
+    if [[ "$arg" == "--cwd" ]]; then
+      next=$((i + 1))
+      repo_dir="\${!next}"
+    fi
+  done
+  if [[ -n "$repo_dir" ]]; then
+    package_dir="$repo_dir/node_modules/.bun/better-sqlite3@11.10.0/node_modules/better-sqlite3"
+    mkdir -p "$package_dir" "$repo_dir/gateway/node_modules"
+    ln -sfn "../../node_modules/.bun/better-sqlite3@11.10.0/node_modules/better-sqlite3" "$repo_dir/gateway/node_modules/better-sqlite3"
+  fi
+fi
 BUN
 chmod +x "\${BUN_INSTALL:-$HOME/.bun}/bin/bun"
 INSTALLER
@@ -179,6 +209,8 @@ test("fresh install clones repo and writes launcher", () => {
     const logText = fs.readFileSync(mockLog, "utf8");
     assert.match(logText, /git clone --depth 1 --branch main https:\/\/github\.com\/omshejul\/CodexApp\.git/);
     assert.match(logText, /bun install --cwd/);
+    assert.match(logText, /npm rebuild --build-from-source/);
+    assert.match(logText, /node -e require\(process\.argv\[1\]\)/);
     assert.match(logText, /bun run --cwd .* build:shared/);
     assert.match(logText, /bun run --cwd .* build:gateway/);
   } finally {
@@ -210,7 +242,8 @@ test("existing install fetches instead of cloning", () => {
     const logText = fs.readFileSync(mockLog, "utf8");
     assert.equal(logText.includes("git clone"), false, "installer cloned instead of updating existing repo");
     assert.match(logText, /git -C .* fetch --depth 1 origin main/);
-    assert.match(logText, /git -C .* checkout -B main origin\/main/);
+    assert.match(logText, /git -C .* reset --hard FETCH_HEAD/);
+    assert.match(logText, /git -C .* checkout -B main FETCH_HEAD/);
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
