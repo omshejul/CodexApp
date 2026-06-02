@@ -10,7 +10,7 @@ The Linux TUI mirrors the mac menu app flow:
 - Starts/stops gateway
 - Configures Tailscale Serve route to gateway
   Linux first uses `tailscale serve --bg http://127.0.0.1:<port>` and verifies it with `tailscale serve status --json`
-  If the HTTPS Magic DNS route is not usable, it falls back to a tailnet HTTP route on `<port + 1>` (default `8788`) and stores that as `PUBLIC_BASE_URL`.
+  If the HTTPS Magic DNS route is not usable, it falls back to a tailnet TCP route on `<port + 1>` (default `8788`) and stores `PUBLIC_BASE_URL` as `http://<tailscale-ip>:<fallback-port>`.
 - Shows paired devices and allows revocation
 - Shows recent manager/runtime logs
 
