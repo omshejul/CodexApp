@@ -164,6 +164,7 @@ class LinuxGatewayManager {
 
       if (diagnostics.portListener) {
         if (diagnostics.portListener.isManagedGateway) {
+          this.ensureTailscaleServeRoutesToGateway(this.configuredPort());
           this.isRunning = true;
           this.statusMessage = "Running";
           this.appendOutput(
@@ -215,6 +216,14 @@ class LinuxGatewayManager {
     } finally {
       this.isStarting = false;
     }
+  }
+
+  public async repairAndStartOnce() {
+    this.appendOutput("Repairing setup and starting gateway...");
+    await this.fixSetup();
+    await this.start();
+    this.refreshSetupStatus();
+    await this.refreshPairedDevices();
   }
 
   public stop() {
@@ -1697,6 +1706,22 @@ class LinuxGatewayTui {
 }
 
 async function main() {
+  const args = process.argv.slice(2);
+  if (args.includes("--repair-start")) {
+    const manager = new LinuxGatewayManager();
+    await manager.repairAndStartOnce();
+    const logs = manager.recentLogsText(120);
+    if (logs.trim()) {
+      process.stdout.write(`${logs}\n`);
+    }
+    const healthy =
+      manager.usingSystemd &&
+      manager.isRunning &&
+      manager.diagnosticsSummary().some((line) => line === "Tailscale serve route: configured");
+    manager.shutdown();
+    process.exit(healthy ? 0 : 1);
+  }
+
   const tui = new LinuxGatewayTui();
   await tui.start();
 }

@@ -34,11 +34,18 @@ The installer bootstraps missing prerequisites where it can:
 - Installs Tailscale when missing, then starts `tailscaled` when systemd is available.
 - Installs Codex CLI when missing.
 - Clones or updates this repo, installs dependencies, builds the shared/gateway runtime, and writes `~/.local/bin/codex-gateway-tui`.
+- When Tailscale is already authenticated and `systemd --user` is available, runs a one-shot repair/start that configures routing and starts `com.codex.gateway.service`.
 
 After install:
 
 ```bash
 codex-gateway-tui
+```
+
+For non-interactive repair/start after an install or update:
+
+```bash
+codex-gateway-tui --repair-start
 ```
 
 Optional installer overrides:
@@ -48,6 +55,7 @@ Optional installer overrides:
 - `TAILSCALE_AUTHKEY` (optional; if set, installer runs `tailscale up --auth-key`)
 - `CODEX_GATEWAY_SKIP_TAILSCALE_INSTALL=1` (skip automatic Tailscale install)
 - `CODEX_GATEWAY_SKIP_CODEX_INSTALL=1` (skip automatic Codex CLI install)
+- `CODEX_GATEWAY_SKIP_AUTO_START=1` (install/build only; skip automatic route repair and service start)
 
 If Tailscale is installed but not authenticated and no `TAILSCALE_AUTHKEY` is provided, run:
 
