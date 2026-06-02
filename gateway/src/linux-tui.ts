@@ -967,6 +967,10 @@ class LinuxGatewayManager {
     }
 
     const env = this.runtimeEnvironment(port);
+    if (!this.verifyGatewayRuntime(nodePath, env)) {
+      return false;
+    }
+
     const serviceBody = this.buildSystemdUnit(nodePath, env);
 
     try {
@@ -1049,6 +1053,9 @@ WantedBy=default.target
     }
 
     const env = this.runtimeEnvironment(port);
+    if (!this.verifyGatewayRuntime(nodePath, env)) {
+      return false;
+    }
 
     try {
       const child = spawn(nodePath, [this.gatewayEntryPath], {
@@ -1081,6 +1088,31 @@ WantedBy=default.target
       this.appendOutput(`Failed to spawn direct gateway process: ${this.describeUnknownError(error)}`);
       return false;
     }
+  }
+
+  private verifyGatewayRuntime(nodePath: string, environment: Record<string, string>): boolean {
+    const check = this.runCommand(
+      nodePath,
+      [
+        "-e",
+        "require('better-sqlite3'); require('./dist/db.js'); console.log('gateway native modules ok')",
+      ],
+      {
+        cwd: this.gatewayRoot,
+        env: environment,
+        timeoutMs: 15_000,
+      }
+    );
+
+    if (check.exitCode === 0) {
+      return true;
+    }
+
+    this.appendOutput("Gateway runtime preflight failed. Native modules may not match the Node.js runtime.");
+    this.appendOutput(`Node.js path: ${nodePath}`);
+    this.appendOutput(check.output);
+    this.appendOutput("Run the latest installer again; it rebuilds better-sqlite3 for this Node.js runtime.");
+    return false;
   }
 
   private sanitizeLogLine(line: string): string {

@@ -34,6 +34,7 @@ The installer bootstraps missing prerequisites where it can:
 - Installs Tailscale when missing, then starts `tailscaled` when systemd is available.
 - Installs Codex CLI when missing.
 - Clones or updates this repo, installs dependencies, builds the shared/gateway runtime, and writes `~/.local/bin/codex-gateway-tui`.
+- Treats the install checkout as managed and resets tracked local edits so updates cannot be blocked by stale files.
 - Rebuilds and verifies `better-sqlite3` against the active Node.js runtime so existing installs survive Node upgrades.
 - When Tailscale is already authenticated and `systemd --user` is available, runs a one-shot repair/start that configures routing and starts `com.codex.gateway.service`.
 
