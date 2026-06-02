@@ -9,7 +9,8 @@ The Linux TUI mirrors the mac menu app flow:
 - Runs setup checks (gateway build, Codex CLI, Tailscale)
 - Starts/stops gateway
 - Configures Tailscale Serve route to gateway
-  Linux uses `tailscale serve --bg http://127.0.0.1:<port>` and verifies it with `tailscale serve status --json`
+  Linux first uses `tailscale serve --bg http://127.0.0.1:<port>` and verifies it with `tailscale serve status --json`
+  If the HTTPS Magic DNS route is not usable, it falls back to a tailnet HTTP route on `<port + 1>` (default `8788`) and stores that as `PUBLIC_BASE_URL`.
 - Shows paired devices and allows revocation
 - Shows recent manager/runtime logs
 
@@ -27,6 +28,13 @@ bun run tui:linux
 curl -fsSL https://raw.githubusercontent.com/omshejul/CodexApp/main/scripts/install-linux-tui.sh | bash
 ```
 
+The installer bootstraps missing prerequisites where it can:
+- Installs `git`, `curl`, `unzip`, and `nodejs` through the detected system package manager.
+- Installs Bun when missing.
+- Installs Tailscale when missing, then starts `tailscaled` when systemd is available.
+- Installs Codex CLI when missing.
+- Clones or updates this repo, installs dependencies, builds the shared/gateway runtime, and writes `~/.local/bin/codex-gateway-tui`.
+
 After install:
 
 ```bash
@@ -36,6 +44,16 @@ codex-gateway-tui
 Optional installer overrides:
 - `CODEXAPP_REPO_URL` (default: `https://github.com/omshejul/CodexApp.git`)
 - `CODEXAPP_BRANCH` (default: `main`)
+- `BUN_VERSION` (default: `1.2.3`)
+- `TAILSCALE_AUTHKEY` (optional; if set, installer runs `tailscale up --auth-key`)
+- `CODEX_GATEWAY_SKIP_TAILSCALE_INSTALL=1` (skip automatic Tailscale install)
+- `CODEX_GATEWAY_SKIP_CODEX_INSTALL=1` (skip automatic Codex CLI install)
+
+If Tailscale is installed but not authenticated and no `TAILSCALE_AUTHKEY` is provided, run:
+
+```bash
+sudo tailscale up
+```
 
 ## Default runtime paths
 
@@ -64,13 +82,13 @@ Optional installer overrides:
 
 ## Required prerequisites
 
-- Node.js available on PATH (for `gateway/dist/server.js`)
-- Built gateway runtime:
+- Node.js available on PATH (for `gateway/dist/server.js`; installed automatically by the installer when possible)
+- Built gateway runtime (done automatically by the installer):
 
 ```bash
 bun run build:shared
 bun run build:gateway
 ```
 
-- Codex CLI installed (`codex`)
-- Tailscale installed and authenticated (`tailscale status --json` works)
+- Codex CLI installed (`codex`; installed automatically by the installer when possible)
+- Tailscale installed and authenticated (`tailscale status --json` works; install/start is automatic when possible, auth still requires an existing session or `TAILSCALE_AUTHKEY`)

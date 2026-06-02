@@ -25,7 +25,7 @@ function reportPresenceSyncError(error: unknown, state: PresenceState) {
     if (!didWarnMissingPresenceRoute) {
       didWarnMissingPresenceRoute = true;
       console.warn(
-        "App presence sync skipped: your Mac gateway is outdated and missing /presence/app-state. Rebuild/restart CodexGateway on your Mac."
+        "App presence sync skipped: your gateway is outdated and missing /presence/app-state. Rebuild/restart CodexGateway."
       );
     }
     return;

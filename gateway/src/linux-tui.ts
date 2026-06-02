@@ -8,6 +8,7 @@ const TAILSCALE_SERVICE_NAME = "codexgateway";
 const SYSTEMD_UNIT_NAME = "com.codex.gateway.service";
 const DEFAULT_PORT = 8787;
 const DEFAULT_HOST = "127.0.0.1";
+const FALLBACK_TAILSCALE_HTTP_PORT = 8788;
 
 interface LinuxAppConfig {
   port: number;
@@ -1080,7 +1081,7 @@ WantedBy=default.target
     return cleaned.replace(/\t/g, "  ");
   }
 
-  private discoverTailscaleMagicBaseURL(environment: Record<string, string>): string | null {
+  private discoverTailscaleDnsName(environment: Record<string, string>): string | null {
     const tailscalePath = this.resolvedTailscaleBinaryPath(environment);
     if (!tailscalePath) {
       return null;
@@ -1100,10 +1101,15 @@ WantedBy=default.target
       };
 
       const dnsName = (json.Self?.DNSName || "").replace(/\.+$/, "");
-      return dnsName ? `https://${dnsName}` : null;
+      return dnsName || null;
     } catch {
       return null;
     }
+  }
+
+  private discoverTailscaleMagicBaseURL(environment: Record<string, string>): string | null {
+    const dnsName = this.discoverTailscaleDnsName(environment);
+    return dnsName ? `https://${dnsName}` : null;
   }
 
   private isTailscaleAuthenticated(environment: Record<string, string>): boolean {
@@ -1162,11 +1168,13 @@ WantedBy=default.target
       return false;
     }
 
+    const dnsName = this.discoverTailscaleDnsName(env);
+    const httpsBaseUrl = dnsName ? `https://${dnsName}` : null;
     const configure = this.runCommand(tailscalePath, ["serve", "--bg", `http://127.0.0.1:${port}`], { env });
     if (configure.exitCode !== 0) {
       this.appendOutput("Failed to configure Tailscale route.");
       this.appendOutput(configure.output);
-      return false;
+      return this.ensureTailscaleHttpFallbackRoute(tailscalePath, port, env, dnsName);
     }
 
     const status = this.runCommand(tailscalePath, ["serve", "status", "--json"], {
@@ -1175,19 +1183,133 @@ WantedBy=default.target
     if (status.exitCode !== 0) {
       this.appendOutput("Configured Tailscale route, but could not verify it with `tailscale serve status --json`.");
       this.appendOutput(status.output);
-      return false;
+      return this.ensureTailscaleHttpFallbackRoute(tailscalePath, port, env, dnsName);
     }
 
     if (!this.serveStatusRoutesToPort(status.output, port)) {
       this.appendOutput("Configured Tailscale route, but `tailscale serve status --json` does not point to the gateway port.");
       this.appendOutput(status.output);
-      return false;
+      return this.ensureTailscaleHttpFallbackRoute(tailscalePath, port, env, dnsName);
     }
 
     this.didConfigureServeRouteThisSession = false;
     this.didConfigureLegacyServeRouteThisSession = true;
-    this.appendOutput(`Configured Tailscale Serve route to 127.0.0.1:${port}.`);
+    this.appendOutput(`Configured Tailscale Serve HTTPS route to 127.0.0.1:${port}.`);
+
+    if (httpsBaseUrl && this.publicRouteLooksUsable(httpsBaseUrl, env)) {
+      this.setAutoPublicBaseUrl(httpsBaseUrl, dnsName);
+      return true;
+    }
+
+    if (httpsBaseUrl) {
+      this.appendOutput(`Tailscale HTTPS route at ${httpsBaseUrl} is not reachable; configuring HTTP fallback.`);
+    }
+    return this.ensureTailscaleHttpFallbackRoute(tailscalePath, port, env, dnsName);
+  }
+
+  private ensureTailscaleHttpFallbackRoute(
+    tailscalePath: string,
+    gatewayPort: number,
+    environment: Record<string, string>,
+    dnsName: string | null
+  ): boolean {
+    const httpPort = this.tailscaleHttpFallbackPort(gatewayPort);
+    const configure = this.runCommand(
+      tailscalePath,
+      ["serve", `--http=${httpPort}`, "--bg", `http://127.0.0.1:${gatewayPort}`],
+      { env: environment }
+    );
+
+    if (configure.exitCode !== 0) {
+      this.appendOutput(`Failed to configure Tailscale HTTP fallback on port ${httpPort}.`);
+      this.appendOutput(configure.output);
+      return false;
+    }
+
+    const status = this.runCommand(tailscalePath, ["serve", "status", "--json"], {
+      env: environment,
+    });
+    if (status.exitCode !== 0 || !this.serveStatusRoutesToPort(status.output, gatewayPort)) {
+      this.appendOutput("Configured Tailscale HTTP fallback, but could not verify it with `tailscale serve status --json`.");
+      if (status.output) {
+        this.appendOutput(status.output);
+      }
+      return false;
+    }
+
+    const baseUrl = dnsName ? `http://${dnsName}:${httpPort}` : null;
+    if (baseUrl) {
+      this.setAutoPublicBaseUrl(baseUrl, dnsName);
+      this.appendOutput(`Configured Tailscale HTTP fallback route: ${baseUrl} -> 127.0.0.1:${gatewayPort}.`);
+    } else {
+      this.appendOutput(`Configured Tailscale HTTP fallback route on port ${httpPort}.`);
+    }
+
+    this.didConfigureServeRouteThisSession = false;
+    this.didConfigureLegacyServeRouteThisSession = true;
     return true;
+  }
+
+  private tailscaleHttpFallbackPort(gatewayPort: number): number {
+    if (gatewayPort > 0 && gatewayPort < 65535) {
+      return gatewayPort + 1;
+    }
+    return FALLBACK_TAILSCALE_HTTP_PORT;
+  }
+
+  private publicRouteLooksUsable(baseUrl: string, environment: Record<string, string>): boolean {
+    const curlPath = this.resolveExecutablePath("curl", environment);
+    if (!curlPath) {
+      return true;
+    }
+
+    const normalizedBase = baseUrl.replace(/\/+$/, "");
+    const result = this.runCommand(
+      curlPath,
+      ["-sS", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "5", `${normalizedBase}/health`],
+      { env: environment, timeoutMs: 7_000 }
+    );
+
+    if (result.exitCode !== 0) {
+      return false;
+    }
+
+    const statusCode = result.output.trim();
+    return statusCode === "200" || statusCode === "502" || statusCode === "503";
+  }
+
+  private setAutoPublicBaseUrl(baseUrl: string, dnsName: string | null) {
+    const existing = (this.config.environment.PUBLIC_BASE_URL || "").trim();
+    if (existing && !this.isAutoTailscalePublicBaseUrl(existing, dnsName)) {
+      return;
+    }
+
+    if (existing === baseUrl) {
+      return;
+    }
+
+    this.config = this.normalizeConfig({
+      ...this.config,
+      environment: {
+        ...this.config.environment,
+        PUBLIC_BASE_URL: baseUrl,
+      },
+    });
+    this.saveConfigToDisk(this.config);
+    this.appendOutput(`Set PUBLIC_BASE_URL to ${baseUrl}.`);
+  }
+
+  private isAutoTailscalePublicBaseUrl(value: string, dnsName: string | null): boolean {
+    if (!dnsName) {
+      return false;
+    }
+
+    try {
+      const parsed = new URL(value);
+      return parsed.hostname === dnsName && (parsed.protocol === "http:" || parsed.protocol === "https:");
+    } catch {
+      return false;
+    }
   }
 
   private serveStatusRoutesToPort(statusOutput: string, port: number): boolean {

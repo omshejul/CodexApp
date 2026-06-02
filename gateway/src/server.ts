@@ -32,6 +32,9 @@ import {
   PairCreateResponseSchema,
   ThreadCreateRequestSchema,
   type ThreadMessageRequest,
+  ThreadGoalClearResponseSchema,
+  ThreadGoalResponseSchema,
+  ThreadGoalSetRequestSchema,
   ThreadMessageQueueRequestSchema,
   ThreadMessageRequestSchema,
   ThreadMessageResponseSchema,
@@ -1304,13 +1307,6 @@ function prepareThreadMessage(threadId: string, rawRequest: ThreadMessageRequest
     ...(rawRequest.collaborationMode ? { collaborationMode: rawRequest.collaborationMode } : {}),
   };
 
-  if (normalizedRequest.collaborationMode && !normalizedRequest.model) {
-    return {
-      ok: false,
-      error: "collaborationMode requires a model value.",
-    };
-  }
-
   const input = [
     ...(trimmedText ? [{ type: "text" as const, text: trimmedText, text_elements: [] as unknown[] }] : []),
     ...images.map((image) => ({ type: "image" as const, url: image.imageUrl })),
@@ -1325,11 +1321,11 @@ function prepareThreadMessage(threadId: string, rawRequest: ThreadMessageRequest
     input,
   };
 
-  if (normalizedRequest.collaborationMode) {
+  if (normalizedRequest.collaborationMode && normalizedRequest.model) {
     turnStartParams.collaborationMode = {
       mode: normalizedRequest.collaborationMode,
       settings: {
-        model: normalizedRequest.model ?? null,
+        model: normalizedRequest.model,
         reasoning_effort: normalizedRequest.reasoningEffort ?? null,
         developer_instructions: null,
       },
@@ -1818,6 +1814,29 @@ async function callCodexWithDeriveConfigRetry(method: string, params?: unknown):
 }
 
 function normalizeGatewayOptions(result: unknown) {
+  const firstNonEmptyString = (...values: unknown[]) => {
+    for (const value of values) {
+      if (typeof value === "string" && value.trim().length > 0) {
+        return value;
+      }
+    }
+    return null;
+  };
+
+  const normalizeReasoningEffort = (value: unknown) => {
+    if (
+      value === "none" ||
+      value === "minimal" ||
+      value === "low" ||
+      value === "medium" ||
+      value === "high" ||
+      value === "xhigh"
+    ) {
+      return value;
+    }
+    return null;
+  };
+
   const asObject = result && typeof result === "object" ? (result as Record<string, unknown>) : null;
   const modelArray = Array.isArray(asObject?.data)
     ? (asObject?.data as unknown[])
@@ -1840,19 +1859,40 @@ function normalizeGatewayOptions(result: unknown) {
     }
 
     const row = item as Record<string, unknown>;
-    const model = typeof row.model === "string" ? row.model : null;
-    const id = typeof row.id === "string" ? row.id : model;
+    const reasoningObject =
+      row.reasoning && typeof row.reasoning === "object" ? (row.reasoning as Record<string, unknown>) : null;
+    const model = firstNonEmptyString(row.model, row.id, row.name, row.slug);
+    const id = firstNonEmptyString(row.id, row.model, row.name, row.slug);
     if (!model || !id) {
       return acc;
     }
 
-    const displayName = typeof row.displayName === "string" && row.displayName.trim().length > 0 ? row.displayName : model;
-    const isDefault = row.isDefault === true;
+    const displayName = firstNonEmptyString(
+      row.displayName,
+      row.display_name,
+      row.name,
+      row.title,
+      row.model,
+      row.id
+    ) ?? model;
+    const isDefault = row.isDefault === true || row.is_default === true || row.default === true;
 
     const reasoningFromModel = Array.isArray(row.supportedReasoningEfforts)
       ? row.supportedReasoningEfforts
       : Array.isArray(row.reasoningEfforts)
       ? row.reasoningEfforts
+      : Array.isArray(row.supported_reasoning_efforts)
+      ? row.supported_reasoning_efforts
+      : Array.isArray(row.reasoning_efforts)
+      ? row.reasoning_efforts
+      : Array.isArray(reasoningObject?.supportedReasoningEfforts)
+      ? reasoningObject.supportedReasoningEfforts
+      : Array.isArray(reasoningObject?.reasoningEfforts)
+      ? reasoningObject.reasoningEfforts
+      : Array.isArray(reasoningObject?.supported_reasoning_efforts)
+      ? reasoningObject.supported_reasoning_efforts
+      : Array.isArray(reasoningObject?.reasoning_efforts)
+      ? reasoningObject.reasoning_efforts
       : [];
     const supportedReasoningEfforts = reasoningFromModel
       .map((entry) => {
@@ -1860,31 +1900,24 @@ function normalizeGatewayOptions(result: unknown) {
           typeof entry === "string"
             ? entry
             : entry && typeof entry === "object"
-            ? (entry as Record<string, unknown>).reasoningEffort
+            ? firstNonEmptyString(
+                (entry as Record<string, unknown>).reasoningEffort,
+                (entry as Record<string, unknown>).reasoning_effort,
+                (entry as Record<string, unknown>).value
+              )
             : null;
-        if (
-          effort === "none" ||
-          effort === "minimal" ||
-          effort === "low" ||
-          effort === "medium" ||
-          effort === "high" ||
-          effort === "xhigh"
-        ) {
-          return effort;
-        }
-        return null;
+        return normalizeReasoningEffort(effort);
       })
       .filter((value): value is "none" | "minimal" | "low" | "medium" | "high" | "xhigh" => value !== null);
 
-    const defaultReasoningEffort =
-      row.defaultReasoningEffort === "none" ||
-      row.defaultReasoningEffort === "minimal" ||
-      row.defaultReasoningEffort === "low" ||
-      row.defaultReasoningEffort === "medium" ||
-      row.defaultReasoningEffort === "high" ||
-      row.defaultReasoningEffort === "xhigh"
-        ? row.defaultReasoningEffort
-        : undefined;
+    const defaultReasoningEffort = normalizeReasoningEffort(
+      firstNonEmptyString(
+        row.defaultReasoningEffort,
+        row.default_reasoning_effort,
+        reasoningObject?.defaultReasoningEffort,
+        reasoningObject?.default_reasoning_effort
+      )
+    ) ?? undefined;
 
     acc.push({
       id,
@@ -3018,7 +3051,7 @@ async function bootstrap() {
     } catch (error) {
       if (isCodexDisconnectedError(error)) {
         return reply.code(503).send({
-          error: "Codex app-server disconnected. Open/restart the macOS gateway app, then retry.",
+          error: "Codex app-server disconnected. Open/restart the gateway app, then retry.",
           detail: error instanceof Error ? error.message : String(error),
         });
       }
@@ -3089,7 +3122,7 @@ async function bootstrap() {
     const trimmedCwd = parsedBody.data.cwd?.trim();
     const result = await callCodexWithDeriveConfigRetry("thread/start", {
       approvalPolicy: "never",
-      sandboxPolicy: buildDefaultDangerFullAccessSandboxPolicy(),
+      sandbox: "danger-full-access",
       ...(trimmedCwd ? { cwd: trimmedCwd } : {}),
     });
 
@@ -3224,6 +3257,41 @@ async function bootstrap() {
   app.get("/options", { preHandler: [requireAuth] }, async (_request, reply) => {
     const result = await codex.call("model/list", {});
     const payload = GatewayOptionsResponseSchema.parse(normalizeGatewayOptions(result));
+    return reply.send(payload);
+  });
+
+  app.get("/threads/:id/goal", { preHandler: [requireAuth] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const result = await codex.call("thread/goal/get", {
+      threadId: params.id,
+    });
+    const payload = ThreadGoalResponseSchema.parse(result);
+    return reply.send(payload);
+  });
+
+  app.put("/threads/:id/goal", { preHandler: [requireAuth] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const parsedBody = ThreadGoalSetRequestSchema.safeParse(request.body ?? {});
+    if (!parsedBody.success) {
+      return reply.code(400).send({ error: parsedBody.error.flatten() });
+    }
+
+    const result = await codex.call("thread/goal/set", {
+      threadId: params.id,
+      ...(parsedBody.data.objective ? { objective: parsedBody.data.objective.trim() } : {}),
+      ...(parsedBody.data.status ? { status: parsedBody.data.status } : {}),
+      ...(parsedBody.data.tokenBudget !== undefined ? { tokenBudget: parsedBody.data.tokenBudget } : {}),
+    });
+    const payload = ThreadGoalResponseSchema.parse(result);
+    return reply.send(payload);
+  });
+
+  app.delete("/threads/:id/goal", { preHandler: [requireAuth] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const result = await codex.call("thread/goal/clear", {
+      threadId: params.id,
+    });
+    const payload = ThreadGoalClearResponseSchema.parse(result);
     return reply.send(payload);
   });
 

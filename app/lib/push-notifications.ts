@@ -192,7 +192,7 @@ export async function registerPushTokenWithGatewayIfPossible() {
   if (missingRouteCount > 0 && missingRouteCount === gateways.length) {
     throw new PushNotificationsSetupError(
       "gateway-route-missing",
-      "Your Mac gateway is outdated and missing push token support. Rebuild/restart CodexGateway on your Mac."
+      "Your gateway is outdated and missing push token support. Rebuild/restart CodexGateway."
     );
   }
 

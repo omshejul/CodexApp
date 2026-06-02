@@ -22,10 +22,12 @@ import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context"
 import {
   ApiHttpError,
   ReauthRequiredError,
+  clearThreadGoal,
   hasStoredPairing,
   getInteractiveRequests,
   getGatewayOptions,
   getStreamConfig,
+  getThreadGoal,
   getThreads,
   getThreadFiles,
   getThread,
@@ -36,9 +38,11 @@ import {
   removeQueuedThreadMessage,
   steerQueuedThreadMessage,
   type QueuedThreadMessage,
+  type ThreadGoal,
   respondToInteractiveRequest,
   resumeThread,
   sendThreadMessage,
+  setThreadGoal,
 } from "@/lib/api";
 import {
   type CopyGroups,
@@ -91,6 +95,8 @@ import {
   createEmptyLiveStreamState,
   extractActivityFromEvent,
   extractChangeSummaryFromEvent,
+  extractCollaborationModeFromSettingsEvent,
+  extractGoalFromEventParams,
   extractInteractiveLifecycleRequestId,
   extractReasoningText,
   extractTurnIdFromUnknown,
@@ -120,6 +126,36 @@ import {
   upsertQueuedMessage,
 } from "@/components/thread/screen/helpers";
 
+const THREAD_GOAL_STATUS_LABELS: Record<ThreadGoal["status"], string> = {
+  active: "Active",
+  paused: "Paused",
+  blocked: "Blocked",
+  usageLimited: "Usage limited",
+  budgetLimited: "Budget limited",
+  complete: "Complete",
+};
+
+function formatGoalDuration(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.floor(totalSeconds));
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+}
+
+function formatGoalTokens(goal: ThreadGoal): string {
+  const used = goal.tokensUsed.toLocaleString();
+  if (goal.tokenBudget === null) {
+    return `${used} tokens`;
+  }
+  return `${used}/${goal.tokenBudget.toLocaleString()} tokens`;
+}
 
 export default function ThreadScreen() {
   type ActiveTerminalView = { mode: "snapshot"; detail: string } | { mode: "live"; fallbackDetail: string };
@@ -152,6 +188,10 @@ export default function ThreadScreen() {
   const [selectedReasoning, setSelectedReasoning] = useState<ReasoningEffort | null>(null);
   const [selectedCollaborationMode, setSelectedCollaborationMode] = useState<CollaborationMode>("default");
   const [planModeToast, setPlanModeToast] = useState<string | null>(null);
+  const [threadGoal, setThreadGoalState] = useState<ThreadGoal | null>(null);
+  const [goalDraft, setGoalDraft] = useState("");
+  const [goalPending, setGoalPending] = useState(false);
+  const [goalError, setGoalError] = useState<string | null>(null);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const [expandedActivityIds, setExpandedActivityIds] = useState<Set<string>>(new Set());
   const [streamStatus, setStreamStatus] = useState<{ tone: StreamStatusTone; text: string }>({
@@ -196,6 +236,7 @@ export default function ThreadScreen() {
   const reconnectAttemptRef = useRef(0);
   const liveLastFlushAtRef = useRef(0);
   const liveIndicatorHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const optionsLastLoadedAtRef = useRef(0);
   const optionsRefreshPromiseRef = useRef<Promise<void> | null>(null);
   const selectedModelRef = useRef<string | null>(null);
   const preferencesInitThreadIdRef = useRef<string | null>(null);
@@ -597,11 +638,13 @@ export default function ThreadScreen() {
         (nextModelValue && nextReasoningByModel[nextModelValue]) || DEFAULT_REASONING_OPTIONS;
       return modelReasoning[0]?.value ?? null;
     });
+    optionsLastLoadedAtRef.current = Date.now();
     setOptionsLoaded(nextModelOptions.length > 0);
   }, []);
 
   const refreshGatewayOptionsIfNeeded = useCallback(async () => {
-    if (optionsLoaded) {
+    const optionsStale = Date.now() - optionsLastLoadedAtRef.current > 60_000;
+    if (optionsLoaded && !optionsStale) {
       return;
     }
     if (optionsRefreshPromiseRef.current) {
@@ -724,12 +767,16 @@ export default function ThreadScreen() {
       if (!threadId) {
         return;
       }
-      const [thread, eventsResponse, interactiveResponse, queuedResponse] = await Promise.all([
+      const [thread, eventsResponse, interactiveResponse, queuedResponse, goalResponse] = await Promise.all([
         getThread(threadId, gatewayId),
         getThreadEvents(threadId, gatewayId),
         getInteractiveRequests(threadId, gatewayId).catch(() => null),
         getQueuedThreadMessages(threadId, gatewayId).catch(() => null),
+        getThreadGoal(threadId, gatewayId).catch(() => undefined),
       ]);
+      if (goalResponse) {
+        setThreadGoalState(goalResponse.goal);
+      }
       applyPersistedThreadState(thread.turns, eventsResponse.events, interactiveResponse, queuedResponse, options);
     },
     [applyPersistedThreadState, gatewayId, threadId]
@@ -792,6 +839,10 @@ export default function ThreadScreen() {
     setQueueActionPendingIds(new Set());
     setQueueErrorsById({});
     setQueueUnsupported(false);
+    setThreadGoalState(null);
+    setGoalDraft("");
+    setGoalError(null);
+    setGoalPending(false);
     turnsSignatureRef.current = "";
     seenTurnSignaturesRef.current = new Set();
     setStreamStatus({ tone: "warn", text: "Connecting" });
@@ -881,6 +932,29 @@ export default function ThreadScreen() {
           }
 
           if (method === "stream/keepalive" || method === "stream/ready") {
+            return;
+          }
+
+          if (method === "thread/goal/updated") {
+            const nextGoal = extractGoalFromEventParams(payload.params);
+            if (nextGoal) {
+              setThreadGoalState(nextGoal);
+              setGoalError(null);
+            }
+            return;
+          }
+
+          if (method === "thread/goal/cleared") {
+            setThreadGoalState(null);
+            setGoalError(null);
+            return;
+          }
+
+          if (method === "thread/settings/updated") {
+            const nextMode = extractCollaborationModeFromSettingsEvent(payload.params);
+            if (nextMode) {
+              setSelectedCollaborationMode(nextMode);
+            }
             return;
           }
 
@@ -1183,12 +1257,13 @@ export default function ThreadScreen() {
 
       try {
         await resumeThread(threadId, gatewayId);
-        const [thread, eventsResponse, threadsResponse, interactiveResponse, queuedResponse] = await Promise.all([
+        const [thread, eventsResponse, threadsResponse, interactiveResponse, queuedResponse, goalResponse] = await Promise.all([
           getThread(threadId, gatewayId),
           getThreadEvents(threadId, gatewayId),
           getThreads(gatewayId),
           getInteractiveRequests(threadId, gatewayId).catch(() => null),
           getQueuedThreadMessages(threadId, gatewayId).catch(() => [] as QueuedThreadMessage[]),
+          getThreadGoal(threadId, gatewayId).catch(() => undefined),
         ]);
         if (!active) {
           return;
@@ -1198,6 +1273,9 @@ export default function ThreadScreen() {
         const matchingSummary = threadsResponse.threads.find((entry) => entry.id === threadId);
         setHeaderTitle(headerName);
         setHeaderPath(matchingSummary?.cwd?.trim() || null);
+        if (goalResponse) {
+          setThreadGoalState(goalResponse.goal);
+        }
 
         applyPersistedThreadState(thread.turns, eventsResponse.events, interactiveResponse, queuedResponse);
         setError(null);
@@ -1273,14 +1351,18 @@ export default function ThreadScreen() {
     let active = true;
     const timer = setInterval(async () => {
       try {
-        const [thread, eventsResponse, interactiveResponse, queuedResponse] = await Promise.all([
+        const [thread, eventsResponse, interactiveResponse, queuedResponse, goalResponse] = await Promise.all([
           getThread(threadId, gatewayId),
           getThreadEvents(threadId, gatewayId),
           getInteractiveRequests(threadId, gatewayId).catch(() => null),
           getQueuedThreadMessages(threadId, gatewayId).catch(() => null),
+          getThreadGoal(threadId, gatewayId).catch(() => undefined),
         ]);
         if (!active) {
           return;
+        }
+        if (goalResponse) {
+          setThreadGoalState(goalResponse.goal);
         }
         const rendered = toRenderedTurns(thread.turns);
         const withPersistedEvents = toPersistedEventTurns(eventsResponse.events, rendered);
@@ -1756,7 +1838,7 @@ export default function ThreadScreen() {
         if (isMissingQueueRouteError(removeError)) {
           setQueueUnsupported(true);
           setQueuedMessages([]);
-          setError("Queued messages are not supported by this gateway. Update your Mac gateway.");
+          setError("Queued messages are not supported by this gateway. Update your gateway.");
           return;
         }
         if (removeError instanceof ReauthRequiredError) {
@@ -1805,7 +1887,7 @@ export default function ThreadScreen() {
         if (isMissingQueueRouteError(steerError)) {
           setQueueUnsupported(true);
           setQueuedMessages([]);
-          setError("Queued messages are not supported by this gateway. Update your Mac gateway.");
+          setError("Queued messages are not supported by this gateway. Update your gateway.");
           return;
         }
         if (steerError instanceof ReauthRequiredError) {
@@ -1854,7 +1936,7 @@ export default function ThreadScreen() {
 
     if (isResponding) {
       if (queueUnsupported) {
-        setError("This gateway version does not support queued messages. Stop the current response or update your Mac gateway.");
+        setError("This gateway version does not support queued messages. Stop the current response or update your gateway.");
         return;
       }
       setSending(true);
@@ -1872,7 +1954,7 @@ export default function ThreadScreen() {
         if (isMissingQueueRouteError(queueError)) {
           setQueueUnsupported(true);
           setQueuedMessages([]);
-          setError("Queued messages are not supported by this gateway. Update your Mac gateway.");
+          setError("Queued messages are not supported by this gateway. Update your gateway.");
           return;
         }
         if (queueError instanceof ReauthRequiredError) {
@@ -1927,7 +2009,7 @@ export default function ThreadScreen() {
             setQueueUnsupported(true);
             setQueuedMessages([]);
             setTurns((existing) => existing.filter((turn) => turn.id !== optimisticTurnId));
-            setError("Queued messages are not supported by this gateway. Update your Mac gateway.");
+            setError("Queued messages are not supported by this gateway. Update your gateway.");
             return;
           }
           if (queueError instanceof ReauthRequiredError) {
@@ -1949,6 +2031,55 @@ export default function ThreadScreen() {
       setSending(false);
     }
   };
+
+  const onSetThreadGoal = useCallback(async () => {
+    if (!threadId || goalPending) {
+      return;
+    }
+    const objective = goalDraft.trim();
+    if (!objective) {
+      return;
+    }
+
+    setGoalPending(true);
+    setGoalError(null);
+    try {
+      const response = await setThreadGoal(threadId, { objective, status: "active" }, gatewayId);
+      setThreadGoalState(response.goal);
+      setGoalDraft("");
+    } catch (error) {
+      if (error instanceof ReauthRequiredError) {
+        const stillPaired = await hasStoredPairing();
+        router.replace(stillPaired ? "/threads" : "/pair");
+        return;
+      }
+      setGoalError(error instanceof Error ? error.message : "Unable to set goal");
+    } finally {
+      setGoalPending(false);
+    }
+  }, [gatewayId, goalDraft, goalPending, threadId]);
+
+  const onClearThreadGoal = useCallback(async () => {
+    if (!threadId || goalPending) {
+      return;
+    }
+
+    setGoalPending(true);
+    setGoalError(null);
+    try {
+      await clearThreadGoal(threadId, gatewayId);
+      setThreadGoalState(null);
+    } catch (error) {
+      if (error instanceof ReauthRequiredError) {
+        const stillPaired = await hasStoredPairing();
+        router.replace(stillPaired ? "/threads" : "/pair");
+        return;
+      }
+      setGoalError(error instanceof Error ? error.message : "Unable to clear goal");
+    } finally {
+      setGoalPending(false);
+    }
+  }, [gatewayId, goalPending, threadId]);
 
   const latestKnownTurnId = useMemo(() => {
     for (let index = turns.length - 1; index >= 0; index -= 1) {
@@ -2380,6 +2511,73 @@ export default function ThreadScreen() {
           />
         {/* <Text className="mb-2 text-[11px] font-semibold uppercase tracking-[1.2px] text-muted-foreground">ID</Text>
         <Text className="mb-3 rounded-xl border border-border/10 bg-muted px-3 py-2 text-xs text-muted-foreground">{threadId}</Text> */}
+
+        <View className="mb-3 rounded-lg border border-border/10 bg-card px-3 py-2">
+          {threadGoal ? (
+            <>
+              <View className="flex-row items-start gap-2">
+                <View className="mt-0.5 h-8 w-8 items-center justify-center rounded-full bg-muted">
+                  <Ionicons name="flag-outline" size={16} color="#e5e7eb" />
+                </View>
+                <View className="min-w-0 flex-1">
+                  <View className="mb-1 flex-row items-center gap-2">
+                    <Text className="text-[11px] font-semibold uppercase tracking-[0.8px] text-muted-foreground">Goal</Text>
+                    <Text className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-semibold text-foreground">
+                      {THREAD_GOAL_STATUS_LABELS[threadGoal.status]}
+                    </Text>
+                  </View>
+                  <Text className="text-sm font-medium leading-5 text-foreground" numberOfLines={3}>
+                    {threadGoal.objective}
+                  </Text>
+                  <Text className="mt-1 text-[11px] text-muted-foreground">
+                    {formatGoalTokens(threadGoal)} / {formatGoalDuration(threadGoal.timeUsedSeconds)}
+                  </Text>
+                </View>
+                <Pressable
+                  onPress={() => {
+                    void onClearThreadGoal();
+                  }}
+                  disabled={goalPending}
+                  className="h-8 w-8 items-center justify-center rounded-full"
+                >
+                  <Ionicons name={goalPending ? "time-outline" : "close"} size={18} color="#94a3b8" />
+                </Pressable>
+              </View>
+              {goalError ? <Text className="mt-2 text-xs text-destructive-foreground">{goalError}</Text> : null}
+            </>
+          ) : (
+            <>
+              <View className="flex-row items-center gap-2">
+                <View className="h-8 w-8 items-center justify-center rounded-full bg-muted">
+                  <Ionicons name="flag-outline" size={16} color="#94a3b8" />
+                </View>
+                <TextInput
+                  value={goalDraft}
+                  onChangeText={setGoalDraft}
+                  placeholder="Set thread goal"
+                  placeholderTextColor="#64748b"
+                  className="min-w-0 flex-1 py-1 text-sm text-foreground"
+                  returnKeyType="done"
+                  onSubmitEditing={() => {
+                    void onSetThreadGoal();
+                  }}
+                />
+                <Pressable
+                  onPress={() => {
+                    void onSetThreadGoal();
+                  }}
+                  disabled={goalPending || goalDraft.trim().length === 0}
+                  className={`h-8 w-8 items-center justify-center rounded-full ${
+                    goalDraft.trim().length > 0 ? "bg-foreground" : "bg-muted"
+                  }`}
+                >
+                  <Ionicons name={goalPending ? "time-outline" : "arrow-forward"} size={16} color={goalDraft.trim().length > 0 ? "#020617" : "#64748b"} />
+                </Pressable>
+              </View>
+              {goalError ? <Text className="mt-2 text-xs text-destructive-foreground">{goalError}</Text> : null}
+            </>
+          )}
+        </View>
 
         {error ? (
           <View className="mb-3 rounded-xl border border-border/10 bg-destructive/15 p-3">

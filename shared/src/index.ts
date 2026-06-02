@@ -153,6 +153,42 @@ export const ThreadNameSetResponseSchema = z.object({
 });
 
 export const CollaborationModeSchema = z.enum(["default", "plan"]);
+export const ThreadGoalStatusSchema = z.enum(["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"]);
+
+export const ThreadGoalSchema = z.object({
+  threadId: z.string().min(1),
+  objective: z.string().min(1),
+  status: ThreadGoalStatusSchema,
+  tokenBudget: z.number().int().positive().nullable(),
+  tokensUsed: z.number().int().min(0),
+  timeUsedSeconds: z.number().min(0),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+});
+
+export const ThreadGoalResponseSchema = z.object({
+  goal: ThreadGoalSchema.nullable(),
+});
+
+export const ThreadGoalSetRequestSchema = z
+  .object({
+    objective: z.string().trim().min(1).max(20_000).optional(),
+    status: ThreadGoalStatusSchema.optional(),
+    tokenBudget: z.number().int().positive().nullable().optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.objective === undefined && value.status === undefined && value.tokenBudget === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "At least one goal field must be provided.",
+        path: ["objective"],
+      });
+    }
+  });
+
+export const ThreadGoalClearResponseSchema = z.object({
+  cleared: z.boolean(),
+});
 
 export const ThreadMessageRequestSchema = z.object({
   text: z.string().optional(),
@@ -334,6 +370,11 @@ export type ThreadCreateRequest = z.infer<typeof ThreadCreateRequestSchema>;
 export type ThreadNameSetRequest = z.infer<typeof ThreadNameSetRequestSchema>;
 export type ThreadNameSetResponse = z.infer<typeof ThreadNameSetResponseSchema>;
 export type CollaborationMode = z.infer<typeof CollaborationModeSchema>;
+export type ThreadGoalStatus = z.infer<typeof ThreadGoalStatusSchema>;
+export type ThreadGoal = z.infer<typeof ThreadGoalSchema>;
+export type ThreadGoalResponse = z.infer<typeof ThreadGoalResponseSchema>;
+export type ThreadGoalSetRequest = z.infer<typeof ThreadGoalSetRequestSchema>;
+export type ThreadGoalClearResponse = z.infer<typeof ThreadGoalClearResponseSchema>;
 export type ThreadMessageRequest = z.infer<typeof ThreadMessageRequestSchema>;
 export type ThreadMessageQueueRequest = z.infer<typeof ThreadMessageQueueRequestSchema>;
 export type ThreadMessageResponse = z.infer<typeof ThreadMessageResponseSchema>;

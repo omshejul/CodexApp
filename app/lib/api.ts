@@ -12,6 +12,10 @@ import {
   ThreadCreateRequest,
   PairClaimRequest,
   PairClaimResponseSchema,
+  type ThreadGoal,
+  ThreadGoalClearResponseSchema,
+  ThreadGoalResponseSchema,
+  type ThreadGoalSetRequest,
   ThreadMessageRequest,
   ThreadMessageResponseSchema,
   type QueuedThreadMessage as SharedQueuedThreadMessage,
@@ -69,6 +73,7 @@ export interface GatewaySummary {
 }
 
 export type QueuedThreadMessage = SharedQueuedThreadMessage;
+export type { ThreadGoal, ThreadGoalSetRequest };
 
 let gatewayStoreCache: GatewayStoreV1 | null = null;
 let gatewayStoreLoaded = false;
@@ -1057,6 +1062,37 @@ export async function resumeThread(threadId: string, gatewayId?: GatewayId) {
     gatewayId
   );
   return ThreadResumeResponseSchema.parse(payload);
+}
+
+export async function getThreadGoal(threadId: string, gatewayId?: GatewayId) {
+  const payload = await authenticatedRequest<unknown>(`/threads/${encodeURIComponent(threadId)}/goal`, {}, gatewayId);
+  return ThreadGoalResponseSchema.parse(payload);
+}
+
+export async function setThreadGoal(threadId: string, request: ThreadGoalSetRequest, gatewayId?: GatewayId) {
+  const payload = await authenticatedRequest<unknown>(
+    `/threads/${encodeURIComponent(threadId)}/goal`,
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
+    },
+    gatewayId
+  );
+  return ThreadGoalResponseSchema.parse(payload);
+}
+
+export async function clearThreadGoal(threadId: string, gatewayId?: GatewayId) {
+  const payload = await authenticatedRequest<unknown>(
+    `/threads/${encodeURIComponent(threadId)}/goal`,
+    {
+      method: "DELETE",
+    },
+    gatewayId
+  );
+  return ThreadGoalClearResponseSchema.parse(payload);
 }
 
 export async function sendThreadMessage(threadId: string, request: ThreadMessageRequest, gatewayId?: GatewayId) {

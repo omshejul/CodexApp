@@ -23,6 +23,8 @@ Most precise source for your exact installed binary version:
 
 Those generated artifacts are version-pinned and are the best source for exact request/response contracts.
 
+This repo was last checked against generated contracts from `codex-cli 0.135.0`.
+
 ---
 
 ## 2) What App Server Is
@@ -43,18 +45,31 @@ What it is not:
 
 ## 3) Transports and Runtime Model
 
-From the official docs and CLI help:
+From the official docs and CLI help for `codex-cli 0.135.0`:
 - `stdio://` (default): newline-delimited JSON (JSONL).
+- `unix://` or `unix://PATH`: local Unix socket.
 - `ws://IP:PORT` (experimental): one JSON-RPC message per WS text frame.
+- `off`: disable listening.
+
+Current `codex app-server` subcommands include `daemon`, `proxy`, `generate-ts`, and `generate-json-schema`. Current CLI options also include `--strict-config`.
 
 Examples:
 ```bash
 # stdio mode (default)
 codex app-server
 
+# unix socket mode
+codex app-server --listen unix:///tmp/codex-app-server.sock
+
 # websocket mode
 codex app-server --listen ws://127.0.0.1:4500
 ```
+
+For non-loopback WebSocket listeners, current CLI help exposes auth flags:
+- `--ws-auth capability-token|signed-bearer-token`
+- `--ws-token-file` / `--ws-token-sha256`
+- `--ws-shared-secret-file`
+- `--ws-issuer`, `--ws-audience`, `--ws-max-clock-skew-seconds`
 
 Important WebSocket behavior (official docs):
 - Request ingress is queue-bounded.
@@ -126,9 +141,17 @@ Granular streamed units within a turn (agent deltas, tool progress, command outp
 - `thread/loaded/list`: list currently loaded in-memory thread ids.
 - `thread/archive`: archive persisted thread log.
 - `thread/unarchive`: restore archived thread.
+- `thread/unsubscribe`: unsubscribe from an active thread.
+- `thread/goal/set`: create or update a durable thread goal.
+- `thread/goal/get`: read the current durable thread goal, if any.
+- `thread/goal/clear`: clear the durable thread goal.
 - `thread/compact/start`: trigger context compaction.
+- `thread/metadata/update`: update thread metadata.
+- `thread/shellCommand`: request a shell command suggestion for a thread.
+- `thread/approveGuardianDeniedAction`: approve a guardian-denied action.
 - `thread/rollback`: rollback thread state.
 - `thread/name/set`: set thread name.
+- `thread/inject_items`: inject thread items.
 
 ### Turn lifecycle
 - `turn/start`: begin generation for user input.
@@ -168,20 +191,34 @@ Documented behavior:
 - Turn-level overrides can become defaults for later turns on that thread.
 - `outputSchema` applies only to current turn.
 
+### Thread and Turn Sandbox Parameters
+
+Generated `codex-cli 0.135.0` contracts use different sandbox fields for thread and turn calls:
+- `thread/start` and `thread/resume` accept `sandbox?: "read-only" | "workspace-write" | "danger-full-access" | null`.
+- `turn/start` accepts `sandboxPolicy?: SandboxPolicy | null`, for example `{ "type": "dangerFullAccess" }`.
+
+Do not send `sandboxPolicy` to `thread/start`; use `sandbox` there.
+
 ### Collaboration Mode and Plan Mode
 
-Generated `v2/TurnStartParams` includes optional:
-- `collaborationMode?: CollaborationMode | null`
-
-Plan mode is represented through `turn/start.params.collaborationMode` (for example `mode: "plan"`), not through a separate `plan-mode` RPC method.
-
-Generated shapes (`codex-cli 0.104.x`) include:
-- `ModeKind = "plan" | "default"`
-- `CollaborationMode = { mode: ModeKind, settings: Settings }`
-- `Settings = { model: string, reasoning_effort: ReasoningEffort | null, developer_instructions: string | null }`
+Generated `v2/TurnStartParams` for `codex-cli 0.135.0` still omits `collaborationMode`, but the runtime accepts `turn/start.params.collaborationMode` when the client initialized with `experimentalApi: true`. This was verified against the installed `0.135.0` binary: sending `{ mode: "plan", settings: { model, reasoning_effort, developer_instructions: null } }` emits `thread/settings/updated` with built-in Plan Mode instructions.
 
 Practical client note:
-- app-level slash commands like `/plan-mode` are client UX controls; they affect subsequent `turn/start` payloads rather than mapping to a standalone app-server method.
+- `plan-mode` is not a standalone client request method in generated app-server contracts.
+- For `0.135.0`, send `turn/start.params.collaborationMode` only with a concrete model value and use `thread/settings/updated.threadSettings.collaborationMode` as the authoritative confirmation.
+
+### Thread Goals
+
+`codex-cli 0.135.0` adds durable thread goal methods:
+- `thread/goal/set` params: `{ threadId, objective?, status?, tokenBudget? }`
+- `thread/goal/get` params: `{ threadId }`
+- `thread/goal/clear` params: `{ threadId }`
+
+Goal shape:
+- `threadId`, `objective`, `status`, `tokenBudget`, `tokensUsed`, `timeUsedSeconds`, `createdAt`, `updatedAt`
+- status values: `active`, `paused`, `blocked`, `usageLimited`, `budgetLimited`, `complete`
+
+Goal changes also stream as `thread/goal/updated` and `thread/goal/cleared`.
 
 `turn/steer` constraints (official docs):
 - must include `expectedTurnId`
@@ -200,14 +237,15 @@ Common event flow for a turn:
 - `item/completed`
 - `turn/completed`
 
-The generated protocol for `codex-cli 0.104.0` includes notifications such as:
-- `thread/started`, `thread/archived`, `thread/unarchived`, `thread/name/updated`, `thread/tokenUsage/updated`, `thread/compacted`
+The generated protocol for `codex-cli 0.135.0` includes notifications such as:
+- `thread/started`, `thread/status/changed`, `thread/archived`, `thread/unarchived`, `thread/closed`, `thread/name/updated`, `thread/goal/updated`, `thread/goal/cleared`, `thread/settings/updated`, `thread/tokenUsage/updated`, `thread/compacted`
 - `turn/started`, `turn/completed`, `turn/diff/updated`, `turn/plan/updated`
 - `item/started`, `item/completed`, `rawResponseItem/completed`
 - `item/agentMessage/delta`, `item/plan/delta`
+- `command/exec/outputDelta`, `process/outputDelta`, `process/exited`
 - `item/commandExecution/outputDelta`, `item/commandExecution/terminalInteraction`
-- `item/fileChange/outputDelta`, `item/mcpToolCall/progress`
-- account/app/config/fuzzy-search warnings and updates
+- `item/fileChange/outputDelta`, `item/fileChange/patchUpdated`, `item/mcpToolCall/progress`
+- MCP, account, app, config, fuzzy-search, realtime, warning, and Windows sandbox updates
 
 ---
 
@@ -219,10 +257,12 @@ Officially documented command/file approval behavior:
 - command decisions: `accept`, `acceptForSession`, `decline`, `cancel`, or amendment object
 - file-change decisions: `accept`, `acceptForSession`, `decline`, `cancel`
 
-Generated server-request methods (`codex-cli 0.104.0`):
+Generated server-request methods (`codex-cli 0.135.0`):
 - `item/commandExecution/requestApproval`
 - `item/fileChange/requestApproval`
 - `item/tool/requestUserInput`
+- `mcpServer/elicitation/request`
+- `item/permissions/requestApproval`
 - `item/tool/call`
 - `account/chatgptAuthTokens/refresh`
 - `applyPatchApproval`
@@ -268,26 +308,31 @@ Authentication modes documented:
 
 ## 13) Legacy Conversation APIs (Compatibility)
 
-Generated protocol still includes older conversation methods in many versions:
-- `newConversation`, `resumeConversation`, `listConversations`, `sendUserMessage`, `sendUserTurn`, etc.
+Generated `codex-cli 0.135.0` contracts no longer include the older conversation mutation methods such as `newConversation`, `resumeConversation`, `sendUserMessage`, or `sendUserTurn`.
 
-Modern integrations should prefer `thread/*` + `turn/*` unless you explicitly target legacy client behavior.
+The remaining compatibility-style methods in the generated client request union are:
+- `getConversationSummary`
+- `gitDiffToRemote`
+- `getAuthStatus`
+
+Modern integrations should use `thread/*` + `turn/*`.
 
 ---
 
-## 14) Full Method Inventory (Generated, `codex-cli 0.104.0`)
+## 14) Full Method Inventory (Generated, `codex-cli 0.135.0`)
 
 ### Client request methods
-`initialize`, `thread/start`, `thread/resume`, `thread/fork`, `thread/archive`, `thread/name/set`, `thread/unarchive`, `thread/compact/start`, `thread/rollback`, `thread/list`, `thread/loaded/list`, `thread/read`, `skills/list`, `skills/remote/list`, `skills/remote/export`, `app/list`, `skills/config/write`, `turn/start`, `turn/steer`, `turn/interrupt`, `review/start`, `model/list`, `experimentalFeature/list`, `mcpServer/oauth/login`, `config/mcpServer/reload`, `mcpServerStatus/list`, `account/login/start`, `account/login/cancel`, `account/logout`, `account/rateLimits/read`, `feedback/upload`, `command/exec`, `config/read`, `config/value/write`, `config/batchWrite`, `configRequirements/read`, `account/read`, `newConversation`, `getConversationSummary`, `listConversations`, `resumeConversation`, `forkConversation`, `archiveConversation`, `sendUserMessage`, `sendUserTurn`, `interruptConversation`, `addConversationListener`, `removeConversationListener`, `gitDiffToRemote`, `loginApiKey`, `loginChatGpt`, `cancelLoginChatGpt`, `logoutChatGpt`, `getAuthStatus`, `getUserSavedConfig`, `setDefaultModel`, `getUserAgent`, `userInfo`, `fuzzyFileSearch`, `execOneOffCommand`.
+`initialize`, `thread/start`, `thread/resume`, `thread/fork`, `thread/archive`, `thread/unsubscribe`, `thread/name/set`, `thread/goal/set`, `thread/goal/get`, `thread/goal/clear`, `thread/metadata/update`, `thread/unarchive`, `thread/compact/start`, `thread/shellCommand`, `thread/approveGuardianDeniedAction`, `thread/rollback`, `thread/list`, `thread/loaded/list`, `thread/read`, `thread/inject_items`, `skills/list`, `hooks/list`, `marketplace/add`, `marketplace/remove`, `marketplace/upgrade`, `plugin/list`, `plugin/installed`, `plugin/read`, `plugin/skill/read`, `plugin/share/save`, `plugin/share/updateTargets`, `plugin/share/list`, `plugin/share/checkout`, `plugin/share/delete`, `app/list`, `fs/readFile`, `fs/writeFile`, `fs/createDirectory`, `fs/getMetadata`, `fs/readDirectory`, `fs/remove`, `fs/copy`, `fs/watch`, `fs/unwatch`, `skills/config/write`, `plugin/install`, `plugin/uninstall`, `turn/start`, `turn/steer`, `turn/interrupt`, `review/start`, `model/list`, `modelProvider/capabilities/read`, `experimentalFeature/list`, `permissionProfile/list`, `experimentalFeature/enablement/set`, `mcpServer/oauth/login`, `config/mcpServer/reload`, `mcpServerStatus/list`, `mcpServer/resource/read`, `mcpServer/tool/call`, `windowsSandbox/setupStart`, `windowsSandbox/readiness`, `account/login/start`, `account/login/cancel`, `account/logout`, `account/rateLimits/read`, `account/sendAddCreditsNudgeEmail`, `feedback/upload`, `command/exec`, `command/exec/write`, `command/exec/terminate`, `command/exec/resize`, `config/read`, `externalAgentConfig/detect`, `externalAgentConfig/import`, `config/value/write`, `config/batchWrite`, `configRequirements/read`, `account/read`, `getConversationSummary`, `gitDiffToRemote`, `getAuthStatus`, `fuzzyFileSearch`.
 
 Note:
-- `plan-mode` is not a standalone client request method in generated app-server contracts; use `turn/start.collaborationMode`.
+- `plan-mode` is not a standalone client request method in generated app-server contracts.
+- `turn/start.collaborationMode` is runtime-supported in `0.135.0`, but still absent from generated `TurnStartParams`; verify through `thread/settings/updated`.
 
 ### Server notification methods
-`error`, `thread/started`, `thread/archived`, `thread/unarchived`, `thread/name/updated`, `thread/tokenUsage/updated`, `turn/started`, `turn/completed`, `turn/diff/updated`, `turn/plan/updated`, `item/started`, `item/completed`, `rawResponseItem/completed`, `item/agentMessage/delta`, `item/plan/delta`, `item/commandExecution/outputDelta`, `item/commandExecution/terminalInteraction`, `item/fileChange/outputDelta`, `item/mcpToolCall/progress`, `mcpServer/oauthLogin/completed`, `account/updated`, `account/rateLimits/updated`, `app/list/updated`, `item/reasoning/summaryTextDelta`, `item/reasoning/summaryPartAdded`, `item/reasoning/textDelta`, `thread/compacted`, `model/rerouted`, `deprecationNotice`, `configWarning`, `fuzzyFileSearch/sessionUpdated`, `fuzzyFileSearch/sessionCompleted`, `windows/worldWritableWarning`, `account/login/completed`, `authStatusChange`, `loginChatGptComplete`, `sessionConfigured`.
+`error`, `thread/started`, `thread/status/changed`, `thread/archived`, `thread/unarchived`, `thread/closed`, `skills/changed`, `thread/name/updated`, `thread/goal/updated`, `thread/goal/cleared`, `thread/settings/updated`, `thread/tokenUsage/updated`, `turn/started`, `hook/started`, `turn/completed`, `hook/completed`, `turn/diff/updated`, `turn/plan/updated`, `item/started`, `item/autoApprovalReview/started`, `item/autoApprovalReview/completed`, `item/completed`, `rawResponseItem/completed`, `item/agentMessage/delta`, `item/plan/delta`, `command/exec/outputDelta`, `process/outputDelta`, `process/exited`, `item/commandExecution/outputDelta`, `item/commandExecution/terminalInteraction`, `item/fileChange/outputDelta`, `item/fileChange/patchUpdated`, `serverRequest/resolved`, `item/mcpToolCall/progress`, `mcpServer/oauthLogin/completed`, `mcpServer/startupStatus/updated`, `account/updated`, `account/rateLimits/updated`, `app/list/updated`, `remoteControl/status/changed`, `externalAgentConfig/import/completed`, `fs/changed`, `item/reasoning/summaryTextDelta`, `item/reasoning/summaryPartAdded`, `item/reasoning/textDelta`, `thread/compacted`, `model/rerouted`, `model/verification`, `warning`, `guardianWarning`, `deprecationNotice`, `configWarning`, `fuzzyFileSearch/sessionUpdated`, `fuzzyFileSearch/sessionCompleted`, `thread/realtime/started`, `thread/realtime/itemAdded`, `thread/realtime/transcript/delta`, `thread/realtime/transcript/done`, `thread/realtime/outputAudio/delta`, `thread/realtime/sdp`, `thread/realtime/error`, `thread/realtime/closed`, `windows/worldWritableWarning`, `windowsSandbox/setupCompleted`, `account/login/completed`.
 
 ### Server-initiated request methods
-`item/commandExecution/requestApproval`, `item/fileChange/requestApproval`, `item/tool/requestUserInput`, `item/tool/call`, `account/chatgptAuthTokens/refresh`, `applyPatchApproval`, `execCommandApproval`.
+`item/commandExecution/requestApproval`, `item/fileChange/requestApproval`, `item/tool/requestUserInput`, `mcpServer/elicitation/request`, `item/permissions/requestApproval`, `item/tool/call`, `account/chatgptAuthTokens/refresh`, `attestation/generate`, `applyPatchApproval`, `execCommandApproval`.
 
 ---
 
@@ -339,6 +384,9 @@ codex app-server --help
 
 # Start stdio server (default)
 codex app-server
+
+# Start unix socket server
+codex app-server --listen unix:///tmp/codex-app-server.sock
 
 # Start websocket server
 codex app-server --listen ws://127.0.0.1:4500
@@ -392,22 +440,34 @@ Read:
 
 Resume:
 ```json
-{"jsonrpc":"2.0","id":4,"method":"thread/resume","params":{"threadId":"<thread-id>","approvalPolicy":"never","persistExtendedHistory":true}}
+{"jsonrpc":"2.0","id":4,"method":"thread/resume","params":{"threadId":"<thread-id>","approvalPolicy":"never","sandbox":"danger-full-access"}}
 ```
 
-### 4. Start a turn
+### 4. Set a goal
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":5,"method":"turn/start","params":{"threadId":"<thread-id>","input":[{"type":"text","text":"Summarize the latest errors","text_elements":[]}],"approvalPolicy":"never","collaborationMode":{"mode":"plan","settings":{"model":"gpt-5.3-codex","reasoning_effort":"high","developer_instructions":null}}}}
+{"jsonrpc":"2.0","id":5,"method":"thread/goal/set","params":{"threadId":"<thread-id>","objective":"Make Linux install and gateway pairing work end to end.","status":"active"}}
 ```
 
 Response:
 ```json
-{"jsonrpc":"2.0","id":5,"result":{"turn":{"id":"<turn-id>","status":"inProgress","items":[],"error":null}}}
+{"jsonrpc":"2.0","id":5,"result":{"goal":{"threadId":"<thread-id>","objective":"Make Linux install and gateway pairing work end to end.","status":"active","tokenBudget":null,"tokensUsed":0,"timeUsedSeconds":0,"createdAt":1780309425,"updatedAt":1780309425}}}
 ```
 
-### 5. Stream notifications
+### 5. Start a plan-mode turn
+
+Request:
+```json
+{"jsonrpc":"2.0","id":6,"method":"turn/start","params":{"threadId":"<thread-id>","input":[{"type":"text","text":"Plan the Linux install flow.","text_elements":[]}],"approvalPolicy":"never","sandboxPolicy":{"type":"dangerFullAccess"},"model":"gpt-5.5","effort":"high","collaborationMode":{"mode":"plan","settings":{"model":"gpt-5.5","reasoning_effort":"high","developer_instructions":null}}}}
+```
+
+Response:
+```json
+{"jsonrpc":"2.0","id":6,"result":{"turn":{"id":"<turn-id>","status":"inProgress","items":[],"error":null}}}
+```
+
+### 6. Stream notifications
 
 Examples you may receive (no `id`):
 ```json
@@ -416,7 +476,7 @@ Examples you may receive (no `id`):
 {"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"<thread-id>","turn":{"id":"<turn-id>","status":"completed"}}}
 ```
 
-### 6. Handle server-initiated approval request
+### 7. Handle server-initiated approval request
 
 Server request example:
 ```json

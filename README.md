@@ -162,6 +162,7 @@ NOTARYTOOL_PROFILE="codex-gateway" \
 ```bash
 curl -fsSL https://raw.githubusercontent.com/omshejul/CodexApp/main/scripts/install-linux-tui.sh | bash
 ```
+The installer bootstraps missing Linux prerequisites where possible, including Bun, Node.js, Codex CLI, and Tailscale.
 - Run from repo root:
 ```bash
 bun run tui:linux

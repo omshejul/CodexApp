@@ -1,4 +1,4 @@
-import { ApiHttpError, type QueuedThreadMessage } from "@/lib/api";
+import { ApiHttpError, type QueuedThreadMessage, type ThreadGoal } from "@/lib/api";
 import { extractDeltaText, type RenderedTurn } from "@/lib/turns";
 import {
   MAX_TRANSIENT_CHANGE_SUMMARY_THREADS,
@@ -161,6 +161,81 @@ export function asRecord(value: unknown): Record<string, unknown> | null {
     return null;
   }
   return value as Record<string, unknown>;
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  return value;
+}
+
+function toThreadGoalStatus(value: unknown): ThreadGoal["status"] | null {
+  if (
+    value === "active" ||
+    value === "paused" ||
+    value === "blocked" ||
+    value === "usageLimited" ||
+    value === "budgetLimited" ||
+    value === "complete"
+  ) {
+    return value;
+  }
+  return null;
+}
+
+export function toThreadGoal(value: unknown): ThreadGoal | null {
+  const outerRecord = asRecord(value);
+  const record = asRecord(outerRecord?.goal) ?? outerRecord;
+  if (!record) {
+    return null;
+  }
+
+  const threadId = firstNonEmptyString(record.threadId, record.thread_id);
+  const objective = firstNonEmptyString(record.objective);
+  const status = toThreadGoalStatus(record.status);
+  const tokenBudgetValue = record.tokenBudget ?? record.token_budget;
+  const tokenBudget = tokenBudgetValue === null || tokenBudgetValue === undefined ? null : toFiniteNumber(tokenBudgetValue);
+  const tokensUsed = toFiniteNumber(record.tokensUsed ?? record.tokens_used);
+  const timeUsedSeconds = toFiniteNumber(record.timeUsedSeconds ?? record.time_used_seconds);
+  const createdAt = toFiniteNumber(record.createdAt ?? record.created_at);
+  const updatedAt = toFiniteNumber(record.updatedAt ?? record.updated_at);
+
+  if (
+    !threadId ||
+    !objective ||
+    !status ||
+    tokensUsed === null ||
+    timeUsedSeconds === null ||
+    createdAt === null ||
+    updatedAt === null
+  ) {
+    return null;
+  }
+
+  return {
+    threadId,
+    objective,
+    status,
+    tokenBudget,
+    tokensUsed,
+    timeUsedSeconds,
+    createdAt,
+    updatedAt,
+  };
+}
+
+export function extractGoalFromEventParams(params: unknown): ThreadGoal | null {
+  const record = asRecord(params);
+  return toThreadGoal(record?.goal);
+}
+
+export function extractCollaborationModeFromSettingsEvent(params: unknown): "default" | "plan" | null {
+  const record = asRecord(params);
+  const settings = asRecord(record?.threadSettings ?? record?.thread_settings);
+  const collaborationMode = asRecord(settings?.collaborationMode ?? settings?.collaboration_mode);
+  const mode = firstNonEmptyString(collaborationMode?.mode);
+  return mode === "default" || mode === "plan" ? mode : null;
 }
 
 export function toQueuedThreadMessageRequest(value: unknown): QueuedThreadMessage["request"] | null {

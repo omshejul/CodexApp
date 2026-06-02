@@ -2,7 +2,7 @@
   "expo": {
     "name": "Codex",
     "slug": "codex-phone",
-    "version": "0.2.9",
+    "version": "0.2.10",
     "orientation": "portrait",
     "scheme": "codex-phone",
     "icon": "./assets/icon.png",
@@ -32,6 +32,7 @@
     },
     "android": {
       "package": "com.codex.phone",
+      "usesCleartextTraffic": true,
       "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
         "foregroundImage": "./assets/icon-android-foreground-v2.png",
@@ -48,6 +49,9 @@
       },
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true
+        },
         "NSUserNotificationUsageDescription": "Allow Codex to notify you when a response finishes.",
         "NSPhotoLibraryUsageDescription": "Allow Codex to access your photos so you can attach images in chat.",
         "NSPhotoLibraryAddUsageDescription": "Allow Codex to save images to your photo library."

@@ -927,7 +927,7 @@ export default function ThreadsScreen() {
                 <View className="flex-row items-center justify-between">
                   <View>
                     <Text className="text-lg font-semibold text-card-foreground">Gateways</Text>
-                    <Text className="mt-1 text-xs text-muted-foreground">Switch, rename, or remove paired Macs.</Text>
+                    <Text className="mt-1 text-xs text-muted-foreground">Switch, rename, or remove paired gateways.</Text>
                   </View>
                   <Pressable
                     className="rounded-xl border border-border/50 bg-muted px-3 py-2"

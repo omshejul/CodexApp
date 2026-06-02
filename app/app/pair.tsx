@@ -100,7 +100,7 @@ export default function PairScreen() {
       >
         <Text className="text-3xl font-semibold text-foreground">Codex Phone</Text>
         <Text className="mt-2 text-base leading-6 text-muted-foreground">
-          Pair once, then your phone connects to your mac threads instantly.
+          Pair once, then your phone connects to your Codex gateway instantly.
         </Text>
 
         {permission?.granted ? (
@@ -122,7 +122,7 @@ export default function PairScreen() {
         ) : (
           <View className="mt-5 rounded-2xl bg-muted p-4">
             <Text className="text-sm text-muted-foreground">
-              This app uses one-time pairing. Your Codex server stays local on your Mac and is only reachable via your own secure Tailscale tunnel.
+              This app uses one-time pairing. Your Codex server stays local on your computer and is only reachable via your own secure Tailscale tunnel.
             </Text>
           </View>
         )}
@@ -135,7 +135,7 @@ export default function PairScreen() {
 
         <View className="mt-auto pb-2">
           <Text className="text-center text-sm text-muted-foreground">
-            Open this on your mac:
+            Open this on your computer:
           </Text>
           <Text className="mt-1 text-center text-base font-semibold text-foreground">http://127.0.0.1:8787/pair</Text>
 
@@ -157,7 +157,7 @@ export default function PairScreen() {
           <View className="w-full rounded-2xl border border-border/50 bg-card p-5">
             <Text className="text-lg font-semibold text-card-foreground">Name this gateway</Text>
             <Text className="mt-1 text-sm text-muted-foreground">
-              Add a nickname so you can switch between multiple Macs.
+              Add a nickname so you can switch between multiple gateways.
             </Text>
             <TextInput
               value={nicknameDraft}
