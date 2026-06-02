@@ -77,12 +77,20 @@ fi
 `
   );
 
-  if (options.includeNpm) {
-    writeExecutable(
-      path.join(mockBinDir, "npm"),
-      `#!/usr/bin/env bash
+  writeExecutable(
+    path.join(mockBinDir, "npm"),
+    `#!/usr/bin/env bash
 set -euo pipefail
 echo "npm $*" >> "$MOCK_LOG_PATH"
+if [[ "$*" == *"rebuild"* ]]; then
+  exit 0
+fi
+if [[ "$*" != *"install -g"* ]]; then
+  exit 0
+fi
+if [[ "${options.includeNpm ? "1" : "0"}" != "1" ]]; then
+  exit 0
+fi
 cat > "${path.join(mockBinDir, "codex")}" <<'CODEX'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -93,8 +101,7 @@ fi
 CODEX
 chmod +x "${path.join(mockBinDir, "codex")}"
 `
-    );
-  }
+  );
 
   writeExecutable(
     path.join(mockBinDir, "tailscale"),

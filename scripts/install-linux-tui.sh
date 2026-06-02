@@ -108,6 +108,7 @@ install_packages_if_possible() {
   have_cmd curl || packages+=("curl")
   have_cmd unzip || packages+=("unzip")
   have_cmd node || packages+=("nodejs")
+  have_cmd npm || packages+=("npm")
 
   if [[ "${#packages[@]}" -eq 0 ]]; then
     return
@@ -262,13 +263,47 @@ rebuild_native_modules_for_node() {
 
   install_native_build_packages_if_possible
 
-  log "Rebuilding better-sqlite3 for the active Node.js runtime..."
-  if npm --prefix "$REPO_DIR/gateway" rebuild better-sqlite3 --build-from-source; then
+  local package_dirs=()
+  local gateway_package="$REPO_DIR/gateway/node_modules/better-sqlite3"
+  if [[ -e "$gateway_package" ]]; then
+    package_dirs+=("$(cd "$(dirname "$gateway_package")" && pwd -P)/$(basename "$gateway_package")")
+  fi
+
+  if [[ -d "$REPO_DIR/node_modules/.bun" ]]; then
+    while IFS= read -r package_dir; do
+      package_dirs+=("$package_dir")
+    done < <(find "$REPO_DIR/node_modules/.bun" -path '*/node_modules/better-sqlite3' -type d 2>/dev/null)
+  fi
+
+  if [[ "${#package_dirs[@]}" -eq 0 ]]; then
+    log "better-sqlite3 package directory not found; skipping native rebuild."
     return
   fi
 
-  log "Workspace rebuild failed; retrying from repository root."
-  npm --prefix "$REPO_DIR" rebuild better-sqlite3 --build-from-source
+  local rebuilt=0
+  local seen=":"
+  for package_dir in "${package_dirs[@]}"; do
+    local real_dir
+    real_dir="$(cd "$package_dir" 2>/dev/null && pwd -P)" || continue
+    if [[ "$seen" == *":$real_dir:"* ]]; then
+      continue
+    fi
+    seen="${seen}${real_dir}:"
+
+    log "Rebuilding better-sqlite3 for active Node.js runtime in $real_dir..."
+    if (cd "$real_dir" && npm_config_build_from_source=true npm rebuild --build-from-source); then
+      rebuilt=1
+    else
+      log "Native rebuild failed in $real_dir."
+    fi
+  done
+
+  if [[ "$rebuilt" -ne 1 ]]; then
+    echo "[codex-gateway-tui] Failed to rebuild better-sqlite3 for Node.js." >&2
+    exit 1
+  fi
+
+  node -e "require(process.argv[1]); console.log('better-sqlite3 native binding loads with', process.version)" "$gateway_package"
 }
 
 log "Installing Codex Gateway Linux TUI..."
