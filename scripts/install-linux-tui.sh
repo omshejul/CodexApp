@@ -186,6 +186,14 @@ maybe_authenticate_tailscale() {
   log "Tailscale is installed but not authenticated. Run: sudo tailscale up"
 }
 
+tailscale_authenticated() {
+  have_cmd tailscale && tailscale status --json >/dev/null 2>&1
+}
+
+systemd_user_available() {
+  have_cmd systemctl && systemctl --user show-environment >/dev/null 2>&1
+}
+
 log "Installing Codex Gateway Linux TUI..."
 
 install_packages_if_possible
@@ -226,6 +234,24 @@ LAUNCHER
 chmod +x "$LAUNCHER_PATH"
 
 log "Installed launcher: $LAUNCHER_PATH"
+
+if [[ "${CODEX_GATEWAY_SKIP_AUTO_START:-0}" == "1" ]]; then
+  log "Skipping automatic gateway repair/start because CODEX_GATEWAY_SKIP_AUTO_START=1."
+elif ! tailscale_authenticated; then
+  log "Skipping automatic gateway repair/start because Tailscale is not authenticated."
+  log "After signing in, run: codex-gateway-tui"
+elif ! systemd_user_available; then
+  log "Skipping automatic gateway repair/start because systemd --user is unavailable."
+  log "Run manually: codex-gateway-tui"
+else
+  log "Repairing gateway setup, configuring Tailscale routing, and starting the service..."
+  if "$LAUNCHER_PATH" --repair-start; then
+    log "Gateway service is started and Tailscale routing is configured."
+  else
+    log "Automatic repair/start did not complete. Run: codex-gateway-tui"
+  fi
+fi
+
 log "Run: codex-gateway-tui"
 
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
