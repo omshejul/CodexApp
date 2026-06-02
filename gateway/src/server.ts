@@ -1689,10 +1689,17 @@ function isCodexDisconnectedError(error: unknown): boolean {
     return false;
   }
   const message = error.message.toLowerCase();
+  const code =
+    typeof error === "object" && error && "code" in error ? String((error as NodeJS.ErrnoException).code) : "";
   return (
     message.includes("codex app-server is not connected") ||
     message.includes("connection closed") ||
-    message.includes("json-rpc timeout")
+    message.includes("json-rpc timeout") ||
+    message.includes("econnrefused") ||
+    message.includes("econnreset") ||
+    message.includes("socket hang up") ||
+    code === "ECONNREFUSED" ||
+    code === "ECONNRESET"
   );
 }
 
@@ -1725,6 +1732,7 @@ async function checkCodexReachableWithRecovery(reason: string): Promise<{ reacha
       });
 
       try {
+        await ensureCodexAppServerRunning();
         await codex.reconnect();
       } catch (reconnectError) {
         const reconnectErrorMessage = errorMessageOrUnknown(reconnectError);
