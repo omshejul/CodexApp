@@ -42,6 +42,66 @@ require_cmd() {
   fi
 }
 
+install_native_build_packages_if_possible() {
+  if ! have_cmd npm; then
+    return
+  fi
+
+  local needs_python=0
+  local needs_make=0
+  local needs_cxx=0
+  have_cmd python3 || needs_python=1
+  have_cmd make || needs_make=1
+  have_cmd g++ || needs_cxx=1
+
+  if [[ "$needs_python" -eq 0 && "$needs_make" -eq 0 && "$needs_cxx" -eq 0 ]]; then
+    return
+  fi
+
+  local packages=()
+
+  if have_cmd apt-get; then
+    [[ "$needs_python" -eq 1 ]] && packages+=("python3")
+    [[ "$needs_make" -eq 1 ]] && packages+=("make")
+    [[ "$needs_cxx" -eq 1 ]] && packages+=("g++")
+    log "Installing native module build tools: ${packages[*]}"
+    as_root apt-get update
+    as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
+  elif have_cmd dnf; then
+    [[ "$needs_python" -eq 1 ]] && packages+=("python3")
+    [[ "$needs_make" -eq 1 ]] && packages+=("make")
+    [[ "$needs_cxx" -eq 1 ]] && packages+=("gcc-c++")
+    log "Installing native module build tools: ${packages[*]}"
+    as_root dnf install -y "${packages[@]}"
+  elif have_cmd yum; then
+    [[ "$needs_python" -eq 1 ]] && packages+=("python3")
+    [[ "$needs_make" -eq 1 ]] && packages+=("make")
+    [[ "$needs_cxx" -eq 1 ]] && packages+=("gcc-c++")
+    log "Installing native module build tools: ${packages[*]}"
+    as_root yum install -y "${packages[@]}"
+  elif have_cmd zypper; then
+    [[ "$needs_python" -eq 1 ]] && packages+=("python3")
+    [[ "$needs_make" -eq 1 ]] && packages+=("make")
+    [[ "$needs_cxx" -eq 1 ]] && packages+=("gcc-c++")
+    log "Installing native module build tools: ${packages[*]}"
+    as_root zypper --non-interactive install "${packages[@]}"
+  elif have_cmd pacman; then
+    [[ "$needs_python" -eq 1 ]] && packages+=("python")
+    [[ "$needs_make" -eq 1 ]] && packages+=("make")
+    [[ "$needs_cxx" -eq 1 ]] && packages+=("gcc")
+    log "Installing native module build tools: ${packages[*]}"
+    as_root pacman -Sy --noconfirm --needed "${packages[@]}"
+  elif have_cmd apk; then
+    [[ "$needs_python" -eq 1 ]] && packages+=("python3")
+    [[ "$needs_make" -eq 1 ]] && packages+=("make")
+    [[ "$needs_cxx" -eq 1 ]] && packages+=("g++")
+    log "Installing native module build tools: ${packages[*]}"
+    as_root apk add --no-cache "${packages[@]}"
+  else
+    log "Could not auto-install native build tools; npm rebuild may fail if they are missing."
+  fi
+}
+
 install_packages_if_possible() {
   local packages=()
   have_cmd git || packages+=("git")
@@ -194,6 +254,23 @@ systemd_user_available() {
   have_cmd systemctl && systemctl --user show-environment >/dev/null 2>&1
 }
 
+rebuild_native_modules_for_node() {
+  if ! have_cmd npm; then
+    log "npm not found; skipping Node native module rebuild."
+    return
+  fi
+
+  install_native_build_packages_if_possible
+
+  log "Rebuilding better-sqlite3 for the active Node.js runtime..."
+  if npm --prefix "$REPO_DIR/gateway" rebuild better-sqlite3 --build-from-source; then
+    return
+  fi
+
+  log "Workspace rebuild failed; retrying from repository root."
+  npm --prefix "$REPO_DIR" rebuild better-sqlite3 --build-from-source
+}
+
 log "Installing Codex Gateway Linux TUI..."
 
 install_packages_if_possible
@@ -222,6 +299,7 @@ fi
 
 log "Installing dependencies and building gateway runtime..."
 bun install --cwd "$REPO_DIR"
+rebuild_native_modules_for_node
 bun run --cwd "$REPO_DIR" build:shared
 bun run --cwd "$REPO_DIR" build:gateway
 
